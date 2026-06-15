@@ -1,0 +1,219 @@
+import json
+from pathlib import Path
+
+from multi_agent.evaluation import WorkflowEvaluation
+
+
+class StepClock:
+    def __init__(self, values: list[float]) -> None:
+        self._values = list(values)
+
+    def __call__(self) -> float:
+        if not self._values:
+            raise AssertionError("测试时钟已没有可用时间点。")
+        return self._values.pop(0)
+
+
+def _expected_outputs(base_dir: Path) -> dict[str, Path]:
+    artifacts_dir = base_dir / "artifacts"
+    return {
+        "market_intelligence_task": artifacts_dir / "01_market_intelligence.md",
+        "filing_review_task": artifacts_dir / "02_filing_review.md",
+        "financial_analysis_task": artifacts_dir / "03_financial_analysis.md",
+    }
+
+
+def test_workflow_evaluation_writes_latest_metrics_and_summary(tmp_path: Path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    expected_outputs = _expected_outputs(tmp_path)
+    for path in expected_outputs.values():
+        path.write_text("# artifact\n", encoding="utf-8")
+
+    final_report = tmp_path / "report.md"
+    final_report.write_text(
+        "结论参考 https://example.com/a 和 https://example.com/b",
+        encoding="utf-8",
+    )
+
+    evaluator = WorkflowEvaluation(
+        artifacts_dir=artifacts_dir,
+        final_report_path=final_report,
+        expected_task_outputs=expected_outputs,
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        time_source=StepClock([0.0, 1.5, 3.0, 5.5, 7.0]),
+    )
+    evaluator.start()
+    initial_metrics = json.loads((artifacts_dir / "latest_run_metrics.json").read_text(encoding="utf-8"))
+    assert initial_metrics["status"] == "running"
+    assert initial_metrics["success"] is False
+    assert initial_metrics["report_generated"] is False
+    assert initial_metrics["error_message"] is None
+    evaluator.record_api_call(service_name="Google Search", success=True, status_code=200)
+    evaluator.record_api_call(service_name="SEC API", success=False, status_code=403)
+    evaluator.record_task_completion("market_intelligence_task")
+    evaluator.record_task_completion("filing_review_task")
+    evaluator.record_task_completion("financial_analysis_task")
+    evaluator.record_financial_fields(
+        {
+            "revenue": {
+                "value": 100.0,
+                "normalized_value": 100.0,
+                "extracted": True,
+                "source_tag": "Revenues",
+            },
+            "current_assets": {
+                "value": 0.0,
+                "normalized_value": 0.0,
+                "extracted": False,
+                "source_tag": None,
+            },
+        }
+    )
+
+    latest_metrics = evaluator.finalize(success=True)
+
+    assert latest_metrics["success"] is True
+    assert latest_metrics["status"] == "completed"
+    assert latest_metrics["total_runtime_seconds"] == 7.0
+    assert latest_metrics["task_durations_seconds"] == {
+        "market_intelligence_task": 1.5,
+        "filing_review_task": 1.5,
+        "financial_analysis_task": 2.5,
+    }
+    assert latest_metrics["api_calls"]["total"] == 2
+    assert latest_metrics["api_calls"]["failures"] == 1
+    assert latest_metrics["api_calls"]["failure_rate"] == 0.5
+    assert latest_metrics["report_generated"] is True
+    assert latest_metrics["report_complete"] is True
+    assert latest_metrics["citation_count"] == 2
+    assert latest_metrics["intermediate_artifacts_complete"] is True
+    assert latest_metrics["financial_fields_success_rate"] == 0.5
+    assert latest_metrics["financial_fields"]["revenue"]["extracted"] is True
+    assert latest_metrics["financial_fields"]["current_assets"]["extracted"] is False
+
+    latest_report_path = artifacts_dir / "latest_run_metrics.json"
+    summary_path = artifacts_dir / "evaluation_summary.json"
+    assert latest_report_path.exists()
+    assert summary_path.exists()
+
+    written_latest = json.loads(latest_report_path.read_text(encoding="utf-8"))
+    written_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert written_latest["company_ticker"] == "AAPL"
+    assert written_summary["total_runs"] == 1
+    assert written_summary["successful_runs"] == 1
+    assert written_summary["success_rate"] == 1.0
+    assert written_summary["api_calls"]["total"] == 2
+    assert written_summary["api_calls"]["failures"] == 1
+    assert written_summary["api_calls"]["failure_rate"] == 0.5
+
+
+def test_workflow_evaluation_accumulates_summary_across_success_and_failure_runs(tmp_path: Path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    expected_outputs = _expected_outputs(tmp_path)
+    for path in expected_outputs.values():
+        path.write_text("# artifact\n", encoding="utf-8")
+
+    success_report = tmp_path / "success_report.md"
+    success_report.write_text("参考 https://example.com/a", encoding="utf-8")
+    success_run = WorkflowEvaluation(
+        artifacts_dir=artifacts_dir,
+        final_report_path=success_report,
+        expected_task_outputs=expected_outputs,
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        time_source=StepClock([0.0, 1.0]),
+    )
+    success_run.start()
+    success_run.record_api_call(service_name="Google Search", success=True, status_code=200)
+    success_run.finalize(success=True)
+
+    failure_report = tmp_path / "failure_report.md"
+    failure_run = WorkflowEvaluation(
+        artifacts_dir=artifacts_dir,
+        final_report_path=failure_report,
+        expected_task_outputs=expected_outputs,
+        company_name="Alibaba Group Holding Ltd",
+        company_ticker="BABA",
+        time_source=StepClock([0.0, 2.0]),
+    )
+    failure_run.start()
+    failure_run.record_api_call(service_name="SEC API", success=False, status_code=429)
+    latest_metrics = failure_run.finalize(success=False, error_message="SEC API 返回 429")
+
+    summary_path = artifacts_dir / "evaluation_summary.json"
+    written_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert latest_metrics["success"] is False
+    assert latest_metrics["status"] == "failed"
+    assert latest_metrics["error_message"] == "SEC API 返回 429"
+    assert latest_metrics["report_generated"] is False
+    assert latest_metrics["report_complete"] is False
+    assert written_summary["total_runs"] == 2
+    assert written_summary["successful_runs"] == 1
+    assert written_summary["success_rate"] == 0.5
+    assert written_summary["api_calls"]["total"] == 2
+    assert written_summary["api_calls"]["failures"] == 1
+    assert written_summary["api_calls"]["failure_rate"] == 0.5
+
+
+def test_workflow_evaluation_start_writes_running_placeholder_metrics(tmp_path: Path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    final_report = tmp_path / "report.md"
+    evaluator = WorkflowEvaluation(
+        artifacts_dir=artifacts_dir,
+        final_report_path=final_report,
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        time_source=StepClock([0.0]),
+    )
+
+    evaluator.start()
+
+    latest_metrics = json.loads((artifacts_dir / "latest_run_metrics.json").read_text(encoding="utf-8"))
+    assert latest_metrics["status"] == "running"
+    assert latest_metrics["success"] is False
+    assert latest_metrics["company_name"] == "Apple Inc."
+    assert latest_metrics["company_ticker"] == "AAPL"
+    assert latest_metrics["report_generated"] is False
+
+
+def test_workflow_evaluation_remains_stable_across_repeated_runs(tmp_path: Path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+
+    total_runs = 25
+    expected_successes = 0
+    expected_failures = 0
+    for index in range(total_runs):
+        report_path = tmp_path / f"report_{index}.md"
+        report_path.write_text("参考 https://example.com/item", encoding="utf-8")
+        evaluator = WorkflowEvaluation(
+            artifacts_dir=artifacts_dir,
+            final_report_path=report_path,
+            expected_task_outputs={},
+            company_name=f"Company {index}",
+            company_ticker=f"T{index}",
+            time_source=StepClock([0.0, 0.5]),
+        )
+        evaluator.start()
+        is_success = index % 4 != 0
+        api_success = index % 5 != 0
+        expected_successes += 1 if is_success else 0
+        expected_failures += 0 if api_success else 1
+        evaluator.record_api_call(
+            service_name="Synthetic API",
+            success=api_success,
+            status_code=200 if api_success else 500,
+        )
+        evaluator.finalize(success=is_success, error_message=None if is_success else "synthetic failure")
+
+    written_summary = json.loads((artifacts_dir / "evaluation_summary.json").read_text(encoding="utf-8"))
+    assert written_summary["total_runs"] == total_runs
+    assert written_summary["successful_runs"] == expected_successes
+    assert written_summary["success_rate"] == round(expected_successes / total_runs, 3)
+    assert written_summary["api_calls"]["total"] == total_runs
+    assert written_summary["api_calls"]["failures"] == expected_failures
+    assert written_summary["api_calls"]["failure_rate"] == round(expected_failures / total_runs, 3)

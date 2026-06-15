@@ -1,0 +1,54 @@
+erDiagram
+    MAIN {
+        string cli_entry
+        string company_name
+        string company_ticker
+    }
+
+    SETTINGS {
+        string model
+        string openai_base_url
+        string search_provider
+        string sec_api_key
+        string sec_api_email
+        string local_filing_pdf_path
+    }
+
+    CREW {
+        string name
+        string process
+        string output_log_file
+    }
+
+    AGENT {
+        string role
+        string goal
+        string llm
+    }
+
+    TASK {
+        string name
+        string output_file
+        string expected_output
+    }
+
+    TOOL {
+        string name
+        string category
+    }
+
+    ARTIFACT {
+        string name
+        string type
+        string produced_by
+    }
+
+    MAIN ||--|| SETTINGS : loads
+    MAIN ||--|| CREW : kicks_off
+    SETTINGS ||--|| CREW : configures
+    CREW ||--o{ AGENT : orchestrates
+    CREW ||--o{ TASK : schedules
+    AGENT }o--o{ TOOL : uses
+    TASK }o--|| AGENT : assigned_to
+    TASK ||--o{ ARTIFACT : writes
+    TASK }o--o{ TASK : depends_on

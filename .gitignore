@@ -1,0 +1,6 @@
+.env
+.crewai_home/
+__pycache__/
+.DS_Store
+artifacts/
+report.md
