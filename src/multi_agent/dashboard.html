@@ -5,235 +5,999 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Investment Research Dashboard</title>
     <style>
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        margin: 0;
-        background: #0b1020;
-        color: #e5e7eb;
+      @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap");
+
+      :root {
+        color-scheme: dark;
+        --bg: #060914;
+        --panel: rgba(8, 12, 24, 0.82);
+        --panel-strong: rgba(10, 15, 28, 0.92);
+        --panel-border: rgba(148, 163, 184, 0.14);
+        --text: #f8fafc;
+        --muted: #8ea0bc;
+        --muted-strong: #d9e2f2;
+        --primary: #60a5fa;
+        --success: #22c55e;
+        --danger: #f87171;
+        --pending: #cbd5e1;
+        --shadow: 0 30px 80px rgba(2, 6, 23, 0.48);
+        --radius-xl: 32px;
+        --radius-lg: 24px;
+        --radius-md: 18px;
       }
-      main {
-        max-width: 980px;
-        margin: 0 auto;
-        padding: 32px 20px 48px;
-      }
-      h1 {
-        margin: 0 0 8px;
-        font-size: 32px;
-      }
-      p {
-        color: #94a3b8;
-      }
-      form,
-      .panel {
-        background: rgba(15, 23, 42, 0.9);
-        border: 1px solid rgba(148, 163, 184, 0.2);
-        border-radius: 16px;
-        padding: 20px;
-        margin-top: 20px;
-      }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 12px;
-      }
-      input,
-      button {
-        width: 100%;
+
+      * {
         box-sizing: border-box;
-        border-radius: 10px;
-        border: 1px solid rgba(148, 163, 184, 0.3);
-        padding: 12px 14px;
-        font-size: 14px;
       }
-      input {
-        background: #020617;
-        color: #e5e7eb;
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Manrope", sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at top left, rgba(59, 130, 246, 0.14), transparent 28%),
+          radial-gradient(circle at 82% 0%, rgba(167, 139, 250, 0.14), transparent 22%),
+          linear-gradient(180deg, #04060f 0%, #070b15 50%, #05070f 100%);
       }
-      button {
-        background: #2563eb;
-        color: white;
-        cursor: pointer;
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
+        background-size: 28px 28px;
+        mask-image: linear-gradient(180deg, rgba(255, 255, 255, 0.28), transparent 78%);
+        pointer-events: none;
       }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 16px;
-      }
-      th,
-      td {
-        text-align: left;
-        padding: 10px 8px;
-        border-bottom: 1px solid rgba(148, 163, 184, 0.15);
-      }
-      .muted {
-        color: #94a3b8;
-      }
-      .jobs-table tbody tr {
-        cursor: pointer;
-      }
-      .jobs-table tbody tr:hover {
-        background: rgba(37, 99, 235, 0.12);
-      }
-      .detail-grid {
+
+      main {
+        position: relative;
+        z-index: 1;
+        width: min(1360px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 30px 0 54px;
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 18px;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      .hero-shell,
+      .panel,
+      .sidebar-card {
+        background: var(--panel);
+        border: 1px solid var(--panel-border);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+      }
+
+      .hero-shell {
+        border-radius: var(--radius-xl);
+        padding: 28px;
+      }
+
+      .panel,
+      .sidebar-card {
+        border-radius: var(--radius-lg);
+        padding: 20px;
+      }
+
+      .eyebrow,
+      .status-pill,
+      .tag,
+      .summary-chip {
+        border-radius: 999px;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #dbeafe;
+        border: 1px solid rgba(96, 165, 250, 0.18);
+        background: rgba(15, 23, 42, 0.7);
+      }
+
+      .eyebrow::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: linear-gradient(180deg, #7dd3fc, #2563eb);
+        box-shadow: 0 0 14px rgba(96, 165, 250, 0.8);
+      }
+
+      h1 {
+        margin-top: 18px;
+        max-width: 820px;
+        font-family: "Fraunces", serif;
+        font-size: clamp(2.5rem, 4vw, 4.2rem);
+        line-height: 1.03;
+        letter-spacing: -0.04em;
+      }
+
+      .hero-copy {
+        margin-top: 14px;
+        max-width: 700px;
+        color: var(--muted-strong);
+        line-height: 1.78;
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.95fr);
+        gap: 18px;
+        margin-top: 24px;
+      }
+
+      .section-title {
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .muted {
+        color: var(--muted);
+        line-height: 1.7;
+      }
+
+      .input-shell {
+        display: grid;
+        gap: 14px;
+        padding: 18px;
+        border-radius: 22px;
+        background: rgba(3, 7, 18, 0.84);
+        border: 1px solid rgba(148, 163, 184, 0.16);
+      }
+
+      .input-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
         gap: 12px;
-        margin-top: 16px;
       }
-      .detail-card {
-        background: #020617;
-        border: 1px solid rgba(148, 163, 184, 0.15);
-        border-radius: 12px;
-        padding: 14px;
+
+      .company-input {
+        width: 100%;
+        padding: 17px 18px;
+        border-radius: 18px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        background: rgba(15, 23, 42, 0.72);
+        color: var(--text);
+        font: inherit;
+        transition: border-color 180ms ease, box-shadow 180ms ease;
       }
-      .artifact-list {
+
+      .company-input:focus {
+        outline: none;
+        border-color: rgba(96, 165, 250, 0.6);
+        box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.14);
+      }
+
+      .cta-button,
+      .accordion-toggle {
+        border: none;
+        cursor: pointer;
+        font: inherit;
+      }
+
+      .cta-button {
+        min-width: 156px;
+        padding: 16px 20px;
+        border-radius: 18px;
+        background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+        color: #fff;
+        font-weight: 800;
+      }
+
+      .cta-button:disabled {
+        opacity: 0.72;
+        cursor: wait;
+      }
+
+      .submit-feedback {
+        min-height: 22px;
+        color: #bfdbfe;
+        font-size: 0.92rem;
+      }
+
+      .resolution-display {
+        display: grid;
+        gap: 14px;
+      }
+
+      .resolved-headline,
+      .metric-card,
+      .job-card,
+      .timeline-step,
+      .detail-box,
+      .artifact-card {
+        border-radius: 18px;
+        background: rgba(15, 23, 42, 0.62);
+        border: 1px solid rgba(148, 163, 184, 0.12);
+      }
+
+      .resolved-headline {
+        padding: 18px;
+        background: linear-gradient(180deg, rgba(8, 12, 24, 0.96), rgba(2, 6, 18, 0.96));
+        border-color: rgba(96, 165, 250, 0.14);
+      }
+
+      .resolved-headline .name {
+        margin-top: 10px;
+        font-size: 1.85rem;
+        font-weight: 800;
+      }
+
+      .resolved-headline .ticker {
+        margin-top: 4px;
+        color: #93c5fd;
+        font-size: 1.1rem;
+      }
+
+      .tag-row,
+      .summary-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .tag,
+      .summary-chip {
+        padding: 8px 11px;
+        background: rgba(15, 23, 42, 0.72);
+        border: 1px solid rgba(148, 163, 184, 0.14);
+        color: #dbeafe;
+        font-size: 0.82rem;
+      }
+
+      .metric-card {
+        padding: 16px;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: 320px minmax(0, 1fr);
+        gap: 18px;
+      }
+
+      .sidebar-stack,
+      .content-stack {
+        display: grid;
+        gap: 18px;
+      }
+
+      .jobs-list,
+      .artifacts-list {
         list-style: none;
         padding: 0;
         margin: 0;
         display: grid;
         gap: 10px;
       }
-      .artifact-list a {
-        color: #93c5fd;
-        text-decoration: none;
+
+      .job-card {
+        padding: 14px;
+        cursor: pointer;
       }
-      .artifact-list li {
-        background: #020617;
-        border: 1px solid rgba(148, 163, 184, 0.15);
-        border-radius: 12px;
-        padding: 12px 14px;
+
+      .job-card[data-selected="true"] {
+        background: linear-gradient(180deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.96));
+        border-color: rgba(96, 165, 250, 0.42);
+      }
+
+      .job-card-header,
+      .section-header,
+      .panel-header,
+      .artifact-card {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .job-card-title {
+        font-size: 1rem;
+        font-weight: 700;
+      }
+
+      .job-card-meta {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 0.86rem;
+        line-height: 1.55;
+      }
+
+      .status-pill {
+        padding: 8px 11px;
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+
+      .status-completed {
+        color: #d1fae5;
+        background: rgba(34, 197, 94, 0.12);
+      }
+
+      .status-running {
+        color: #dbeafe;
+        background: rgba(59, 130, 246, 0.14);
+      }
+
+      .status-pending {
+        color: #e2e8f0;
+        background: rgba(148, 163, 184, 0.12);
+      }
+
+      .status-failed {
+        color: #fee2e2;
+        background: rgba(248, 113, 113, 0.14);
+      }
+
+      .timeline {
+        display: grid;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      .timeline-step {
+        display: grid;
+        grid-template-columns: 30px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 14px;
+        padding: 13px 14px;
+      }
+
+      .timeline-index {
+        width: 30px;
+        height: 30px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 800;
+        color: #dbeafe;
+        background: linear-gradient(180deg, rgba(59, 130, 246, 0.28), rgba(15, 23, 42, 0.7));
+        border: 1px solid rgba(96, 165, 250, 0.28);
+      }
+
+      .timeline-content strong {
+        display: block;
+        font-size: 0.98rem;
+      }
+
+      .timeline-content span {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 0.9rem;
+        line-height: 1.6;
+      }
+
+      .detail-grid {
+        display: grid;
+        grid-template-columns: 1.25fr 0.95fr;
+        gap: 18px;
+      }
+
+      .accordion {
+        display: grid;
+        gap: 12px;
+      }
+
+      .accordion-item {
+        border-radius: 20px;
+        overflow: hidden;
+        border: 1px solid rgba(148, 163, 184, 0.14);
+        background: var(--panel-strong);
+      }
+
+      .accordion-toggle {
+        width: 100%;
+        padding: 16px 18px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        background: transparent;
+        color: inherit;
+        text-align: left;
+      }
+
+      .accordion-toggle span:last-child {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .accordion-body {
+        padding: 0 18px 18px;
+      }
+
+      .accordion-body[hidden] {
+        display: none;
+      }
+
+      .detail-box {
+        padding: 14px;
+      }
+
+      .detail-box ul {
+        margin: 8px 0 0;
+        padding-left: 18px;
+        color: var(--muted-strong);
+        line-height: 1.75;
+      }
+
+      .artifact-card {
+        padding: 14px;
+      }
+
+      .artifact-link {
+        color: #bfdbfe;
+        text-decoration: none;
+        font-weight: 700;
+      }
+
+      .artifact-link:hover {
+        text-decoration: underline;
+      }
+
+      .empty-state {
+        padding: 16px;
+        border-radius: 18px;
+        color: var(--muted);
+        background: rgba(15, 23, 42, 0.52);
+        border: 1px dashed rgba(148, 163, 184, 0.16);
+      }
+
+      .inline-note {
+        color: #bfdbfe;
+        font-size: 0.9rem;
+        line-height: 1.7;
+      }
+
+      @media (max-width: 1120px) {
+        .hero-grid,
+        .workspace,
+        .detail-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 720px) {
+        main {
+          width: min(100vw - 18px, 1360px);
+          padding-top: 14px;
+        }
+
+        .hero-shell,
+        .panel,
+        .sidebar-card {
+          padding: 16px;
+          border-radius: 22px;
+        }
+
+        .input-row {
+          grid-template-columns: 1fr;
+        }
+
+        .cta-button {
+          width: 100%;
+        }
+
+        .timeline-step,
+        .artifact-card {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
   <body>
     <main>
-      <h1>Investment Research Dashboard</h1>
-      <p>提交公司研究任务，查看后台执行状态，并快速定位输出产物。</p>
+      <section class="hero-shell">
+        <div class="eyebrow">Narrative Research Console</div>
+        <h1>Investment Research Dashboard</h1>
+        <p class="hero-copy">
+          输入自然语言公司名称即可开始研究。系统会自动完成公司校正、Ticker 标准化、研究阶段追踪与产物生成，让你先看到清晰过程，再按需展开技术细节。
+        </p>
 
-      <form id="job-form">
-        <div class="grid">
-          <input id="company_name" name="company_name" placeholder="公司名称，例如 Apple Inc." required />
-          <input id="company_ticker" name="company_ticker" placeholder="Ticker，例如 AAPL" />
-          <button type="submit">提交研究任务</button>
+        <div class="hero-grid">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <div class="section-title">开始研究</div>
+                <p class="muted">用户只需要输入公司名称，不需要自己填写 ticker。</p>
+              </div>
+            </div>
+            <form id="job-form" class="input-shell">
+              <div>
+                <strong>公司名称输入</strong>
+                <p class="muted" style="margin-top: 6px;">支持中文别名、英文全称、模糊自然输入，例如 苹果、谷歌、Apple Inc.</p>
+              </div>
+              <div class="input-row">
+                <input
+                  id="company_name"
+                  class="company-input"
+                  name="company_name"
+                  placeholder="输入公司名称，例如 苹果、谷歌、Apple Inc."
+                  required
+                />
+                <button id="submit-button" class="cta-button" type="submit">开始研究</button>
+              </div>
+              <div id="submit-feedback" class="submit-feedback"></div>
+            </form>
+          </section>
+
+          <aside class="sidebar-card resolution-display">
+            <div class="section-title">自动校正结果</div>
+            <div class="resolved-headline">
+              <div class="muted">等待任务启动</div>
+              <div id="resolved-name" class="name">尚未开始研究</div>
+              <div id="resolved-ticker" class="ticker">Ticker 会在解析后显示</div>
+              <div id="resolution-tags" class="tag-row" style="margin-top: 14px;">
+                <span class="tag">支持别名命中</span>
+                <span class="tag">支持官方目录匹配</span>
+                <span class="tag">支持小模型兜底</span>
+              </div>
+            </div>
+            <div class="metric-card">
+              <div class="section-title">当前任务摘要</div>
+              <strong id="headline-status" style="display:block;margin-top:8px;">尚未选择任务</strong>
+              <p id="headline-copy" class="muted" style="margin-top: 8px;">提交任务后，会在这里展示当前研究进度与解析说明。</p>
+            </div>
+          </aside>
         </div>
-      </form>
+      </section>
 
-      <section class="panel">
-        <div class="grid">
-          <div>
-            <strong>最近任务</strong>
-            <div class="muted">状态会自动刷新</div>
+      <div class="workspace">
+        <aside class="sidebar-stack">
+          <section class="sidebar-card">
+            <div class="section-header">
+              <div>
+                <div class="section-title">最近任务</div>
+                <p class="muted">点击查看当前研究状态和产物。</p>
+              </div>
+            </div>
+            <ul id="jobs" class="jobs-list">
+              <li class="empty-state">正在加载任务列表...</li>
+            </ul>
+          </section>
+        </aside>
+
+        <div class="content-stack">
+          <section class="panel">
+            <div class="section-header">
+              <div>
+                <div class="section-title">研究进度叙事</div>
+                <p class="muted">默认只展示用户可读过程，避免一上来就看到工程日志。</p>
+              </div>
+              <div id="selected-job-status" class="status-pill status-pending">尚未选择任务</div>
+            </div>
+            <div id="selected-summary" class="summary-strip">
+              <div class="summary-chip">提交任务后显示阶段摘要</div>
+            </div>
+            <div id="timeline" class="timeline">
+              <div class="empty-state">任务开始后，这里会按阶段展示输入校正、市场搜索、SEC 文件复核、财务分析和报告生成进度。</div>
+            </div>
+          </section>
+
+          <div class="detail-grid">
+            <section class="panel">
+              <div class="section-header">
+                <div>
+                  <div class="section-title">展开技术细节</div>
+                  <p class="muted">默认折叠，避免打扰普通用户；需要时再展开查看解析轨迹和 agent / tool 细节。</p>
+                </div>
+              </div>
+
+              <div class="accordion">
+                <div class="accordion-item">
+                  <button class="accordion-toggle" type="button" data-accordion="resolution">
+                    <span>解析轨迹</span>
+                    <span>查看别名命中、官方目录匹配、小模型兜底</span>
+                  </button>
+                  <div id="accordion-resolution" class="accordion-body" hidden>
+                    <div class="detail-box">
+                      <strong>解析步骤</strong>
+                      <ul id="resolution-steps">
+                        <li>尚未生成解析轨迹</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="accordion-item">
+                  <button class="accordion-toggle" type="button" data-accordion="agents">
+                    <span>Agent / Tool 轨迹</span>
+                    <span>查看每个阶段对应的 agent 与工具</span>
+                  </button>
+                  <div id="accordion-agents" class="accordion-body" hidden>
+                    <div id="agent-tool-details" class="detail-box">
+                      <strong>技术轨迹</strong>
+                      <ul>
+                        <li>尚未生成技术轨迹</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="accordion-item">
+                  <button class="accordion-toggle" type="button" data-accordion="errors">
+                    <span>错误与诊断</span>
+                    <span>失败时展示结构化摘要，而不是直接丢出堆栈</span>
+                  </button>
+                  <div id="accordion-errors" class="accordion-body" hidden>
+                    <div id="error-box" class="detail-box">
+                      <strong>当前无错误</strong>
+                      <p class="muted" style="margin-top: 8px;">如果任务失败，这里会展示结构化错误摘要和相关阶段。</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="section-header">
+                <div>
+                  <div class="section-title">产物列表</div>
+                  <p class="muted">报告、结构化输出和评估文件会在这里集中展示。</p>
+                </div>
+              </div>
+              <div id="report-link" class="inline-note" style="margin-bottom: 14px;">选择任务后可查看最终报告入口。</div>
+              <ul id="artifacts" class="artifacts-list">
+                <li class="empty-state">选择任务后显示稳定产物。</li>
+              </ul>
+            </section>
           </div>
         </div>
-        <table class="jobs-table">
-          <thead>
-            <tr>
-              <th>公司</th>
-              <th>Ticker</th>
-              <th>状态</th>
-              <th>输出目录</th>
-            </tr>
-          </thead>
-          <tbody id="jobs-body"></tbody>
-        </table>
-      </section>
-
-      <section class="panel">
-        <div>
-          <strong>任务详情</strong>
-          <div class="muted">点击上方任务行后查看产物与报告入口</div>
-        </div>
-        <div id="job-detail" class="detail-grid">
-          <div class="detail-card">尚未选择任务</div>
-        </div>
-        <div style="margin-top: 20px">
-          <strong>产物列表</strong>
-          <div class="muted">仅展示当前稳定产物</div>
-          <ul id="artifact-list" class="artifact-list" style="margin-top: 12px">
-            <li>尚未选择任务</li>
-          </ul>
-        </div>
-      </section>
+      </div>
     </main>
 
     <script>
+      const jobsContainer = document.getElementById("jobs");
+      const form = document.getElementById("job-form");
+      const submitButton = document.getElementById("submit-button");
+      const submitFeedback = document.getElementById("submit-feedback");
+      const selectedJobStatus = document.getElementById("selected-job-status");
+      const selectedSummary = document.getElementById("selected-summary");
+      const timelineContainer = document.getElementById("timeline");
+      const resolvedName = document.getElementById("resolved-name");
+      const resolvedTicker = document.getElementById("resolved-ticker");
+      const resolutionTags = document.getElementById("resolution-tags");
+      const headlineStatus = document.getElementById("headline-status");
+      const headlineCopy = document.getElementById("headline-copy");
+      const resolutionSteps = document.getElementById("resolution-steps");
+      const agentToolDetails = document.getElementById("agent-tool-details");
+      const errorBox = document.getElementById("error-box");
+      const artifactsContainer = document.getElementById("artifacts");
+      const reportLink = document.getElementById("report-link");
+
       let selectedJobId = null;
+      let latestJobs = [];
 
-      async function refreshJobDetail() {
-        if (!selectedJobId) return;
-        const [jobResponse, artifactResponse] = await Promise.all([
-          fetch(`/api/jobs/${selectedJobId}`),
-          fetch(`/api/jobs/${selectedJobId}/artifacts`),
-        ]);
-        if (!jobResponse.ok) return;
-        const job = await jobResponse.json();
-        const artifacts = artifactResponse.ok ? await artifactResponse.json() : [];
-        const detail = document.getElementById("job-detail");
-        detail.innerHTML = `
-          <div class="detail-card"><strong>公司</strong><div class="muted">${job.company_name}</div></div>
-          <div class="detail-card"><strong>状态</strong><div class="muted">${job.status}</div></div>
-          <div class="detail-card"><strong>输出目录</strong><div class="muted">${job.run_dir || "-"}</div></div>
-          <div class="detail-card"><strong>报告路径</strong><div class="muted">${job.report_path || "-"}</div></div>
-        `;
+      const statusClassMap = {
+        completed: "status-completed",
+        running: "status-running",
+        in_progress: "status-running",
+        waiting: "status-pending",
+        pending: "status-pending",
+        queued: "status-pending",
+        failed: "status-failed",
+      };
 
-        const list = document.getElementById("artifact-list");
-        list.innerHTML = "";
-        if (!artifacts.length) {
-          list.innerHTML = "<li>当前任务还没有可展示的稳定产物</li>";
+      const statusLabelMap = {
+        completed: "已完成",
+        running: "进行中",
+        in_progress: "进行中",
+        waiting: "等待中",
+        pending: "等待中",
+        queued: "排队中",
+        failed: "失败",
+      };
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+      }
+
+      function statusClass(status) {
+        return statusClassMap[status] || "status-pending";
+      }
+
+      function formatStatus(status) {
+        return statusLabelMap[status] || status || "未知";
+      }
+
+      function formatDate(value) {
+        if (!value) return "暂无时间";
+        return new Date(value).toLocaleString();
+      }
+
+      function renderJobs(jobs) {
+        if (!jobs.length) {
+          jobsContainer.innerHTML = '<li class="empty-state">暂无任务，先提交一个研究任务吧。</li>';
           return;
         }
-        for (const artifact of artifacts) {
-          const item = document.createElement("li");
-          item.innerHTML = `
-            <div><strong>${artifact.name}</strong></div>
-            <div class="muted">${artifact.size_bytes} bytes</div>
-            <div><a href="/api/jobs/${job.job_id}/artifacts/${artifact.name}" target="_blank">查看 / 下载</a></div>
-          `;
-          list.appendChild(item);
+        jobsContainer.innerHTML = jobs
+          .map((job) => {
+            const resolvedLabel = job.resolved_company_name
+              ? `${job.resolved_company_name}${job.resolved_company_ticker ? ` / ${job.resolved_company_ticker}` : ""}`
+              : "等待自动校正";
+            return `
+              <li class="job-card" data-job-id="${job.job_id}" data-selected="${job.job_id === selectedJobId}">
+                <div class="job-card-header">
+                  <div>
+                    <div class="job-card-title">${escapeHtml(job.company_name)}</div>
+                    <div class="job-card-meta">${escapeHtml(resolvedLabel)}</div>
+                  </div>
+                  <span class="status-pill ${statusClass(job.status)}">${formatStatus(job.status)}</span>
+                </div>
+                <div class="job-card-meta">最近更新：${escapeHtml(formatDate(job.updated_at))}</div>
+              </li>
+            `;
+          })
+          .join("");
+      }
+
+      function renderHeadline(job) {
+        selectedJobStatus.className = `status-pill ${statusClass(job.status)}`;
+        selectedJobStatus.textContent = formatStatus(job.status);
+        headlineStatus.textContent = job.resolved_company_name
+          ? `${job.resolved_company_name}${job.resolved_company_ticker ? ` / ${job.resolved_company_ticker}` : ""}`
+          : "等待自动校正";
+
+        if (job.status === "failed") {
+          headlineCopy.textContent = "任务执行失败。你可以展开技术细节查看解析轨迹、阶段信息和结构化错误摘要。";
+        } else if (job.status === "completed") {
+          headlineCopy.textContent = "研究流程已完成，报告和结构化产物已经生成，可以直接查看或下载。";
+        } else if (job.status === "running") {
+          headlineCopy.textContent = "系统正在按阶段推进研究流程。默认先展示用户可读叙事，你也可以展开技术细节查看 agent 过程。";
+        } else {
+          headlineCopy.textContent = "任务已创建，等待进入研究流程。";
         }
+      }
+
+      function renderResolution(job) {
+        resolvedName.textContent = job.resolved_company_name || "尚未完成解析";
+        resolvedTicker.textContent = job.resolved_company_ticker || "Ticker 会在解析后显示";
+        const tags = [];
+        if (job.resolution_source === "alias") tags.push("别名命中");
+        if (job.resolution_source === "official_directory") tags.push("官方目录匹配");
+        if (job.resolution_source === "llm_fallback") tags.push("小模型兜底");
+        if (job.resolution_source === "explicit_ticker") tags.push("显式 ticker 校验");
+        if (job.resolution_entity_type) tags.push(job.resolution_entity_type);
+        if (job.resolution_confidence !== null && job.resolution_confidence !== undefined) {
+          tags.push(`置信度 ${Number(job.resolution_confidence).toFixed(2)}`);
+        }
+        if (!tags.length) {
+          tags.push("等待研究任务启动");
+        }
+        resolutionTags.innerHTML = tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
+      }
+
+      function renderSummaryChips(events) {
+        if (!events.length) {
+          selectedSummary.innerHTML = '<div class="summary-chip">提交任务后显示阶段摘要</div>';
+          return;
+        }
+        selectedSummary.innerHTML = events
+          .map((event) => `<div class="summary-chip">${escapeHtml(event.stage_label)} · ${escapeHtml(formatStatus(event.status))}</div>`)
+          .join("");
+      }
+
+      function renderTimeline(events) {
+        if (!events.length) {
+          timelineContainer.innerHTML = '<div class="empty-state">当前还没有阶段事件，提交任务后会在这里显示叙事式进度。</div>';
+          return;
+        }
+        timelineContainer.innerHTML = events
+          .map(
+            (event, index) => `
+              <div class="timeline-step">
+                <div class="timeline-index">${String(index + 1).padStart(2, "0")}</div>
+                <div class="timeline-content">
+                  <strong>${escapeHtml(event.stage_label)}</strong>
+                  <span>${escapeHtml(event.summary)}</span>
+                </div>
+                <div class="status-pill ${statusClass(event.status)}">${escapeHtml(formatStatus(event.status))}</div>
+              </div>
+            `
+          )
+          .join("");
+      }
+
+      function renderResolutionSteps(job) {
+        const steps = job.resolution_steps && job.resolution_steps.length ? job.resolution_steps : ["尚未生成解析轨迹"];
+        resolutionSteps.innerHTML = steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("");
+      }
+
+      function renderAgentDetails(events) {
+        if (!events.length) {
+          agentToolDetails.innerHTML = '<strong>技术轨迹</strong><ul><li>尚未生成技术轨迹</li></ul>';
+          return;
+        }
+        agentToolDetails.innerHTML = `
+          <strong>技术轨迹</strong>
+          <ul>
+            ${events
+              .map(
+                (event) => `
+                  <li>
+                    <strong>${escapeHtml(event.stage_label)}</strong>
+                    <span class="muted"> · ${escapeHtml(event.agent_name || "未标注 Agent")} · ${escapeHtml(event.tool_name || "未标注工具")}</span>
+                    ${event.details?.length ? `<div class="muted" style="margin-top:4px;">${escapeHtml(event.details.join(" / "))}</div>` : ""}
+                  </li>
+                `
+              )
+              .join("")}
+          </ul>
+        `;
+      }
+
+      function renderErrors(job, events) {
+        const failedEvent = events.find((event) => event.status === "failed");
+        if (job.error_message || failedEvent) {
+          const details = failedEvent?.details?.length ? failedEvent.details : [job.error_message || "任务失败"];
+          errorBox.innerHTML = `
+            <strong>任务在「${escapeHtml(failedEvent?.stage_label || "未知阶段")}」失败</strong>
+            <ul>${details.map((detail) => `<li>${escapeHtml(detail)}</li>`).join("")}</ul>
+          `;
+          return;
+        }
+        errorBox.innerHTML = '<strong>当前无错误</strong><p class="muted" style="margin-top: 8px;">如果任务失败，这里会展示结构化错误摘要和相关阶段。</p>';
+      }
+
+      function renderArtifacts(job, artifacts) {
+        reportLink.innerHTML = job.report_path
+          ? `最终报告：<a class="artifact-link" href="/api/jobs/${encodeURIComponent(job.job_id)}/artifacts/04_investment_report.md" target="_blank" rel="noreferrer">打开研究报告</a>`
+          : "最终报告会在任务完成后显示。";
+
+        if (!artifacts.length) {
+          artifactsContainer.innerHTML = '<li class="empty-state">当前暂无稳定产物，任务完成后会在这里展示。</li>';
+          return;
+        }
+        artifactsContainer.innerHTML = artifacts
+          .map(
+            (artifact) => `
+              <li class="artifact-card">
+                <div>
+                  <a class="artifact-link" href="/api/jobs/${encodeURIComponent(job.job_id)}/artifacts/${encodeURIComponent(artifact.name)}" target="_blank" rel="noreferrer">${escapeHtml(artifact.name)}</a>
+                  <div class="muted">大小：${escapeHtml(artifact.size_bytes)} bytes</div>
+                </div>
+                <div class="status-pill status-completed">可下载</div>
+              </li>
+            `
+          )
+          .join("");
+      }
+
+      async function fetchJson(url) {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(url);
+        }
+        return response.json();
       }
 
       async function refreshJobs() {
-        const response = await fetch("/api/jobs");
-        const jobs = await response.json();
-        const tbody = document.getElementById("jobs-body");
-        tbody.innerHTML = "";
-        for (const job of jobs) {
-          const row = document.createElement("tr");
-          row.addEventListener("click", () => {
-            selectedJobId = job.job_id;
-            refreshJobDetail();
-          });
-          row.innerHTML = `
-            <td>${job.company_name}</td>
-            <td>${job.company_ticker || "-"}</td>
-            <td>${job.status}</td>
-            <td class="muted">${job.run_dir || "-"}</td>
-          `;
-          tbody.appendChild(row);
+        latestJobs = await fetchJson("/api/jobs");
+        if (!selectedJobId && latestJobs.length) {
+          selectedJobId = latestJobs[0].job_id;
+        }
+        if (selectedJobId && !latestJobs.some((job) => job.job_id === selectedJobId) && latestJobs.length) {
+          selectedJobId = latestJobs[0].job_id;
+        }
+        renderJobs(latestJobs);
+      }
+
+      async function refreshSelectedJob() {
+        if (!selectedJobId) return;
+
+        try {
+          const [job, timeline, artifactsResponse] = await Promise.all([
+            fetchJson(`/api/jobs/${selectedJobId}`),
+            fetchJson(`/api/jobs/${selectedJobId}/timeline`),
+            fetch(`/api/jobs/${selectedJobId}/artifacts`),
+          ]);
+
+          renderHeadline(job);
+          renderResolution(job);
+          renderSummaryChips(timeline);
+          renderTimeline(timeline);
+          renderResolutionSteps(job);
+          renderAgentDetails(timeline);
+          renderErrors(job, timeline);
+
+          if (artifactsResponse.ok) {
+            renderArtifacts(job, await artifactsResponse.json());
+          } else {
+            renderArtifacts(job, []);
+          }
+        } catch {
+          selectedJobStatus.className = "status-pill status-failed";
+          selectedJobStatus.textContent = "加载失败";
+          headlineStatus.textContent = "任务详情加载失败";
+          headlineCopy.textContent = "请稍后刷新重试。";
+          timelineContainer.innerHTML = '<div class="empty-state">任务详情加载失败，请稍后重试。</div>';
+          artifactsContainer.innerHTML = '<li class="empty-state">产物加载失败，请稍后重试。</li>';
         }
       }
 
-      document.getElementById("job-form").addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const payload = {
-          company_name: document.getElementById("company_name").value,
-          company_ticker: document.getElementById("company_ticker").value || null,
-        };
-        await fetch("/api/jobs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        event.target.reset();
-        refreshJobs();
+      jobsContainer.addEventListener("click", (event) => {
+        const card = event.target.closest(".job-card");
+        if (!card) return;
+        selectedJobId = card.dataset.jobId;
+        renderJobs(latestJobs);
+        refreshSelectedJob();
       });
 
-      refreshJobs();
-      setInterval(() => {
-        refreshJobs();
-        refreshJobDetail();
-      }, 5000);
+      document.querySelectorAll("[data-accordion]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const panel = document.getElementById(`accordion-${button.dataset.accordion}`);
+          if (panel.hasAttribute("hidden")) {
+            panel.removeAttribute("hidden");
+          } else {
+            panel.setAttribute("hidden", "");
+          }
+        });
+      });
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const companyName = document.getElementById("company_name").value.trim();
+        if (!companyName) return;
+
+        submitButton.disabled = true;
+        submitButton.textContent = "正在启动";
+        submitFeedback.textContent = "正在识别公司并启动研究流程...";
+        try {
+          const response = await fetch("/api/jobs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ company_name: companyName }),
+          });
+          if (!response.ok) {
+            throw new Error("submit failed");
+          }
+          const payload = await response.json();
+          selectedJobId = payload.job_id;
+          form.reset();
+          submitFeedback.textContent = "任务已提交，正在生成自动校正结果与阶段进度。";
+          await refreshJobs();
+          await refreshSelectedJob();
+        } catch {
+          submitFeedback.textContent = "任务提交失败，请稍后重试。";
+        } finally {
+          submitButton.disabled = false;
+          submitButton.textContent = "开始研究";
+        }
+      });
+
+      async function refreshAll() {
+        await refreshJobs();
+        await refreshSelectedJob();
+      }
+
+      refreshAll();
+      setInterval(refreshAll, 4000);
     </script>
   </body>
 </html>

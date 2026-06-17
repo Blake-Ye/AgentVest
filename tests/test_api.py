@@ -20,7 +20,7 @@ def test_submit_job_returns_job_id() -> None:
 
     response = client.post(
         "/api/jobs",
-        json={"company_name": "Apple Inc.", "company_ticker": "AAPL"},
+        json={"company_name": "Apple Inc."},
     )
 
     assert response.status_code == 202
@@ -36,8 +36,71 @@ def test_dashboard_page_is_served() -> None:
 
     assert response.status_code == 200
     assert "Investment Research Dashboard" in response.text
-    assert "任务详情" in response.text
-    assert "产物列表" in response.text
+    assert "开始研究" in response.text
+    assert "展开技术细节" in response.text
+    assert "自动校正结果" in response.text
+
+
+def test_job_detail_exposes_resolution_metadata() -> None:
+    job_store = InMemoryJobStore()
+    job = job_store.create_job(CreateJobRequest(company_name="苹果"))
+    job_store.update_job(
+        job.job_id,
+        status="running",
+        resolved_company_name="Apple Inc.",
+        resolved_company_ticker="AAPL",
+        resolution_source="alias",
+        resolution_confidence=0.99,
+        resolution_entity_type="public_company",
+        resolution_steps=[
+            "检查内置别名表",
+            "命中“苹果” -> Apple Inc. / AAPL",
+            "无需触发小模型兜底",
+        ],
+    )
+
+    client = TestClient(create_app(job_store=job_store, job_runner=lambda *_: None))
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["company_name"] == "苹果"
+    assert payload["resolved_company_name"] == "Apple Inc."
+    assert payload["resolved_company_ticker"] == "AAPL"
+    assert payload["resolution_source"] == "alias"
+    assert payload["resolution_confidence"] == 0.99
+    assert payload["resolution_steps"][0] == "检查内置别名表"
+
+
+def test_job_timeline_endpoint_returns_stage_events() -> None:
+    job_store = InMemoryJobStore()
+    job = job_store.create_job(CreateJobRequest(company_name="谷歌"))
+    job_store.update_job(
+        job.job_id,
+        timeline_events=[
+            {
+                "stage_key": "resolution",
+                "stage_label": "输入校正",
+                "status": "completed",
+                "summary": "已识别为 Alphabet Inc. / GOOGL",
+                "details": ["别名命中：谷歌"],
+                "agent_name": "CompanyResolver",
+                "tool_name": "alias-map",
+                "timestamp": "2026-06-17T00:00:00+00:00",
+            }
+        ],
+    )
+
+    client = TestClient(create_app(job_store=job_store, job_runner=lambda *_: None))
+
+    response = client.get(f"/api/jobs/{job.job_id}/timeline")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["stage_key"] == "resolution"
+    assert payload[0]["status"] == "completed"
+    assert payload[0]["details"] == ["别名命中：谷歌"]
 
 
 def test_sqlite_job_store_persists_jobs(tmp_path: Path) -> None:

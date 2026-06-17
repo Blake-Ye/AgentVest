@@ -49,6 +49,8 @@ class CompanyResolution:
     parent_company: str
     exchange: str = ""
     confidence: float = 1.0
+    resolution_source: str = "official_directory"
+    resolution_steps: tuple[str, ...] = ()
 
 
 class OpenAICompanyResolver:
@@ -113,6 +115,12 @@ class OpenAICompanyResolver:
             parent_company=str(parsed.get("parent_company", normalized_name)).strip() or normalized_name,
             exchange=str(parsed.get("exchange", "")).strip(),
             confidence=float(parsed.get("confidence", 0.6) or 0.6),
+            resolution_source="llm_fallback",
+            resolution_steps=(
+                "检查内置别名表",
+                "未命中别名，继续尝试官方目录匹配",
+                "官方目录未找到可靠结果，触发小模型兜底",
+            ),
         )
 
 
@@ -185,6 +193,24 @@ class CompanyResolver:
             exchange="NASDAQ",
             confidence=0.99,
         ),
+        "苹果": CompanyResolution(
+            user_input="苹果",
+            normalized_name="Apple Inc.",
+            ticker="AAPL",
+            entity_type="public_company",
+            parent_company="Apple Inc.",
+            exchange="NASDAQ",
+            confidence=0.99,
+        ),
+        "苹果公司": CompanyResolution(
+            user_input="苹果公司",
+            normalized_name="Apple Inc.",
+            ticker="AAPL",
+            entity_type="public_company",
+            parent_company="Apple Inc.",
+            exchange="NASDAQ",
+            confidence=0.99,
+        ),
     }
 
     def __init__(
@@ -235,6 +261,13 @@ class CompanyResolver:
             raise ValueError(
                 f"输入的 ticker {cleaned_ticker} 与解析结果 {finalized.normalized_name} / {finalized.ticker} 不一致，请确认。"
             )
+        resolution_source = "explicit_ticker" if cleaned_ticker else finalized.resolution_source
+        resolution_steps = finalized.resolution_steps
+        if cleaned_ticker:
+            resolution_steps = (
+                f"校验用户输入 ticker：{cleaned_ticker}",
+                f"官方目录确认 {finalized.normalized_name} / {finalized.ticker}",
+            )
         return CompanyResolution(
             user_input=cleaned_name,
             normalized_name=finalized.normalized_name,
@@ -243,10 +276,29 @@ class CompanyResolver:
             parent_company=finalized.parent_company,
             exchange=finalized.exchange,
             confidence=finalized.confidence,
+            resolution_source=resolution_source,
+            resolution_steps=resolution_steps,
         )
 
     def _resolve_alias(self, company_name: str) -> CompanyResolution | None:
-        return self._ALIASES.get(company_name.strip())
+        resolution = self._ALIASES.get(company_name.strip())
+        if resolution is None:
+            return None
+        return CompanyResolution(
+            user_input=resolution.user_input,
+            normalized_name=resolution.normalized_name,
+            ticker=resolution.ticker,
+            entity_type=resolution.entity_type,
+            parent_company=resolution.parent_company,
+            exchange=resolution.exchange,
+            confidence=resolution.confidence,
+            resolution_source="alias",
+            resolution_steps=(
+                "检查内置别名表",
+                f"命中“{company_name.strip()}” -> {resolution.normalized_name} / {resolution.ticker or '无 ticker'}",
+                "无需触发小模型兜底",
+            ),
+        )
 
     @lru_cache(maxsize=1)
     def _load_company_directory(self) -> list[dict[str, Any]]:
@@ -297,6 +349,12 @@ class CompanyResolver:
             parent_company=normalized_name,
             exchange=str(item.get("exchange", "")).strip(),
             confidence=1.0,
+            resolution_source="official_directory",
+            resolution_steps=(
+                "检查内置别名表",
+                "未命中别名，继续尝试官方目录匹配",
+                f"官方目录匹配到 {normalized_name} / {str(item.get('ticker', '')).strip().upper()}",
+            ),
         )
 
     def _from_directory_result(self, user_input: str, item: dict[str, Any]) -> CompanyResolution:
@@ -309,6 +367,12 @@ class CompanyResolver:
             parent_company=normalized_name,
             exchange=str(item.get("exchange", "")).strip(),
             confidence=1.0,
+            resolution_source="official_directory",
+            resolution_steps=(
+                "检查内置别名表",
+                "未命中别名，继续尝试官方目录匹配",
+                f"官方目录匹配到 {normalized_name} / {str(item.get('ticker', '')).strip().upper()}",
+            ),
         )
 
     def _ensure_supported_resolution(self, resolution: CompanyResolution) -> CompanyResolution:
@@ -328,6 +392,8 @@ class CompanyResolver:
             parent_company=resolution.parent_company or resolution.normalized_name,
             exchange=resolution.exchange,
             confidence=resolution.confidence,
+            resolution_source=resolution.resolution_source,
+            resolution_steps=resolution.resolution_steps,
         )
 
     def _name_distance(self, source: str, candidate: str) -> int:

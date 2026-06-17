@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from threading import Lock
 from pathlib import Path
 
-from multi_agent.api_models import CreateJobRequest, ResearchJob
+from multi_agent.api_models import CreateJobRequest, JobTimelineEvent, ResearchJob
 
 
 class InMemoryJobStore:
@@ -33,7 +34,7 @@ class InMemoryJobStore:
     def update_job(self, job_id: str, **updates: object) -> ResearchJob:
         with self._lock:
             current = self._jobs[job_id]
-            updated = current.touch().model_copy(update=updates)
+            updated = ResearchJob.model_validate({**current.touch().model_dump(), **updates})
             self._jobs[job_id] = updated
             return updated
 
@@ -63,10 +64,32 @@ class SQLiteJobStore:
                     updated_at TEXT NOT NULL,
                     error_message TEXT,
                     run_dir TEXT,
-                    report_path TEXT
+                    report_path TEXT,
+                    resolved_company_name TEXT,
+                    resolved_company_ticker TEXT,
+                    resolution_source TEXT,
+                    resolution_confidence REAL,
+                    resolution_entity_type TEXT,
+                    resolution_steps TEXT NOT NULL DEFAULT '[]',
+                    timeline_events TEXT NOT NULL DEFAULT '[]'
                 )
                 """
             )
+            existing_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            required_columns = {
+                "resolved_company_name": "TEXT",
+                "resolved_company_ticker": "TEXT",
+                "resolution_source": "TEXT",
+                "resolution_confidence": "REAL",
+                "resolution_entity_type": "TEXT",
+                "resolution_steps": "TEXT NOT NULL DEFAULT '[]'",
+                "timeline_events": "TEXT NOT NULL DEFAULT '[]'",
+            }
+            for column_name, column_type in required_columns.items():
+                if column_name not in existing_columns:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {column_name} {column_type}")
 
     @staticmethod
     def _from_row(row: sqlite3.Row | None) -> ResearchJob | None:
@@ -83,6 +106,16 @@ class SQLiteJobStore:
             error_message=row["error_message"],
             run_dir=row["run_dir"],
             report_path=row["report_path"],
+            resolved_company_name=row["resolved_company_name"],
+            resolved_company_ticker=row["resolved_company_ticker"],
+            resolution_source=row["resolution_source"],
+            resolution_confidence=row["resolution_confidence"],
+            resolution_entity_type=row["resolution_entity_type"],
+            resolution_steps=json.loads(row["resolution_steps"] or "[]"),
+            timeline_events=[
+                JobTimelineEvent.model_validate(event)
+                for event in json.loads(row["timeline_events"] or "[]")
+            ],
         )
 
     def create_job(self, request: CreateJobRequest) -> ResearchJob:
@@ -96,8 +129,10 @@ class SQLiteJobStore:
                 """
                 INSERT INTO jobs (
                     job_id, company_name, company_ticker, save_to_watchlist, status,
-                    created_at, updated_at, error_message, run_dir, report_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, error_message, run_dir, report_path,
+                    resolved_company_name, resolved_company_ticker, resolution_source,
+                    resolution_confidence, resolution_entity_type, resolution_steps, timeline_events
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.job_id,
@@ -110,6 +145,13 @@ class SQLiteJobStore:
                     job.error_message,
                     job.run_dir,
                     job.report_path,
+                    job.resolved_company_name,
+                    job.resolved_company_ticker,
+                    job.resolution_source,
+                    job.resolution_confidence,
+                    job.resolution_entity_type,
+                    json.dumps(job.resolution_steps, ensure_ascii=False),
+                    json.dumps([event.model_dump() for event in job.timeline_events], ensure_ascii=False),
                 ),
             )
         return job
@@ -128,13 +170,16 @@ class SQLiteJobStore:
         current = self.get_job(job_id)
         if current is None:
             raise KeyError(job_id)
-        updated = current.touch().model_copy(update=updates)
+        updated = ResearchJob.model_validate({**current.touch().model_dump(), **updates})
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE jobs
                 SET company_name = ?, company_ticker = ?, save_to_watchlist = ?, status = ?,
-                    created_at = ?, updated_at = ?, error_message = ?, run_dir = ?, report_path = ?
+                    created_at = ?, updated_at = ?, error_message = ?, run_dir = ?, report_path = ?,
+                    resolved_company_name = ?, resolved_company_ticker = ?, resolution_source = ?,
+                    resolution_confidence = ?, resolution_entity_type = ?, resolution_steps = ?,
+                    timeline_events = ?
                 WHERE job_id = ?
                 """,
                 (
@@ -147,6 +192,16 @@ class SQLiteJobStore:
                     updated.error_message,
                     updated.run_dir,
                     updated.report_path,
+                    updated.resolved_company_name,
+                    updated.resolved_company_ticker,
+                    updated.resolution_source,
+                    updated.resolution_confidence,
+                    updated.resolution_entity_type,
+                    json.dumps(updated.resolution_steps, ensure_ascii=False),
+                    json.dumps(
+                        [event.model_dump() for event in updated.timeline_events],
+                        ensure_ascii=False,
+                    ),
                     updated.job_id,
                 ),
             )

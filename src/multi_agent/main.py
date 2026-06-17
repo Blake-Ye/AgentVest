@@ -55,6 +55,12 @@ class WorkflowExecutionRequest:
     trigger_payload: dict[str, object] | None = None
 
 
+@dataclass(frozen=True)
+class WorkflowContext:
+    workflow_inputs: dict[str, str]
+    resolution: object
+
+
 def _prepare_runtime_env() -> None:
     """将 CrewAI 的运行时数据固定到项目目录，避免污染系统环境。"""
     prepare_runtime_env(base_dir=project_root())
@@ -481,7 +487,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _workflow_inputs(company_name: str, company_ticker: str) -> dict[str, str]:
+def _prepare_workflow_context(company_name: str, company_ticker: str) -> WorkflowContext:
     # 统一在入口处准备工作流输入，方便 CLI、测试和触发器复用同一套参数。
     settings = InvestmentResearchSettings.from_env()
     resolver_cls = CompanyResolver
@@ -497,15 +503,24 @@ def _workflow_inputs(company_name: str, company_ticker: str) -> dict[str, str]:
         resolved_local_pdf_path = _project_root() / resolved_local_pdf_path
     local_pdf_available = "yes" if resolved_local_pdf_path and resolved_local_pdf_path.exists() else "no"
 
-    return {
-        "company_name": resolved_company.normalized_name,
-        "company_ticker": resolved_company.ticker,
-        "current_year": str(datetime.now().year),
-        "artifacts_dir": settings.artifacts_dir,
-        "final_report_path": settings.final_report_path,
-        "local_filing_pdf_path": str(resolved_local_pdf_path) if resolved_local_pdf_path else "未提供本地 PDF 文件",
-        "local_filing_pdf_available": local_pdf_available,
-    }
+    return WorkflowContext(
+        workflow_inputs={
+            "company_name": resolved_company.normalized_name,
+            "company_ticker": resolved_company.ticker,
+            "current_year": str(datetime.now().year),
+            "artifacts_dir": settings.artifacts_dir,
+            "final_report_path": settings.final_report_path,
+            "local_filing_pdf_path": str(resolved_local_pdf_path)
+            if resolved_local_pdf_path
+            else "未提供本地 PDF 文件",
+            "local_filing_pdf_available": local_pdf_available,
+        },
+        resolution=resolved_company,
+    )
+
+
+def _workflow_inputs(company_name: str, company_ticker: str) -> dict[str, str]:
+    return _prepare_workflow_context(company_name, company_ticker).workflow_inputs
 
 
 def _raise_user_facing_runtime_error(error: Exception) -> None:

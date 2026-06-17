@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from multi_agent.settings import InvestmentResearchSettings
-from multi_agent.main import _build_run_output_paths, _raise_user_facing_runtime_error, _workflow_inputs
+from multi_agent.main import (
+    _build_run_output_paths,
+    _prepare_workflow_context,
+    _raise_user_facing_runtime_error,
+    _workflow_inputs,
+)
 from multi_agent.resolver import CompanyResolution
 from multi_agent.tools.investment_tools import FatalAPIError
 
@@ -63,6 +68,47 @@ def test_workflow_inputs_auto_resolve_company_name_when_ticker_missing(
 
     assert inputs["company_name"] == "Alibaba Group Holding Ltd"
     assert inputs["company_ticker"] == "BABA"
+
+
+def test_prepare_workflow_context_tracks_alias_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubResolver:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def resolve(self, company_name: str, ticker: str = "") -> CompanyResolution:
+            assert company_name == "苹果"
+            assert ticker == ""
+            return CompanyResolution(
+                user_input=company_name,
+                normalized_name="Apple Inc.",
+                ticker="AAPL",
+                entity_type="public_company",
+                parent_company="Apple Inc.",
+                exchange="NASDAQ",
+                confidence=0.99,
+                resolution_source="alias",
+                resolution_steps=(
+                    "检查内置别名表",
+                    "命中“苹果” -> Apple Inc. / AAPL",
+                    "无需触发小模型兜底",
+                ),
+            )
+
+    monkeypatch.setenv("MODEL", "qwen-plus")
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    monkeypatch.setenv("SERPER_API_KEY", "serper-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+    monkeypatch.setattr("multi_agent.main.CompanyResolver", StubResolver)
+
+    context = _prepare_workflow_context("苹果", "")
+
+    assert context.workflow_inputs["company_name"] == "Apple Inc."
+    assert context.workflow_inputs["company_ticker"] == "AAPL"
+    assert context.resolution.resolution_source == "alias"
+    assert context.resolution.resolution_steps[0] == "检查内置别名表"
 
 
 def test_run_writes_evaluation_artifacts_on_success(

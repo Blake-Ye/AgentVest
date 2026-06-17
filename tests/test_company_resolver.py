@@ -125,6 +125,18 @@ def test_company_resolver_resolves_google_alias_to_alphabet() -> None:
     assert resolution.entity_type == "public_company"
 
 
+def test_company_resolver_resolves_apple_chinese_alias() -> None:
+    resolver = CompanyResolver(settings=build_settings(), session=RecordingSession({}), llm_resolver=None)
+
+    resolution = resolver.resolve("苹果")
+
+    assert resolution.normalized_name == "Apple Inc."
+    assert resolution.ticker == "AAPL"
+    assert resolution.entity_type == "public_company"
+    assert resolution.resolution_source == "alias"
+    assert "命中“苹果” -> Apple Inc. / AAPL" in resolution.resolution_steps
+
+
 def test_company_resolver_accepts_explicit_ticker_and_normalizes_company_name() -> None:
     url = "https://www.sec.gov/files/company_tickers.json"
     session = RecordingSession(
@@ -151,6 +163,11 @@ def test_company_resolver_accepts_explicit_ticker_and_normalizes_company_name() 
         parent_company="Apple Inc.",
         exchange="NASDAQ",
         confidence=1.0,
+        resolution_source="explicit_ticker",
+        resolution_steps=(
+            "校验用户输入 ticker：AAPL",
+            "官方目录确认 Apple Inc. / AAPL",
+        ),
     )
 
 
