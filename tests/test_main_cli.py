@@ -56,7 +56,6 @@ def test_workflow_inputs_auto_resolve_company_name_when_ticker_missing(
     monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     monkeypatch.setenv("SERPER_API_KEY", "serper-key")
-    monkeypatch.setenv("SEC_API_KEY", "sec-key")
     monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
     monkeypatch.setattr("multi_agent.main.CompanyResolver", StubResolver)
 
@@ -80,10 +79,10 @@ def test_run_writes_evaluation_artifacts_on_success(
         search_provider="auto",
         serper_api_key="serper-key",
         serpapi_api_key="",
-        sec_api_key="sec-key",
         sec_api_email="analyst@example.com",
         artifacts_dir="artifacts",
         final_report_path="report.md",
+        watchlist_path="artifacts/watchlist.json",
     )
 
     class StubParser:
@@ -141,7 +140,6 @@ def test_run_writes_structured_recommendation_and_watchlist_when_enabled(
         search_provider="auto",
         serper_api_key="serper-key",
         serpapi_api_key="",
-        sec_api_key="sec-key",
         sec_api_email="analyst@example.com",
         artifacts_dir="artifacts",
         final_report_path="report.md",
@@ -202,6 +200,51 @@ def test_run_writes_structured_recommendation_and_watchlist_when_enabled(
     monkeypatch.setattr(main, "_crew", lambda: StubCrew())
     monkeypatch.setattr(
         main,
+        "build_structured_recommendation",
+        lambda **_: {
+            "generated_at": "2026-06-17T00:00:00+00:00",
+            "company_name": "Alibaba Group Holding Ltd",
+            "company_ticker": "BABA",
+            "stance": "buy",
+            "stance_label": "增持",
+            "trust_score": 87.0,
+            "trust_level": "high",
+            "trust_summary": "证据较充分，可作为高优先级研究输入。",
+            "summary": "阿里云利润率改善，现金流保持稳健。",
+            "catalysts": ["云业务恢复", "回购计划"],
+            "risks": ["宏观需求疲弱"],
+            "next_actions": ["继续跟踪"],
+            "source_report_path": str(
+                tmp_path / "artifacts" / "alibaba_group_holding_ltd__baba" / "20260615_103045" / "04_investment_report.md"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "build_structured_report",
+        lambda **_: {
+            "generated_at": "2026-06-17T00:00:00+00:00",
+            "company_name": "Alibaba Group Holding Ltd",
+            "company_ticker": "BABA",
+            "summary": "阿里云利润率改善，现金流保持稳健。",
+            "stance": "buy",
+            "stance_label": "增持",
+            "trust_score": 87.0,
+            "trust_level": "high",
+            "trust_summary": "证据较充分，可作为高优先级研究输入。",
+            "catalysts": ["云业务恢复", "回购计划"],
+            "risks": ["宏观需求疲弱"],
+            "next_actions": ["继续跟踪"],
+            "sections": {"investment_recommendation": "建议增持。"},
+            "citation_urls": ["https://example.com/report"],
+            "validation": {"has_summary": True},
+            "source_report_path": str(
+                tmp_path / "artifacts" / "alibaba_group_holding_ltd__baba" / "20260615_103045" / "04_investment_report.md"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        main,
         "_workflow_inputs",
         lambda *_: {"company_name": "Alibaba Group Holding Ltd", "company_ticker": "BABA"},
     )
@@ -242,7 +285,6 @@ def test_run_rebuilds_watchlist_from_existing_artifacts(
         search_provider="auto",
         serper_api_key="serper-key",
         serpapi_api_key="",
-        sec_api_key="sec-key",
         sec_api_email="analyst@example.com",
         artifacts_dir="artifacts",
         final_report_path="report.md",
@@ -312,6 +354,47 @@ def test_run_rebuilds_watchlist_from_existing_artifacts(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(
+        main,
+        "build_structured_recommendation",
+        lambda **_: {
+            "generated_at": "2026-06-17T00:00:00+00:00",
+            "company_name": "Tencent Holdings Limited",
+            "company_ticker": "0700.HK",
+            "stance": "buy",
+            "stance_label": "增持",
+            "trust_score": 78.0,
+            "trust_level": "medium",
+            "trust_summary": "证据基本够用，但仍建议人工复核关键结论。",
+            "summary": "腾讯进入 AI 商业化与视频号电商兑现并行阶段。",
+            "catalysts": ["TokenHub放量"],
+            "risks": ["海外监管收紧"],
+            "next_actions": ["继续跟踪"],
+            "source_report_path": str(run_dir / "04_investment_report.md"),
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "build_structured_report",
+        lambda **_: {
+            "generated_at": "2026-06-17T00:00:00+00:00",
+            "company_name": "Tencent Holdings Limited",
+            "company_ticker": "0700.HK",
+            "summary": "腾讯进入 AI 商业化与视频号电商兑现并行阶段。",
+            "stance": "buy",
+            "stance_label": "增持",
+            "trust_score": 78.0,
+            "trust_level": "medium",
+            "trust_summary": "证据基本够用，但仍建议人工复核关键结论。",
+            "catalysts": ["TokenHub放量"],
+            "risks": ["海外监管收紧"],
+            "next_actions": ["继续跟踪"],
+            "sections": {"investment_recommendation": "维持增持，继续观察执行兑现情况。"},
+            "citation_urls": [],
+            "validation": {"has_summary": True},
+            "source_report_path": str(run_dir / "04_investment_report.md"),
+        },
+    )
     monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
 
     main.run()
@@ -345,7 +428,6 @@ def test_run_backfills_standard_output_files_when_crew_does_not_write_files(
         search_provider="auto",
         serper_api_key="serper-key",
         serpapi_api_key="",
-        sec_api_key="sec-key",
         sec_api_email="analyst@example.com",
         artifacts_dir="artifacts",
         final_report_path="report.md",
@@ -407,7 +489,6 @@ def test_run_writes_failed_evaluation_artifacts_on_error(
         search_provider="auto",
         serper_api_key="serper-key",
         serpapi_api_key="",
-        sec_api_key="sec-key",
         sec_api_email="analyst@example.com",
         artifacts_dir="artifacts",
         final_report_path="report.md",
@@ -456,7 +537,6 @@ def test_run_writes_failed_evaluation_artifacts_on_keyboard_interrupt(
         search_provider="auto",
         serper_api_key="serper-key",
         serpapi_api_key="",
-        sec_api_key="sec-key",
         sec_api_email="analyst@example.com",
         artifacts_dir="artifacts",
         final_report_path="report.md",
@@ -488,6 +568,74 @@ def test_run_writes_failed_evaluation_artifacts_on_keyboard_interrupt(
     assert (run_dir / "README.md").exists()
     failure_report = (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
     assert "运行被中断" in failure_report
+
+
+def test_run_with_trigger_reuses_execution_pipeline_and_passes_trigger_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="auto",
+        serper_api_key="serper-key",
+        serpapi_api_key="",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+    captured_inputs: dict[str, object] = {}
+
+    class StubCrew:
+        def kickoff(self, inputs):
+            captured_inputs.update(inputs)
+            artifacts_dir = Path(inputs["artifacts_dir"])
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            for name in (
+                "01_market_intelligence.md",
+                "02_filing_review.md",
+                "03_financial_analysis.md",
+            ):
+                (artifacts_dir / name).write_text("# artifact\n", encoding="utf-8")
+            Path(inputs["final_report_path"]).write_text(
+                "# 投资备忘录\n\n参考 https://example.com/report",
+                encoding="utf-8",
+            )
+            return {"status": "ok"}
+
+    trigger_payload = {
+        "company_name": "Apple Inc.",
+        "company_ticker": "AAPL",
+        "save_to_watchlist": True,
+    }
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_crew", lambda: StubCrew())
+    monkeypatch.setattr(
+        main,
+        "_workflow_inputs",
+        lambda *_: {
+            "company_name": "Apple Inc.",
+            "company_ticker": "AAPL",
+            "local_filing_pdf_path": "未提供本地 PDF 文件",
+            "local_filing_pdf_available": "no",
+        },
+    )
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+    monkeypatch.setattr(sys, "argv", ["run_with_trigger", json.dumps(trigger_payload)])
+
+    result = main.run_with_trigger()
+
+    assert result == {"status": "ok"}
+    assert captured_inputs["crewai_trigger_payload"] == trigger_payload
+    assert captured_inputs["company_name"] == "Apple Inc."
+    assert captured_inputs["company_ticker"] == "AAPL"
+    assert captured_inputs["local_filing_pdf_available"] == "no"
 
 
 def test_build_run_output_paths_groups_all_outputs_in_company_folder(tmp_path: Path) -> None:

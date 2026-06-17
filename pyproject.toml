@@ -8,6 +8,8 @@ dependencies = [
     "crewai[tools]==1.14.6",
     "pypdf>=5.0.0",
     "requests>=2.32.0",
+    "fastapi>=0.116.1",
+    "uvicorn>=0.35.0",
 ]
 
 [project.optional-dependencies]
@@ -17,12 +19,10 @@ dev = [
 
 [project.scripts]
 multi_agent = "multi_agent.main:run"
-run_crew = "multi_agent.main:run"
-train = "multi_agent.main:train"
-replay = "multi_agent.main:replay"
-test = "multi_agent.main:test"
+benchmark = "multi_agent.benchmark:main"
 run_with_trigger = "multi_agent.main:run_with_trigger"
 profile_agent = "multi_agent.perf:main"
+api_server = "multi_agent.api:main"
 
 [build-system]
 requires = ["hatchling"]

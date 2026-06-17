@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Investment Research Dashboard</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0;
+        background: #0b1020;
+        color: #e5e7eb;
+      }
+      main {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 32px;
+      }
+      p {
+        color: #94a3b8;
+      }
+      form,
+      .panel {
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 16px;
+        padding: 20px;
+        margin-top: 20px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
+      }
+      input,
+      button {
+        width: 100%;
+        box-sizing: border-box;
+        border-radius: 10px;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        padding: 12px 14px;
+        font-size: 14px;
+      }
+      input {
+        background: #020617;
+        color: #e5e7eb;
+      }
+      button {
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 16px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 10px 8px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+      }
+      .muted {
+        color: #94a3b8;
+      }
+      .jobs-table tbody tr {
+        cursor: pointer;
+      }
+      .jobs-table tbody tr:hover {
+        background: rgba(37, 99, 235, 0.12);
+      }
+      .detail-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
+        margin-top: 16px;
+      }
+      .detail-card {
+        background: #020617;
+        border: 1px solid rgba(148, 163, 184, 0.15);
+        border-radius: 12px;
+        padding: 14px;
+      }
+      .artifact-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: grid;
+        gap: 10px;
+      }
+      .artifact-list a {
+        color: #93c5fd;
+        text-decoration: none;
+      }
+      .artifact-list li {
+        background: #020617;
+        border: 1px solid rgba(148, 163, 184, 0.15);
+        border-radius: 12px;
+        padding: 12px 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Investment Research Dashboard</h1>
+      <p>提交公司研究任务，查看后台执行状态，并快速定位输出产物。</p>
+
+      <form id="job-form">
+        <div class="grid">
+          <input id="company_name" name="company_name" placeholder="公司名称，例如 Apple Inc." required />
+          <input id="company_ticker" name="company_ticker" placeholder="Ticker，例如 AAPL" />
+          <button type="submit">提交研究任务</button>
+        </div>
+      </form>
+
+      <section class="panel">
+        <div class="grid">
+          <div>
+            <strong>最近任务</strong>
+            <div class="muted">状态会自动刷新</div>
+          </div>
+        </div>
+        <table class="jobs-table">
+          <thead>
+            <tr>
+              <th>公司</th>
+              <th>Ticker</th>
+              <th>状态</th>
+              <th>输出目录</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-body"></tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <div>
+          <strong>任务详情</strong>
+          <div class="muted">点击上方任务行后查看产物与报告入口</div>
+        </div>
+        <div id="job-detail" class="detail-grid">
+          <div class="detail-card">尚未选择任务</div>
+        </div>
+        <div style="margin-top: 20px">
+          <strong>产物列表</strong>
+          <div class="muted">仅展示当前稳定产物</div>
+          <ul id="artifact-list" class="artifact-list" style="margin-top: 12px">
+            <li>尚未选择任务</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      let selectedJobId = null;
+
+      async function refreshJobDetail() {
+        if (!selectedJobId) return;
+        const [jobResponse, artifactResponse] = await Promise.all([
+          fetch(`/api/jobs/${selectedJobId}`),
+          fetch(`/api/jobs/${selectedJobId}/artifacts`),
+        ]);
+        if (!jobResponse.ok) return;
+        const job = await jobResponse.json();
+        const artifacts = artifactResponse.ok ? await artifactResponse.json() : [];
+        const detail = document.getElementById("job-detail");
+        detail.innerHTML = `
+          <div class="detail-card"><strong>公司</strong><div class="muted">${job.company_name}</div></div>
+          <div class="detail-card"><strong>状态</strong><div class="muted">${job.status}</div></div>
+          <div class="detail-card"><strong>输出目录</strong><div class="muted">${job.run_dir || "-"}</div></div>
+          <div class="detail-card"><strong>报告路径</strong><div class="muted">${job.report_path || "-"}</div></div>
+        `;
+
+        const list = document.getElementById("artifact-list");
+        list.innerHTML = "";
+        if (!artifacts.length) {
+          list.innerHTML = "<li>当前任务还没有可展示的稳定产物</li>";
+          return;
+        }
+        for (const artifact of artifacts) {
+          const item = document.createElement("li");
+          item.innerHTML = `
+            <div><strong>${artifact.name}</strong></div>
+            <div class="muted">${artifact.size_bytes} bytes</div>
+            <div><a href="/api/jobs/${job.job_id}/artifacts/${artifact.name}" target="_blank">查看 / 下载</a></div>
+          `;
+          list.appendChild(item);
+        }
+      }
+
+      async function refreshJobs() {
+        const response = await fetch("/api/jobs");
+        const jobs = await response.json();
+        const tbody = document.getElementById("jobs-body");
+        tbody.innerHTML = "";
+        for (const job of jobs) {
+          const row = document.createElement("tr");
+          row.addEventListener("click", () => {
+            selectedJobId = job.job_id;
+            refreshJobDetail();
+          });
+          row.innerHTML = `
+            <td>${job.company_name}</td>
+            <td>${job.company_ticker || "-"}</td>
+            <td>${job.status}</td>
+            <td class="muted">${job.run_dir || "-"}</td>
+          `;
+          tbody.appendChild(row);
+        }
+      }
+
+      document.getElementById("job-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const payload = {
+          company_name: document.getElementById("company_name").value,
+          company_ticker: document.getElementById("company_ticker").value || null,
+        };
+        await fetch("/api/jobs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        event.target.reset();
+        refreshJobs();
+      });
+
+      refreshJobs();
+      setInterval(() => {
+        refreshJobs();
+        refreshJobDetail();
+      }, 5000);
+    </script>
+  </body>
+</html>

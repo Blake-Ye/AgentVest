@@ -1,7 +1,12 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from multi_agent.recommendation import (
+    StructuredOutputs,
+    StructuredRecommendation,
+    StructuredReport,
     build_structured_report,
     build_structured_recommendation,
     calculate_trust_score,
@@ -30,36 +35,11 @@ def test_calculate_trust_score_returns_weighted_breakdown() -> None:
     }
 
 
-def test_build_structured_recommendation_extracts_sections_from_report(tmp_path: Path) -> None:
+def test_build_structured_recommendation_uses_json_first_generator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     report_path = tmp_path / "04_investment_report.md"
-    report_path.write_text(
-        "\n".join(
-            [
-                "# 投资备忘录",
-                "",
-                "## 执行摘要",
-                "",
-                "公司基本面稳健，短期受云业务恢复和回购计划支撑。",
-                "",
-                "## 催化剂",
-                "",
-                "- 云业务利润率改善",
-                "- 新一轮回购计划",
-                "",
-                "## 风险",
-                "",
-                "- 宏观需求复苏低于预期",
-                "- 海外监管不确定性",
-                "",
-                "## 投资建议",
-                "",
-                "建议增持，维持重点观察。",
-                "",
-                "参考 https://example.com/report",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    report_path.write_text("# 投资备忘录", encoding="utf-8")
     metrics = {
         "trust_score": {
             "score": 87.0,
@@ -67,6 +47,51 @@ def test_build_structured_recommendation_extracts_sections_from_report(tmp_path:
             "summary": "证据较充分，可作为高优先级研究输入。",
         }
     }
+
+    monkeypatch.setattr(
+        "multi_agent.recommendation._generate_structured_outputs",
+        lambda **_: StructuredOutputs(
+            recommendation=StructuredRecommendation(
+                generated_at="2026-06-17T00:00:00+00:00",
+                company_name="Alibaba Group Holding Ltd",
+                company_ticker="BABA",
+                stance="buy",
+                stance_label="增持",
+                trust_score=87.0,
+                trust_level="high",
+                trust_summary="证据较充分，可作为高优先级研究输入。",
+                summary="公司基本面稳健，短期受云业务恢复和回购计划支撑。",
+                catalysts=["云业务利润率改善", "新一轮回购计划"],
+                risks=["宏观需求复苏低于预期", "海外监管不确定性"],
+                next_actions=["继续跟踪"],
+                source_report_path=str(report_path.resolve()),
+            ),
+            report=StructuredReport(
+                generated_at="2026-06-17T00:00:00+00:00",
+                company_name="Alibaba Group Holding Ltd",
+                company_ticker="BABA",
+                summary="公司基本面稳健，短期受云业务恢复和回购计划支撑。",
+                stance="buy",
+                stance_label="增持",
+                trust_score=87.0,
+                trust_level="high",
+                trust_summary="证据较充分，可作为高优先级研究输入。",
+                catalysts=["云业务利润率改善", "新一轮回购计划"],
+                risks=["宏观需求复苏低于预期", "海外监管不确定性"],
+                next_actions=["继续跟踪"],
+                sections={},
+                citation_urls=[],
+                validation={
+                    "has_summary": True,
+                    "has_catalysts": True,
+                    "has_risks": True,
+                    "has_investment_recommendation": True,
+                    "citation_count": 0,
+                },
+                source_report_path=str(report_path.resolve()),
+            ),
+        ),
+    )
 
     recommendation = build_structured_recommendation(
         company_name="Alibaba Group Holding Ltd",
@@ -90,7 +115,7 @@ def test_build_structured_recommendation_extracts_sections_from_report(tmp_path:
 
 
 def test_build_structured_recommendation_handles_decorated_headings_and_tables(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     report_path = tmp_path / "04_investment_report.md"
     report_path.write_text(
@@ -131,6 +156,45 @@ def test_build_structured_recommendation_handles_decorated_headings_and_tables(
         }
     }
 
+    monkeypatch.setattr(
+        "multi_agent.recommendation._generate_structured_outputs",
+        lambda **_: StructuredOutputs(
+            recommendation=StructuredRecommendation(
+                generated_at="2026-06-17T00:00:00+00:00",
+                company_name="Tencent Holdings Limited",
+                company_ticker="0700.HK",
+                stance="buy",
+                stance_label="增持",
+                trust_score=72.0,
+                trust_level="medium",
+                trust_summary="证据基本够用，但仍建议人工复核关键结论。",
+                summary="公司进入盈利能力改善与新业务兑现并行阶段。",
+                catalysts=["新产品放量", "回购加速"],
+                risks=["海外监管收紧", "云厂商价格战"],
+                next_actions=["继续观察"],
+                source_report_path=str(report_path.resolve()),
+            ),
+            report=StructuredReport(
+                generated_at="2026-06-17T00:00:00+00:00",
+                company_name="Tencent Holdings Limited",
+                company_ticker="0700.HK",
+                summary="公司进入盈利能力改善与新业务兑现并行阶段。",
+                stance="buy",
+                stance_label="增持",
+                trust_score=72.0,
+                trust_level="medium",
+                trust_summary="证据基本够用，但仍建议人工复核关键结论。",
+                catalysts=["新产品放量", "回购加速"],
+                risks=["海外监管收紧", "云厂商价格战"],
+                next_actions=["继续观察"],
+                sections={},
+                citation_urls=[],
+                validation={},
+                source_report_path=str(report_path.resolve()),
+            ),
+        ),
+    )
+
     recommendation = build_structured_recommendation(
         company_name="Tencent Holdings Limited",
         company_ticker="0700.HK",
@@ -144,7 +208,9 @@ def test_build_structured_recommendation_handles_decorated_headings_and_tables(
     assert recommendation["stance"] == "buy"
 
 
-def test_build_structured_report_exports_sections_and_citations(tmp_path: Path) -> None:
+def test_build_structured_report_exports_sections_and_citations(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     report_path = tmp_path / "04_investment_report.md"
     report_path.write_text(
         "\n".join(
@@ -197,6 +263,59 @@ def test_build_structured_report_exports_sections_and_citations(tmp_path: Path) 
             "summary": "证据基本够用，但仍建议人工复核关键结论。",
         }
     }
+
+    monkeypatch.setattr(
+        "multi_agent.recommendation._generate_structured_outputs",
+        lambda **_: StructuredOutputs(
+            recommendation=StructuredRecommendation(
+                generated_at="2026-06-17T00:00:00+00:00",
+                company_name="Tencent Holdings Limited",
+                company_ticker="0700.HK",
+                stance="buy",
+                stance_label="增持",
+                trust_score=78.0,
+                trust_level="medium",
+                trust_summary="证据基本够用，但仍建议人工复核关键结论。",
+                summary="公司进入 AI 商业化兑现阶段。",
+                catalysts=["TokenHub放量"],
+                risks=["海外监管收紧"],
+                next_actions=["继续观察"],
+                source_report_path=str(report_path.resolve()),
+            ),
+            report=StructuredReport(
+                generated_at="2026-06-17T00:00:00+00:00",
+                company_name="Tencent Holdings Limited",
+                company_ticker="0700.HK",
+                summary="公司进入 AI 商业化兑现阶段。",
+                stance="buy",
+                stance_label="增持",
+                trust_score=78.0,
+                trust_level="medium",
+                trust_summary="证据基本够用，但仍建议人工复核关键结论。",
+                catalysts=["TokenHub放量"],
+                risks=["海外监管收紧"],
+                next_actions=["继续观察"],
+                sections={
+                    "business_overview": "核心业务结构持续优化，广告与云业务占比提升。",
+                    "recent_updates": "- 发布新的企业智能体产品\n- 海外拓展加速",
+                    "financial_analysis": "自由现金流维持高位，利润率稳定改善。",
+                    "investment_recommendation": "建议增持，继续观察执行兑现。",
+                },
+                citation_urls=[
+                    "https://example.com/report",
+                    "https://example.com/source2",
+                ],
+                validation={
+                    "has_summary": True,
+                    "has_catalysts": True,
+                    "has_risks": True,
+                    "has_investment_recommendation": True,
+                    "citation_count": 2,
+                },
+                source_report_path=str(report_path.resolve()),
+            ),
+        ),
+    )
 
     structured_report = build_structured_report(
         company_name="Tencent Holdings Limited",

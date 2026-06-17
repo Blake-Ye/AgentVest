@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -11,7 +12,18 @@ from pydantic import BaseModel, Field
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from crewai.tools import BaseTool
+try:
+    from crewai.tools import BaseTool
+except ModuleNotFoundError:
+    class BaseTool:  # type: ignore[override]
+        """缺少 crewai 依赖时用于测试导入的最小兜底实现。"""
+
+        name: str = ""
+        description: str = ""
+        args_schema: Type[BaseModel] | None = None
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__()
 
 from multi_agent.evaluation import record_api_call, record_financial_fields
 from multi_agent.finance import CompanyFinancialSnapshot, compute_key_metrics
@@ -36,6 +48,45 @@ class FatalAPIError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.service_name = service_name
+
+
+@dataclass(frozen=True)
+class ToolExecutionError:
+    service_name: str
+    error_code: str
+    message: str
+    retryable: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "service_name": self.service_name,
+            "error_code": self.error_code,
+            "message": self.message,
+            "retryable": self.retryable,
+        }
+
+
+def _build_tool_failure_payload(
+    *,
+    service_name: str,
+    error_code: str,
+    message: str,
+    retryable: bool = True,
+) -> str:
+    return json.dumps(
+        {
+            "success": False,
+            "data": None,
+            "error": ToolExecutionError(
+                service_name=service_name,
+                error_code=error_code,
+                message=message,
+                retryable=retryable,
+            ).as_dict(),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 def _build_retry_session(max_retries: int) -> requests.Session:
@@ -102,6 +153,10 @@ def _perform_request(request_callable: Any, *, service_name: str) -> Any:
         status_code=status_code,
     )
     return response
+
+
+def _sec_user_agent(settings: InvestmentResearchSettings) -> str:
+    return f"multi-agent-investment-research {settings.sec_api_email}"
 
 
 class GoogleSearchService:
@@ -229,6 +284,7 @@ class SecApiService:
     """封装 SEC filing 检索与 SEC 官方 company facts 获取逻辑。"""
 
     SEC_TICKER_LOOKUP_URL = "https://www.sec.gov/files/company_tickers.json"
+    SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
     SEC_COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 
     def __init__(
@@ -239,6 +295,30 @@ class SecApiService:
         self.settings = settings
         self.session = session or _build_retry_session(settings.max_http_retries)
 
+    def _perform_sec_request_with_retry(self, request_callable: Any, *, service_name: str) -> Any:
+        attempts = max(self.settings.max_http_retries + 1, 1)
+        last_error: FatalAPIError | None = None
+
+        for attempt_index in range(attempts):
+            response = _perform_request(request_callable, service_name=service_name)
+            try:
+                _raise_for_status_with_context(response, service_name=service_name)
+                return response
+            except FatalAPIError as error:
+                if error.status_code != 429 or attempt_index >= attempts - 1:
+                    raise
+                last_error = error
+                retry_after = getattr(response, "headers", {}).get("Retry-After")
+                try:
+                    sleep_seconds = float(retry_after) if retry_after else float(2**attempt_index)
+                except (TypeError, ValueError):
+                    sleep_seconds = float(2**attempt_index)
+                time.sleep(max(sleep_seconds, 0.0))
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"{service_name} 重试时发生未预期错误。")
+
     def search_filings(
         self,
         company_name: str,
@@ -246,68 +326,74 @@ class SecApiService:
         form_type: str,
         limit: int,
     ) -> list[dict[str, str]]:
-        query = (
-            f'ticker:{ticker.upper()} AND formType:"{form_type}" AND companyName:"{company_name}"'
-        )
-        response = _perform_request(
-            lambda: self.session.post(
-                "https://api.sec-api.io",
-                headers={
-                    "Authorization": self.settings.sec_api_key,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "query": query,
-                    "from": "0",
-                    "size": str(limit),
-                    "sort": [{"filedAt": {"order": "desc"}}],
-                },
+        cik = self._lookup_cik(ticker)
+        response = self._perform_sec_request_with_retry(
+            lambda: self.session.get(
+                self.SEC_SUBMISSIONS_URL.format(cik=cik),
+                headers={"User-Agent": _sec_user_agent(self.settings)},
                 timeout=self.settings.http_timeout_seconds,
             ),
-            service_name="SEC API",
+            service_name="SEC Submissions",
         )
-        _raise_for_status_with_context(response, service_name="SEC API")
-        payload = response.json()
+        recent_filings = response.json().get("filings", {}).get("recent", {})
         normalized_results: list[dict[str, str]] = []
-        for filing in payload.get("filings", [])[:limit]:
+        forms = recent_filings.get("form", [])
+        filing_dates = recent_filings.get("filingDate", [])
+        accession_numbers = recent_filings.get("accessionNumber", [])
+        primary_documents = recent_filings.get("primaryDocument", [])
+        descriptions = recent_filings.get("primaryDocDescription", [])
+
+        for filing_form, filed_at, accession_no, primary_document, description in zip(
+            forms,
+            filing_dates,
+            accession_numbers,
+            primary_documents,
+            descriptions,
+        ):
+            if str(filing_form).upper() != form_type.upper():
+                continue
+            accession_compact = str(accession_no).replace("-", "")
+            filing_url = (
+                f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession_compact}/{primary_document}"
+                if primary_document
+                else ""
+            )
             normalized_results.append(
                 {
-                    "form_type": filing.get("formType", ""),
-                    "filed_at": filing.get("filedAt", ""),
-                    "filing_url": filing.get("linkToFilingDetails", "")
-                    or filing.get("linkToHtml", "")
-                    or filing.get("linkToTxt", ""),
-                    "filing_details": filing.get("description", ""),
-                    "accession_no": filing.get("accessionNo", ""),
+                    "form_type": str(filing_form),
+                    "filed_at": str(filed_at),
+                    "filing_url": filing_url,
+                    "filing_details": str(description),
+                    "accession_no": str(accession_no),
                 }
             )
+            if len(normalized_results) >= limit:
+                break
         return normalized_results
 
     @lru_cache(maxsize=64)
     def fetch_company_facts(self, ticker: str) -> dict[str, Any]:
         cik = self._lookup_cik(ticker)
-        response = _perform_request(
+        response = self._perform_sec_request_with_retry(
             lambda: self.session.get(
                 self.SEC_COMPANY_FACTS_URL.format(cik=cik),
-                headers={"User-Agent": f"multi-agent-investment-research {self.settings.sec_api_email}"},
+                headers={"User-Agent": _sec_user_agent(self.settings)},
                 timeout=self.settings.http_timeout_seconds,
             ),
             service_name="SEC Company Facts",
         )
-        _raise_for_status_with_context(response, service_name="SEC Company Facts")
         return response.json()
 
     @lru_cache(maxsize=64)
     def _lookup_cik(self, ticker: str) -> str:
-        response = _perform_request(
+        response = self._perform_sec_request_with_retry(
             lambda: self.session.get(
                 self.SEC_TICKER_LOOKUP_URL,
-                headers={"User-Agent": f"multi-agent-investment-research {self.settings.sec_api_email}"},
+                headers={"User-Agent": _sec_user_agent(self.settings)},
                 timeout=self.settings.http_timeout_seconds,
             ),
             service_name="SEC Ticker Lookup",
         )
-        _raise_for_status_with_context(response, service_name="SEC Ticker Lookup")
         ticker_payload = response.json()
         normalized_ticker = ticker.upper()
         for company in ticker_payload.values():
@@ -357,9 +443,9 @@ def _extract_latest_fact(company_facts: dict[str, Any], candidate_tags: list[str
             latest_entry = max(
                 comparable_entries,
                 key=lambda item: (
-                    item.get("end", ""),
-                    item.get("filed", ""),
-                    item.get("fy", 0),
+                    item.get("end") or "",
+                    item.get("filed") or "",
+                    item.get("fy") or 0,
                 ),
             )
             value = float(latest_entry.get("val", 0.0))
@@ -532,7 +618,11 @@ class GoogleSearchTool(BaseTool):
         except FatalAPIError:
             raise
         except Exception as exc:  # pragma: no cover - network failure path
-            return f"Google 搜索失败：{exc}"
+            return _build_tool_failure_payload(
+                service_name="Google Search",
+                error_code="google_search_failed",
+                message=str(exc),
+            )
 
         if not results:
             return "未找到相关的 Google 搜索结果。"
@@ -560,7 +650,7 @@ class SecFilingSearchInput(BaseModel):
 
 class SecFilingSearchTool(BaseTool):
     name: str = "SEC Filing Search"
-    description: str = "Find the latest SEC filings for a public company using SEC API."
+    description: str = "Find the latest SEC filings for a public company using official SEC EDGAR data."
     args_schema: Type[BaseModel] = SecFilingSearchInput
 
     def __init__(
@@ -584,7 +674,11 @@ class SecFilingSearchTool(BaseTool):
         except FatalAPIError:
             raise
         except Exception as exc:  # pragma: no cover - network failure path
-            return f"SEC 文件检索失败：{exc}"
+            return _build_tool_failure_payload(
+                service_name="SEC Filing Search",
+                error_code="sec_filing_search_failed",
+                message=str(exc),
+            )
 
         if not filings:
             return "未找到相关的 SEC 文件。"
@@ -628,7 +722,11 @@ class SecCompanyFactsTool(BaseTool):
         except FatalAPIError:
             raise
         except Exception as exc:  # pragma: no cover - network failure path
-            return f"获取 SEC 公司财务事实失败：{exc}"
+            return _build_tool_failure_payload(
+                service_name="SEC Company Facts",
+                error_code="sec_company_facts_failed",
+                message=str(exc),
+            )
 
         record_financial_fields(metadata)
         return json.dumps(snapshot.__dict__, indent=2, ensure_ascii=False)
@@ -661,7 +759,11 @@ class FinancialMetricsTool(BaseTool):
         except FatalAPIError:
             raise
         except Exception as exc:  # pragma: no cover - network failure path
-            return f"计算财务指标失败：{exc}"
+            return _build_tool_failure_payload(
+                service_name="Financial Metrics",
+                error_code="financial_metrics_failed",
+                message=str(exc),
+            )
 
         record_financial_fields(metadata)
         return json.dumps(metrics, indent=2, ensure_ascii=False)

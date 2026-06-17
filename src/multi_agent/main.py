@@ -13,10 +13,20 @@ from pathlib import Path
 
 from multi_agent.evaluation import WorkflowEvaluation, activate_evaluation, clear_evaluation
 from multi_agent.recommendation import build_structured_recommendation, build_structured_report
-from multi_agent.resolver import CompanyResolver
+from multi_agent.runtime import prepare_runtime_env, project_root
 from multi_agent.settings import InvestmentResearchSettings
-from multi_agent.tools.investment_tools import FatalAPIError
 from multi_agent.watchlist import WatchlistStore
+
+try:
+    from multi_agent.resolver import CompanyResolver
+except ModuleNotFoundError:
+    CompanyResolver = None  # type: ignore[assignment]
+
+try:
+    from multi_agent.tools.investment_tools import FatalAPIError
+except ModuleNotFoundError:
+    class FatalAPIError(RuntimeError):
+        """测试或轻量导入场景下的兜底异常类型。"""
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
 _PLACEHOLDER_MARKER = "<!-- PLACEHOLDER -->"
@@ -38,13 +48,16 @@ class RunOutputPaths:
     readme_path: Path
 
 
+@dataclass(frozen=True)
+class WorkflowExecutionRequest:
+    workflow_inputs: dict[str, str]
+    save_to_watchlist: bool
+    trigger_payload: dict[str, object] | None = None
+
+
 def _prepare_runtime_env() -> None:
     """将 CrewAI 的运行时数据固定到项目目录，避免污染系统环境。"""
-    project_root = Path(__file__).resolve().parents[2]
-    local_home = project_root / ".crewai_home"
-    (local_home / "Library" / "Application Support").mkdir(parents=True, exist_ok=True)
-    os.environ["HOME"] = str(local_home)
-    os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
+    prepare_runtime_env(base_dir=project_root())
 
 
 def _crew():
@@ -55,7 +68,7 @@ def _crew():
 
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return project_root()
 
 
 def _resolve_output_path(path_value: str) -> Path:
@@ -332,18 +345,21 @@ def _write_structured_outputs(
     company_ticker: str,
     watchlist_path: Path,
     save_to_watchlist: bool,
+    task_outputs: dict[str, str] | None = None,
 ) -> dict[str, object]:
     recommendation = build_structured_recommendation(
         company_name=company_name,
         company_ticker=company_ticker,
         report_path=output_paths.final_report_path,
         metrics=latest_metrics,
+        task_outputs=task_outputs,
     )
     structured_report = build_structured_report(
         company_name=company_name,
         company_ticker=company_ticker,
         report_path=output_paths.final_report_path,
         metrics=latest_metrics,
+        task_outputs=task_outputs,
     )
     _write_json_file(output_paths.structured_recommendation_path, recommendation)
     _write_json_file(output_paths.structured_report_path, structured_report)
@@ -468,7 +484,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def _workflow_inputs(company_name: str, company_ticker: str) -> dict[str, str]:
     # 统一在入口处准备工作流输入，方便 CLI、测试和触发器复用同一套参数。
     settings = InvestmentResearchSettings.from_env()
-    resolved_company = CompanyResolver(settings=settings).resolve(company_name, company_ticker)
+    resolver_cls = CompanyResolver
+    if resolver_cls is None:
+        from multi_agent.resolver import CompanyResolver as resolver_cls
+
+    resolved_company = resolver_cls(settings=settings).resolve(company_name, company_ticker)
     artifacts_dir = _project_root() / settings.artifacts_dir
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     local_pdf_path = settings.local_filing_pdf_path.strip()
@@ -493,169 +513,37 @@ def _raise_user_facing_runtime_error(error: Exception) -> None:
     raise SystemExit(f"程序已终止：{error}")
 
 
-def run():
-    """运行自动化投研主流程。"""
-    args = _build_parser().parse_args()
+def _build_kickoff_inputs(
+    workflow_inputs: dict[str, str],
+    *,
+    trigger_payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    inputs: dict[str, object] = {
+        "company_name": workflow_inputs["company_name"],
+        "company_ticker": workflow_inputs["company_ticker"],
+        "current_year": str(datetime.now().year),
+        "artifacts_dir": workflow_inputs["artifacts_dir"],
+        "final_report_path": workflow_inputs["final_report_path"],
+        "local_filing_pdf_path": workflow_inputs.get("local_filing_pdf_path", "未提供本地 PDF 文件"),
+        "local_filing_pdf_available": workflow_inputs.get("local_filing_pdf_available", "no"),
+    }
+    if trigger_payload is not None:
+        inputs["crewai_trigger_payload"] = trigger_payload
+    return inputs
+
+
+def _execute_workflow(
+    *,
+    settings: InvestmentResearchSettings,
+    request: WorkflowExecutionRequest,
+    unexpected_error_prefix: str,
+) -> object:
     evaluation = None
     token = None
+    output_paths = None
+    workflow_inputs = dict(request.workflow_inputs)
 
     try:
-        settings = InvestmentResearchSettings.from_env()
-        if getattr(args, "watchlist_list", False):
-            _print_watchlist(_resolve_watchlist_path(settings))
-            return
-        if getattr(args, "watchlist_rebuild", False):
-            rebuilt_count = _rebuild_watchlist_from_artifacts(
-                base_artifacts_dir=_resolve_output_path(settings.artifacts_dir),
-                watchlist_path=_resolve_watchlist_path(settings),
-            )
-            print(f"watchlist 重建完成，共处理 {rebuilt_count} 个运行目录。")
-            return
-        inputs = _workflow_inputs(args.company_name, args.company_ticker)
-        output_paths = _build_run_output_paths(
-            base_artifacts_dir=_resolve_output_path(settings.artifacts_dir),
-            company_name=inputs["company_name"],
-            company_ticker=inputs["company_ticker"],
-            run_time=_now_for_output_paths(),
-        )
-        output_paths.run_dir.mkdir(parents=True, exist_ok=True)
-        _write_run_readme(
-            output_paths,
-            company_name=inputs["company_name"],
-            company_ticker=inputs["company_ticker"],
-        )
-        _initialize_standard_output_files(
-            output_paths,
-            company_name=inputs["company_name"],
-            company_ticker=inputs["company_ticker"],
-        )
-        evaluation = _create_evaluation(
-            output_paths,
-            company_name=inputs["company_name"],
-            company_ticker=inputs["company_ticker"],
-        )
-        evaluation.start()
-        token = activate_evaluation(evaluation)
-        inputs["artifacts_dir"] = str(output_paths.run_dir)
-        inputs["final_report_path"] = str(output_paths.final_report_path)
-        print(f"本次输出目录：{output_paths.run_dir}")
-        print(f"最终报告路径：{output_paths.final_report_path}")
-        with _temporary_env(
-            {
-                "ARTIFACTS_DIR": str(output_paths.run_dir),
-                "FINAL_REPORT_PATH": str(output_paths.final_report_path),
-            }
-        ):
-            result = _crew().kickoff(inputs=inputs)
-        _materialize_standard_outputs(output_paths, result)
-        _validate_successful_outputs(output_paths)
-        latest_metrics = evaluation.finalize(success=True)
-        _write_structured_outputs(
-            output_paths,
-            latest_metrics=latest_metrics,
-            company_name=inputs["company_name"],
-            company_ticker=inputs["company_ticker"],
-            watchlist_path=_resolve_watchlist_path(settings),
-            save_to_watchlist=getattr(args, "save_to_watchlist", False),
-        )
-        print(f"运行完成，文件已写入：{output_paths.run_dir}")
-    except (FatalAPIError, ValueError) as error:
-        if evaluation is not None:
-            _write_failure_outputs(output_paths, error_message=f"程序已终止：{error}")
-            _write_failure_recommendation_output(
-                output_paths,
-                company_name=inputs["company_name"],
-                company_ticker=inputs["company_ticker"],
-                error_message=f"程序已终止：{error}",
-            )
-        if evaluation is not None:
-            evaluation.finalize(success=False, error_message=str(error))
-        _raise_user_facing_runtime_error(error)
-    except KeyboardInterrupt:
-        if evaluation is not None:
-            _write_failure_outputs(output_paths, error_message="运行被中断。")
-            _write_failure_recommendation_output(
-                output_paths,
-                company_name=inputs["company_name"],
-                company_ticker=inputs["company_ticker"],
-                error_message="运行被中断。",
-            )
-        if evaluation is not None:
-            evaluation.finalize(success=False, error_message="运行被中断。")
-        _raise_user_facing_runtime_error(RuntimeError("运行被中断。"))
-    except Exception as error:
-        if evaluation is not None:
-            _write_failure_outputs(
-                output_paths,
-                error_message=f"运行投研工作流时发生未预期错误：{error}",
-            )
-            _write_failure_recommendation_output(
-                output_paths,
-                company_name=inputs["company_name"],
-                company_ticker=inputs["company_ticker"],
-                error_message=f"运行投研工作流时发生未预期错误：{error}",
-            )
-        if evaluation is not None:
-            evaluation.finalize(success=False, error_message=str(error))
-        _raise_user_facing_runtime_error(
-            RuntimeError(f"运行投研工作流时发生未预期错误：{error}")
-        )
-    finally:
-        if token is not None:
-            clear_evaluation(token)
-
-
-def train():
-    """训练当前 Crew 配置。"""
-    args = _build_parser().parse_args(sys.argv[3:])
-    try:
-        inputs = _workflow_inputs(args.company_name, args.company_ticker)
-        _crew().train(n_iterations=int(sys.argv[1]), filename=sys.argv[2], inputs=inputs)
-    except (FatalAPIError, ValueError) as error:
-        _raise_user_facing_runtime_error(error)
-    except Exception as error:
-        _raise_user_facing_runtime_error(RuntimeError(f"训练过程中发生错误：{error}"))
-
-def replay():
-    """从指定任务回放 Crew 执行。"""
-    try:
-        _crew().replay(task_id=sys.argv[1])
-    except (FatalAPIError, ValueError) as error:
-        _raise_user_facing_runtime_error(error)
-    except Exception as error:
-        _raise_user_facing_runtime_error(RuntimeError(f"回放执行时发生错误：{error}"))
-
-def test():
-    """测试当前 Crew 执行效果。"""
-    args = _build_parser().parse_args(sys.argv[3:])
-    try:
-        inputs = _workflow_inputs(args.company_name, args.company_ticker)
-        _crew().test(n_iterations=int(sys.argv[1]), eval_llm=sys.argv[2], inputs=inputs)
-    except (FatalAPIError, ValueError) as error:
-        _raise_user_facing_runtime_error(error)
-    except Exception as error:
-        _raise_user_facing_runtime_error(RuntimeError(f"测试执行时发生错误：{error}"))
-
-def run_with_trigger():
-    """使用外部触发器参数运行 Crew。"""
-    import json
-
-    evaluation = None
-    token = None
-    if len(sys.argv) < 2:
-        _raise_user_facing_runtime_error(RuntimeError("未提供触发器 JSON 参数。"))
-
-    try:
-        trigger_payload = json.loads(sys.argv[1])
-    except json.JSONDecodeError:
-        _raise_user_facing_runtime_error(RuntimeError("触发器参数不是合法 JSON。"))
-
-    try:
-        settings = InvestmentResearchSettings.from_env()
-        workflow_inputs = _workflow_inputs(
-            trigger_payload.get("company_name", settings.company_name),
-            trigger_payload.get("company_ticker", settings.company_ticker),
-        )
         output_paths = _build_run_output_paths(
             base_artifacts_dir=_resolve_output_path(settings.artifacts_dir),
             company_name=workflow_inputs["company_name"],
@@ -684,38 +572,34 @@ def run_with_trigger():
         workflow_inputs["final_report_path"] = str(output_paths.final_report_path)
         print(f"本次输出目录：{output_paths.run_dir}")
         print(f"最终报告路径：{output_paths.final_report_path}")
-        inputs = {
-            "crewai_trigger_payload": trigger_payload,
-            "company_name": workflow_inputs["company_name"],
-            "company_ticker": workflow_inputs["company_ticker"],
-            "current_year": str(datetime.now().year),
-            "artifacts_dir": workflow_inputs["artifacts_dir"],
-            "final_report_path": workflow_inputs["final_report_path"],
-            "local_filing_pdf_path": workflow_inputs["local_filing_pdf_path"],
-            "local_filing_pdf_available": workflow_inputs["local_filing_pdf_available"],
-        }
+        kickoff_inputs = _build_kickoff_inputs(
+            workflow_inputs,
+            trigger_payload=request.trigger_payload,
+        )
         with _temporary_env(
             {
                 "ARTIFACTS_DIR": str(output_paths.run_dir),
                 "FINAL_REPORT_PATH": str(output_paths.final_report_path),
             }
         ):
-            result = _crew().kickoff(inputs=inputs)
+            result = _crew().kickoff(inputs=kickoff_inputs)
         _materialize_standard_outputs(output_paths, result)
         _validate_successful_outputs(output_paths)
         latest_metrics = evaluation.finalize(success=True)
+        task_outputs = _extract_task_raw_outputs(result)
         _write_structured_outputs(
             output_paths,
             latest_metrics=latest_metrics,
             company_name=workflow_inputs["company_name"],
             company_ticker=workflow_inputs["company_ticker"],
             watchlist_path=_resolve_watchlist_path(settings),
-            save_to_watchlist=bool(trigger_payload.get("save_to_watchlist", False)),
+            save_to_watchlist=request.save_to_watchlist,
+            task_outputs=task_outputs,
         )
         print(f"运行完成，文件已写入：{output_paths.run_dir}")
         return result
     except (FatalAPIError, ValueError) as error:
-        if evaluation is not None:
+        if evaluation is not None and output_paths is not None:
             _write_failure_outputs(output_paths, error_message=f"程序已终止：{error}")
             _write_failure_recommendation_output(
                 output_paths,
@@ -723,41 +607,95 @@ def run_with_trigger():
                 company_ticker=workflow_inputs["company_ticker"],
                 error_message=f"程序已终止：{error}",
             )
-        if evaluation is not None:
             evaluation.finalize(success=False, error_message=str(error))
         _raise_user_facing_runtime_error(error)
     except KeyboardInterrupt:
-        if evaluation is not None:
-            _write_failure_outputs(output_paths, error_message="运行被中断。")
+        interrupted_error = RuntimeError("运行被中断。")
+        if evaluation is not None and output_paths is not None:
+            _write_failure_outputs(output_paths, error_message=str(interrupted_error))
             _write_failure_recommendation_output(
                 output_paths,
                 company_name=workflow_inputs["company_name"],
                 company_ticker=workflow_inputs["company_ticker"],
-                error_message="运行被中断。",
+                error_message=str(interrupted_error),
             )
-        if evaluation is not None:
-            evaluation.finalize(success=False, error_message="运行被中断。")
-        _raise_user_facing_runtime_error(RuntimeError("运行被中断。"))
+            evaluation.finalize(success=False, error_message=str(interrupted_error))
+        _raise_user_facing_runtime_error(interrupted_error)
     except Exception as error:
-        if evaluation is not None:
-            _write_failure_outputs(
-                output_paths,
-                error_message=f"触发器运行时发生未预期错误：{error}",
-            )
+        user_facing_error = RuntimeError(f"{unexpected_error_prefix}：{error}")
+        if evaluation is not None and output_paths is not None:
+            _write_failure_outputs(output_paths, error_message=str(user_facing_error))
             _write_failure_recommendation_output(
                 output_paths,
                 company_name=workflow_inputs["company_name"],
                 company_ticker=workflow_inputs["company_ticker"],
-                error_message=f"触发器运行时发生未预期错误：{error}",
+                error_message=str(user_facing_error),
             )
-        if evaluation is not None:
             evaluation.finalize(success=False, error_message=str(error))
-        _raise_user_facing_runtime_error(
-            RuntimeError(f"触发器运行时发生未预期错误：{error}")
-        )
+        _raise_user_facing_runtime_error(user_facing_error)
     finally:
         if token is not None:
             clear_evaluation(token)
+
+
+def run():
+    """运行自动化投研主流程。"""
+    args = _build_parser().parse_args()
+
+    try:
+        settings = InvestmentResearchSettings.from_env()
+        if getattr(args, "watchlist_list", False):
+            _print_watchlist(_resolve_watchlist_path(settings))
+            return
+        if getattr(args, "watchlist_rebuild", False):
+            rebuilt_count = _rebuild_watchlist_from_artifacts(
+                base_artifacts_dir=_resolve_output_path(settings.artifacts_dir),
+                watchlist_path=_resolve_watchlist_path(settings),
+            )
+            print(f"watchlist 重建完成，共处理 {rebuilt_count} 个运行目录。")
+            return
+        request = WorkflowExecutionRequest(
+            workflow_inputs=_workflow_inputs(args.company_name, args.company_ticker),
+            save_to_watchlist=getattr(args, "save_to_watchlist", False),
+        )
+        _execute_workflow(
+            settings=settings,
+            request=request,
+            unexpected_error_prefix="运行投研工作流时发生未预期错误",
+        )
+    except (FatalAPIError, ValueError) as error:
+        _raise_user_facing_runtime_error(error)
+
+
+def run_with_trigger():
+    """使用外部触发器参数运行 Crew。"""
+    import json
+
+    if len(sys.argv) < 2:
+        _raise_user_facing_runtime_error(RuntimeError("未提供触发器 JSON 参数。"))
+
+    try:
+        trigger_payload = json.loads(sys.argv[1])
+    except json.JSONDecodeError:
+        _raise_user_facing_runtime_error(RuntimeError("触发器参数不是合法 JSON。"))
+
+    try:
+        settings = InvestmentResearchSettings.from_env()
+        request = WorkflowExecutionRequest(
+            workflow_inputs=_workflow_inputs(
+                trigger_payload.get("company_name", settings.company_name),
+                trigger_payload.get("company_ticker", settings.company_ticker),
+            ),
+            save_to_watchlist=bool(trigger_payload.get("save_to_watchlist", False)),
+            trigger_payload=trigger_payload,
+        )
+        return _execute_workflow(
+            settings=settings,
+            request=request,
+            unexpected_error_prefix="触发器运行时发生未预期错误",
+        )
+    except (FatalAPIError, ValueError) as error:
+        _raise_user_facing_runtime_error(error)
 
 
 if __name__ == "__main__":

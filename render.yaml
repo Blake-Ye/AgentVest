@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: agentvest-dashboard
+    runtime: python
+    plan: free
+    buildCommand: pip install .
+    startCommand: python -m uvicorn multi_agent.api:create_app --factory --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      - key: MODEL
+        value: qwen-plus
+      - key: OPENAI_BASE_URL
+        value: https://dashscope.aliyuncs.com/compatible-mode/v1
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      - key: SEC_API_EMAIL
+        sync: false
+      - key: MULTI_AGENT_DATA_DIR
+        value: /tmp/multi-agent/api
+      - key: ARTIFACTS_DIR
+        value: /tmp/multi-agent/artifacts
+      - key: WATCHLIST_PATH
+        value: /tmp/multi-agent/watchlist/watchlist.json
+      - key: FINAL_REPORT_PATH
+        value: /tmp/multi-agent/report.md
+      - key: BENCHMARK_OUTPUT_DIR
+        value: /tmp/multi-agent/benchmark

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel, Field
+
+from crewai import Agent, LLM
+
+from multi_agent.settings import InvestmentResearchSettings
 
 _URL_PATTERN = re.compile(r"https?://[^\s)>\"']+")
 
@@ -43,116 +50,235 @@ def calculate_trust_score(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _normalize_heading_text(value: str) -> str:
-    text = re.sub(r"^#+\s*", "", value.strip())
-    text = re.sub(r"[*_`>#-]+", " ", text)
-    text = re.sub(r"[^\w\u4e00-\u9fff：:]+", " ", text, flags=re.UNICODE)
-    text = re.sub(r"\s+", "", text)
-    return text.lower()
+class GeneratedStructuredContent(BaseModel):
+    summary: str = Field(default="")
+    stance: str = Field(default="watch")
+    stance_label: str = Field(default="观察")
+    catalysts: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+    sections: dict[str, str] = Field(
+        default_factory=lambda: {
+            "business_overview": "",
+            "recent_updates": "",
+            "financial_analysis": "",
+            "investment_recommendation": "",
+        }
+    )
+    citation_urls: list[str] = Field(default_factory=list)
 
 
-def _extract_section_lines(report_content: str, section_name: str) -> list[str]:
-    lines = report_content.splitlines()
-    target_heading = _normalize_heading_text(section_name)
-    collected: list[str] = []
-    capture = False
-
-    for line in lines:
-        stripped_line = line.strip()
-        if stripped_line.startswith("##"):
-            current_heading = _normalize_heading_text(stripped_line)
-            if capture:
-                break
-            if current_heading.startswith(target_heading):
-                capture = True
-            continue
-        if capture and stripped_line:
-            collected.append(stripped_line)
-
-    return collected
+class StructuredRecommendation(BaseModel):
+    generated_at: str
+    company_name: str
+    company_ticker: str
+    stance: str
+    stance_label: str
+    trust_score: float
+    trust_level: str
+    trust_summary: str
+    summary: str
+    catalysts: list[str]
+    risks: list[str]
+    next_actions: list[str]
+    source_report_path: str
 
 
-def _extract_section_summary(report_content: str, section_name: str) -> str:
-    for line in _extract_section_lines(report_content, section_name):
-        if not line.startswith("-") and not line.startswith("*"):
-            return line
-    return ""
+class StructuredReport(BaseModel):
+    generated_at: str
+    company_name: str
+    company_ticker: str
+    summary: str
+    stance: str
+    stance_label: str
+    trust_score: float
+    trust_level: str
+    trust_summary: str
+    catalysts: list[str]
+    risks: list[str]
+    next_actions: list[str]
+    sections: dict[str, str]
+    citation_urls: list[str]
+    validation: dict[str, Any]
+    source_report_path: str
 
 
-def _extract_section_text(report_content: str, section_name: str) -> str:
-    return "\n".join(_extract_section_lines(report_content, section_name)).strip()
+class StructuredOutputs(BaseModel):
+    recommendation: StructuredRecommendation
+    report: StructuredReport
 
 
-def _extract_section_bullets(report_content: str, section_name: str) -> list[str]:
-    bullets: list[str] = []
-    section_lines = _extract_section_lines(report_content, section_name)
-    for line in section_lines:
-        if line.startswith("-") or line.startswith("*"):
-            bullets.append(line[1:].strip())
-    if bullets:
-        return bullets
-
-    return _extract_table_items(section_lines, section_name=section_name)
-
-
-def _split_markdown_row(line: str) -> list[str]:
-    return [part.strip() for part in line.strip().strip("|").split("|")]
-
-
-def _is_markdown_separator(line: str) -> bool:
-    return bool(re.fullmatch(r"[\|\-\:\s]+", line.strip()))
-
-
-def _extract_table_items(section_lines: list[str], *, section_name: str) -> list[str]:
-    table_lines = [line for line in section_lines if line.startswith("|")]
-    if len(table_lines) < 2:
-        return []
-
-    headers = _split_markdown_row(table_lines[0])
-    target_headers = {
-        "催化剂": ("催化剂",),
-        "风险": ("具体风险", "风险"),
-    }.get(section_name, (section_name,))
-    header_index = 0
-    best_score = -1
-    for index, header in enumerate(headers):
-        normalized_header = _normalize_heading_text(header)
-        for candidate in target_headers:
-            normalized_candidate = _normalize_heading_text(candidate)
-            if normalized_header == normalized_candidate:
-                score = 3
-            elif normalized_header.startswith(normalized_candidate):
-                score = 2
-            elif normalized_candidate in normalized_header:
-                score = 1
-            else:
-                score = 0
-            if score > best_score:
-                best_score = score
-                header_index = index
-
-    extracted: list[str] = []
-    for line in table_lines[1:]:
-        if _is_markdown_separator(line):
-            continue
-        columns = _split_markdown_row(line)
-        if header_index < len(columns) and columns[header_index]:
-            extracted.append(columns[header_index])
-    return extracted
-
-
-def _infer_stance(report_content: str) -> tuple[str, str]:
-    section_text = "\n".join(_extract_section_lines(report_content, "投资建议")) or report_content
-    sell_keywords = ("建议卖出", "卖出", "减持", "underperform", "negative")
-    buy_keywords = ("建议买入", "建议增持", "买入", "增持", "outperform", "positive")
-    hold_keywords = ("建议持有", "持有", "中性", "观望", "hold", "neutral")
-    if any(keyword in section_text for keyword in sell_keywords):
-        return "sell", "减持"
-    if any(keyword in section_text for keyword in buy_keywords):
+def _normalize_stance(stance: str) -> tuple[str, str]:
+    normalized = stance.strip().lower()
+    if normalized in {"buy", "增持", "买入"}:
         return "buy", "增持"
-    if any(keyword in section_text for keyword in hold_keywords):
+    if normalized in {"hold", "中性", "持有"}:
         return "hold", "中性"
+    if normalized in {"sell", "减持", "卖出"}:
+        return "sell", "减持"
     return "watch", "观察"
+
+
+def _default_next_actions() -> list[str]:
+    return [
+        "复核最新一季财报和关键经营指标。",
+        "跟踪重大催化剂是否兑现。",
+        "将核心风险加入后续监控列表。",
+    ]
+
+
+def _build_generation_prompt(
+    *,
+    company_name: str,
+    company_ticker: str,
+    report_content: str,
+    metrics: dict[str, Any],
+    task_outputs: dict[str, str] | None,
+) -> str:
+    return "\n\n".join(
+        [
+            "请基于以下投研工作流结果，生成严格的结构化 JSON 内容。",
+            "要求：",
+            "1. stance 只能是 buy/hold/sell/watch 之一。",
+            "2. stance_label 必须与 stance 对应，分别为 增持/中性/减持/观察。",
+            "3. catalysts、risks、next_actions 使用简洁中文数组。",
+            "4. sections 必须包含 business_overview、recent_updates、financial_analysis、investment_recommendation 四个键。",
+            "5. citation_urls 只保留真实 URL。",
+            "6. 不要输出 markdown，不要解释，只返回符合 schema 的结构化内容。",
+            f"company_name: {company_name}",
+            f"company_ticker: {company_ticker}",
+            f"metrics: {json.dumps(metrics, ensure_ascii=False, indent=2)}",
+            f"task_outputs: {json.dumps(task_outputs or {}, ensure_ascii=False, indent=2)}",
+            f"report_content:\n{report_content}",
+        ]
+    )
+
+
+def _generate_structured_content_with_agent(
+    *,
+    company_name: str,
+    company_ticker: str,
+    report_content: str,
+    metrics: dict[str, Any],
+    task_outputs: dict[str, str] | None,
+) -> GeneratedStructuredContent:
+    settings = InvestmentResearchSettings.from_env()
+    llm = LLM(
+        model=settings.model,
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        temperature=0,
+    )
+    generator = Agent(
+        role="投研结构化输出分析师",
+        goal="把投研工作流结果转换成稳定的结构化 JSON 输出",
+        backstory="擅长把长文本研究结论压缩为可程序消费的结构化结果。",
+        llm=llm,
+        verbose=False,
+    )
+    result = generator.kickoff(
+        _build_generation_prompt(
+            company_name=company_name,
+            company_ticker=company_ticker,
+            report_content=report_content,
+            metrics=metrics,
+            task_outputs=task_outputs,
+        ),
+        response_format=GeneratedStructuredContent,
+    )
+    if result.pydantic is None:
+        raise RuntimeError("结构化输出生成失败：未返回 Pydantic 结果。")
+    return result.pydantic
+
+
+def _fallback_structured_content(report_content: str) -> GeneratedStructuredContent:
+    citation_urls = _URL_PATTERN.findall(report_content)
+    return GeneratedStructuredContent(
+        summary="",
+        stance="watch",
+        stance_label="观察",
+        catalysts=[],
+        risks=[],
+        next_actions=_default_next_actions(),
+        sections={
+            "business_overview": "",
+            "recent_updates": "",
+            "financial_analysis": "",
+            "investment_recommendation": report_content.strip(),
+        },
+        citation_urls=citation_urls,
+    )
+
+
+def _generate_structured_outputs(
+    *,
+    company_name: str,
+    company_ticker: str,
+    report_path: Path,
+    metrics: dict[str, Any],
+    task_outputs: dict[str, str] | None = None,
+) -> StructuredOutputs:
+    report_content = report_path.read_text(encoding="utf-8")
+    trust_score = metrics.get("trust_score") or calculate_trust_score(metrics)
+    try:
+        generated = _generate_structured_content_with_agent(
+            company_name=company_name,
+            company_ticker=company_ticker,
+            report_content=report_content,
+            metrics=metrics,
+            task_outputs=task_outputs,
+        )
+    except Exception:
+        generated = _fallback_structured_content(report_content)
+
+    stance, stance_label = _normalize_stance(generated.stance or generated.stance_label)
+    next_actions = generated.next_actions or _default_next_actions()
+    sections = {
+        "business_overview": generated.sections.get("business_overview", ""),
+        "recent_updates": generated.sections.get("recent_updates", ""),
+        "financial_analysis": generated.sections.get("financial_analysis", ""),
+        "investment_recommendation": generated.sections.get("investment_recommendation", ""),
+    }
+    recommendation = StructuredRecommendation(
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        company_name=company_name,
+        company_ticker=company_ticker,
+        stance=stance,
+        stance_label=stance_label,
+        trust_score=trust_score["score"],
+        trust_level=trust_score["level"],
+        trust_summary=trust_score["summary"],
+        summary=generated.summary,
+        catalysts=generated.catalysts,
+        risks=generated.risks,
+        next_actions=next_actions,
+        source_report_path=str(report_path.resolve()),
+    )
+    report = StructuredReport(
+        generated_at=recommendation.generated_at,
+        company_name=company_name,
+        company_ticker=company_ticker,
+        summary=generated.summary,
+        stance=stance,
+        stance_label=stance_label,
+        trust_score=trust_score["score"],
+        trust_level=trust_score["level"],
+        trust_summary=trust_score["summary"],
+        catalysts=generated.catalysts,
+        risks=generated.risks,
+        next_actions=next_actions,
+        sections=sections,
+        citation_urls=generated.citation_urls,
+        validation={
+            "has_summary": bool(generated.summary),
+            "has_catalysts": bool(generated.catalysts),
+            "has_risks": bool(generated.risks),
+            "has_investment_recommendation": bool(sections["investment_recommendation"]),
+            "citation_count": len(generated.citation_urls),
+        },
+        source_report_path=str(report_path.resolve()),
+    )
+    return StructuredOutputs(recommendation=recommendation, report=report)
 
 
 def build_structured_report(
@@ -161,46 +287,16 @@ def build_structured_report(
     company_ticker: str,
     report_path: Path,
     metrics: dict[str, Any],
+    task_outputs: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    report_content = report_path.read_text(encoding="utf-8")
-    recommendation = build_structured_recommendation(
+    structured_outputs = _generate_structured_outputs(
         company_name=company_name,
         company_ticker=company_ticker,
         report_path=report_path,
         metrics=metrics,
+        task_outputs=task_outputs,
     )
-    sections = {
-        "business_overview": _extract_section_text(report_content, "业务概览"),
-        "recent_updates": _extract_section_text(report_content, "近期动态"),
-        "financial_analysis": _extract_section_text(report_content, "财务分析"),
-        "investment_recommendation": _extract_section_text(report_content, "投资建议"),
-    }
-    citation_urls = _URL_PATTERN.findall(report_content)
-
-    return {
-        "generated_at": recommendation["generated_at"],
-        "company_name": company_name,
-        "company_ticker": company_ticker,
-        "summary": recommendation["summary"],
-        "stance": recommendation["stance"],
-        "stance_label": recommendation["stance_label"],
-        "trust_score": recommendation["trust_score"],
-        "trust_level": recommendation["trust_level"],
-        "trust_summary": recommendation["trust_summary"],
-        "catalysts": recommendation["catalysts"],
-        "risks": recommendation["risks"],
-        "next_actions": recommendation["next_actions"],
-        "sections": sections,
-        "citation_urls": citation_urls,
-        "validation": {
-            "has_summary": bool(recommendation["summary"]),
-            "has_catalysts": bool(recommendation["catalysts"]),
-            "has_risks": bool(recommendation["risks"]),
-            "has_investment_recommendation": bool(sections["investment_recommendation"]),
-            "citation_count": len(citation_urls),
-        },
-        "source_report_path": recommendation["source_report_path"],
-    }
+    return structured_outputs.report.model_dump()
 
 
 def build_structured_recommendation(
@@ -209,32 +305,13 @@ def build_structured_recommendation(
     company_ticker: str,
     report_path: Path,
     metrics: dict[str, Any],
+    task_outputs: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    report_content = report_path.read_text(encoding="utf-8")
-    trust_score = metrics.get("trust_score") or calculate_trust_score(metrics)
-    stance, stance_label = _infer_stance(report_content)
-    summary = _extract_section_summary(report_content, "执行摘要")
-    catalysts = _extract_section_bullets(report_content, "催化剂")
-    risks = _extract_section_bullets(report_content, "风险")
-
-    next_actions = [
-        "复核最新一季财报和关键经营指标。",
-        "跟踪重大催化剂是否兑现。",
-        "将核心风险加入后续监控列表。",
-    ]
-
-    return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "company_name": company_name,
-        "company_ticker": company_ticker,
-        "stance": stance,
-        "stance_label": stance_label,
-        "trust_score": trust_score["score"],
-        "trust_level": trust_score["level"],
-        "trust_summary": trust_score["summary"],
-        "summary": summary,
-        "catalysts": catalysts,
-        "risks": risks,
-        "next_actions": next_actions,
-        "source_report_path": str(report_path.resolve()),
-    }
+    structured_outputs = _generate_structured_outputs(
+        company_name=company_name,
+        company_ticker=company_ticker,
+        report_path=report_path,
+        metrics=metrics,
+        task_outputs=task_outputs,
+    )
+    return structured_outputs.recommendation.model_dump()

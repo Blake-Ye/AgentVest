@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Callable
-from urllib.parse import quote
 
 import requests
 
@@ -13,6 +13,7 @@ from multi_agent.tools.investment_tools import (
     _build_retry_session,
     _perform_request,
     _raise_for_status_with_context,
+    _sec_user_agent,
 )
 
 
@@ -118,6 +119,8 @@ class OpenAICompanyResolver:
 class CompanyResolver:
     """先走别名和权威映射 API，再用轻量 LLM 兜底的公司解析器。"""
 
+    SEC_TICKER_LOOKUP_URL = "https://www.sec.gov/files/company_tickers.json"
+
     _ALIASES: dict[str, CompanyResolution] = {
         "阿里": CompanyResolution(
             user_input="阿里",
@@ -163,6 +166,24 @@ class CompanyResolver:
             parent_company="Sony Group Corporation",
             exchange="NYSE",
             confidence=0.97,
+        ),
+        "Google": CompanyResolution(
+            user_input="Google",
+            normalized_name="Alphabet Inc.",
+            ticker="GOOGL",
+            entity_type="public_company",
+            parent_company="Alphabet Inc.",
+            exchange="NASDAQ",
+            confidence=0.99,
+        ),
+        "谷歌": CompanyResolution(
+            user_input="谷歌",
+            normalized_name="Alphabet Inc.",
+            ticker="GOOGL",
+            entity_type="public_company",
+            parent_company="Alphabet Inc.",
+            exchange="NASDAQ",
+            confidence=0.99,
         ),
     }
 
@@ -227,43 +248,59 @@ class CompanyResolver:
     def _resolve_alias(self, company_name: str) -> CompanyResolution | None:
         return self._ALIASES.get(company_name.strip())
 
-    def _resolve_by_ticker(self, ticker: str) -> CompanyResolution | None:
-        url = f"https://api.sec-api.io/mapping/ticker/{quote(ticker)}?token={self.settings.sec_api_key}"
+    @lru_cache(maxsize=1)
+    def _load_company_directory(self) -> list[dict[str, Any]]:
         response = _perform_request(
-            lambda: self.session.get(url, timeout=self.settings.http_timeout_seconds),
-            service_name="SEC Mapping API",
+            lambda: self.session.get(
+                self.SEC_TICKER_LOOKUP_URL,
+                headers={"User-Agent": _sec_user_agent(self.settings)},
+                timeout=self.settings.http_timeout_seconds,
+            ),
+            service_name="SEC Ticker Lookup",
         )
-        _raise_for_status_with_context(response, service_name="SEC Mapping API")
+        _raise_for_status_with_context(response, service_name="SEC Ticker Lookup")
         payload = response.json()
-        if not payload:
-            return None
-        for item in payload:
+        if isinstance(payload, dict):
+            return [item for item in payload.values() if isinstance(item, dict)]
+        return [item for item in payload if isinstance(item, dict)]
+
+    def _resolve_by_ticker(self, ticker: str) -> CompanyResolution | None:
+        for item in self._load_company_directory():
             if str(item.get("ticker", "")).upper() == ticker:
-                return self._from_mapping_result(ticker, item)
-        return self._from_mapping_result(ticker, payload[0])
+                return self._from_directory_result(ticker, item)
+        return None
 
     def _resolve_by_name(self, company_name: str) -> CompanyResolution | None:
-        url = f"https://api.sec-api.io/mapping/name/{quote(company_name)}?token={self.settings.sec_api_key}"
-        response = _perform_request(
-            lambda: self.session.get(url, timeout=self.settings.http_timeout_seconds),
-            service_name="SEC Mapping API",
-        )
-        _raise_for_status_with_context(response, service_name="SEC Mapping API")
-        payload = response.json()
-        if not payload:
+        directory = self._load_company_directory()
+        if not directory:
             return None
         ranked_results = sorted(
-            payload,
+            directory,
             key=lambda item: (
                 bool(item.get("isDelisted", False)),
-                self._name_distance(company_name, str(item.get("name", ""))),
-                len(str(item.get("name", ""))),
+                self._name_distance(company_name, str(item.get("title") or item.get("name", ""))),
+                len(str(item.get("title") or item.get("name", ""))),
             ),
         )
-        return self._from_mapping_result(company_name, ranked_results[0])
+        best_match = ranked_results[0]
+        if self._name_distance(company_name, str(best_match.get("title") or best_match.get("name", ""))) > 3:
+            return None
+        return self._from_directory_result(company_name, best_match)
 
     def _from_mapping_result(self, user_input: str, item: dict[str, Any]) -> CompanyResolution:
         normalized_name = str(item.get("name", "")).strip()
+        return CompanyResolution(
+            user_input=user_input,
+            normalized_name=normalized_name,
+            ticker=str(item.get("ticker", "")).strip().upper(),
+            entity_type="public_company",
+            parent_company=normalized_name,
+            exchange=str(item.get("exchange", "")).strip(),
+            confidence=1.0,
+        )
+
+    def _from_directory_result(self, user_input: str, item: dict[str, Any]) -> CompanyResolution:
+        normalized_name = str(item.get("title") or item.get("name", "")).strip()
         return CompanyResolution(
             user_input=user_input,
             normalized_name=normalized_name,

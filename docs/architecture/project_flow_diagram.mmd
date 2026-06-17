@@ -1,0 +1,25 @@
+flowchart TD
+    CLI["main.py CLI"]
+    Settings["settings.py\nInvestmentResearchSettings"]
+    Crew["crew.py\nMultiAgent Crew"]
+    Agents["agents.yaml\n3 Agents"]
+    Tasks["tasks.yaml\n4 Tasks"]
+    Tools["investment_tools.py\nSearch / SEC / Metrics / PDF / Write"]
+    Finance["finance.py\nFinancial Metrics Logic"]
+
+    Market["01 market intelligence"]
+    Filing["02 filing review"]
+    Financial["03 financial analysis"]
+    Report["final investment memo"]
+
+    CLI --> Settings
+    CLI --> Crew
+    Crew --> Agents
+    Crew --> Tasks
+    Agents --> Tools
+    Tools --> Finance
+
+    Tasks --> Market
+    Market --> Filing
+    Filing --> Financial
+    Financial --> Report
