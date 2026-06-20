@@ -15,6 +15,7 @@ from crewai.tools import BaseTool
 
 from multi_agent.evaluation import record_api_call, record_financial_fields
 from multi_agent.finance import CompanyFinancialSnapshot, compute_key_metrics
+from multi_agent.market_profile import IssuerProfile, MarketIdentifierService, MarketScope
 from multi_agent.settings import InvestmentResearchSettings
 
 try:
@@ -36,6 +37,32 @@ class FatalAPIError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.service_name = service_name
+
+
+def _safe_json_dumps(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def _success_payload(data: dict[str, Any], *, source: str) -> str:
+    return _safe_json_dumps({"status": "success", "source": source, "data": data})
+
+
+def _degraded_payload(
+    *,
+    source: str,
+    message: str,
+    details: dict[str, Any],
+) -> str:
+    return _safe_json_dumps(
+        {
+            "status": "degraded",
+            "source": source,
+            "error_type": "market_not_applicable",
+            "message": message,
+            "retryable": False,
+            "details": details,
+        }
+    )
 
 
 def _build_retry_session(max_retries: int) -> requests.Session:
@@ -317,6 +344,67 @@ class SecApiService:
 
 
 @dataclass(frozen=True)
+class MarketProviderDescriptor:
+    source_name: str
+    market_scope: str
+    official_entrypoint: str
+
+    def query_hint(self, *, company_name: str, ticker: str) -> str:
+        normalized_name = company_name.strip()
+        normalized_ticker = ticker.strip().upper()
+        if self.market_scope == MarketScope.HKEX.value:
+            return f"{normalized_ticker} {normalized_name}".strip()
+        if self.market_scope == MarketScope.CN_A_SHARE.value:
+            return f"{normalized_ticker} {normalized_name}".strip()
+        if self.market_scope == MarketScope.EU_LISTED.value:
+            return f"{normalized_ticker} {normalized_name}".strip()
+        return normalized_ticker or normalized_name
+
+
+class SourceRouter:
+    HKEX_DISCLOSURE_URL = "https://www.hkexnews.hk/search/titlesearch.xhtml"
+    CN_DISCLOSURE_URL = "http://www.cninfo.com.cn/new/fulltextSearch"
+    EU_DISCLOSURE_URL = "https://live.euronext.com/"
+
+    def __init__(self, settings: InvestmentResearchSettings) -> None:
+        self._identifier = MarketIdentifierService(settings)
+
+    def identify_issuer(self, company_name: str, ticker: str) -> IssuerProfile:
+        return self._identifier.identify(company_name=company_name, ticker=ticker)
+
+    def provider_for_disclosures(self, profile: IssuerProfile) -> MarketProviderDescriptor:
+        if profile.sec_applicable:
+            return MarketProviderDescriptor(
+                source_name="sec_provider",
+                market_scope=profile.market_scope,
+                official_entrypoint="https://www.sec.gov/edgar/search/",
+            )
+        if profile.market_scope == MarketScope.HKEX.value:
+            return MarketProviderDescriptor(
+                source_name="hkex_provider",
+                market_scope=profile.market_scope,
+                official_entrypoint=self.HKEX_DISCLOSURE_URL,
+            )
+        if profile.market_scope == MarketScope.CN_A_SHARE.value:
+            return MarketProviderDescriptor(
+                source_name="cn_provider",
+                market_scope=profile.market_scope,
+                official_entrypoint=self.CN_DISCLOSURE_URL,
+            )
+        if profile.market_scope == MarketScope.EU_LISTED.value:
+            return MarketProviderDescriptor(
+                source_name="eu_provider",
+                market_scope=profile.market_scope,
+                official_entrypoint=self.EU_DISCLOSURE_URL,
+            )
+        return MarketProviderDescriptor(
+            source_name="generic_official_provider",
+            market_scope=profile.market_scope,
+            official_entrypoint="",
+        )
+
+
+@dataclass(frozen=True)
 class FinancialFieldExtraction:
     value: float
     normalized_value: float
@@ -551,6 +639,57 @@ class GoogleSearchTool(BaseTool):
         return "\n\n".join(formatted_results)
 
 
+class OfficialDisclosureSearchInput(BaseModel):
+    company_name: str = Field(..., description="The company name to investigate.")
+    ticker: str = Field(..., description="The public ticker symbol to route.")
+
+
+class OfficialDisclosureSearchTool(BaseTool):
+    name: str = "Official Disclosure Search"
+    description: str = "Route a company to the correct official disclosure entrypoint for its market."
+    args_schema: Type[BaseModel] = OfficialDisclosureSearchInput
+
+    def __init__(
+        self,
+        settings: InvestmentResearchSettings | None = None,
+        sec_service: SecApiService | None = None,
+        router: SourceRouter | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._settings = settings or InvestmentResearchSettings.from_env()
+        self._sec_service = sec_service or SecApiService(self._settings)
+        self._router = router or SourceRouter(self._settings)
+
+    def _run(self, company_name: str, ticker: str) -> str:
+        profile = self._router.identify_issuer(company_name=company_name, ticker=ticker)
+        provider = self._router.provider_for_disclosures(profile)
+
+        if provider.source_name == "sec_provider":
+            filings = self._sec_service.search_filings(
+                company_name=company_name,
+                ticker=profile.canonical_ticker,
+                form_type="10-K",
+                limit=3,
+            )
+            return _success_payload(
+                {
+                    "issuer_profile": profile.as_dict(),
+                    "official_results": filings,
+                },
+                source="sec_provider",
+            )
+
+        return _success_payload(
+            {
+                "issuer_profile": profile.as_dict(),
+                "official_entrypoint": provider.official_entrypoint,
+                "query_hint": provider.query_hint(company_name=company_name, ticker=ticker),
+            },
+            source=provider.source_name,
+        )
+
+
 class SecFilingSearchInput(BaseModel):
     company_name: str = Field(..., description="Legal company name to search in SEC filings.")
     ticker: str = Field(..., description="Public ticker symbol, such as AAPL.")
@@ -567,17 +706,26 @@ class SecFilingSearchTool(BaseTool):
         self,
         settings: InvestmentResearchSettings | None = None,
         service: SecApiService | None = None,
+        market_identifier: MarketIdentifierService | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._settings = settings or InvestmentResearchSettings.from_env()
         self._service = service or SecApiService(self._settings)
+        self._market_identifier = market_identifier or MarketIdentifierService(self._settings)
 
     def _run(self, company_name: str, ticker: str, form_type: str = "10-K", limit: int = 3) -> str:
+        profile = self._market_identifier.identify(company_name=company_name, ticker=ticker)
+        if not profile.sec_applicable:
+            return _degraded_payload(
+                source="sec_provider",
+                message=f"当前 ticker {profile.canonical_ticker} 属于非 SEC 市场，SEC 数据源不适用。",
+                details=profile.as_dict(),
+            )
         try:
             filings = self._service.search_filings(
                 company_name=company_name,
-                ticker=ticker,
+                ticker=profile.canonical_ticker,
                 form_type=form_type,
                 limit=limit,
             )
@@ -615,15 +763,24 @@ class SecCompanyFactsTool(BaseTool):
         self,
         settings: InvestmentResearchSettings | None = None,
         service: SecApiService | None = None,
+        market_identifier: MarketIdentifierService | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._settings = settings or InvestmentResearchSettings.from_env()
         self._service = service or SecApiService(self._settings)
+        self._market_identifier = market_identifier or MarketIdentifierService(self._settings)
 
     def _run(self, ticker: str) -> str:
+        profile = self._market_identifier.identify(company_name="", ticker=ticker)
+        if not profile.sec_applicable:
+            return _degraded_payload(
+                source="sec_provider",
+                message=f"当前 ticker {profile.canonical_ticker} 属于非 SEC 市场，SEC 数据源不适用。",
+                details=profile.as_dict(),
+            )
         try:
-            company_facts = self._service.fetch_company_facts(ticker)
+            company_facts = self._service.fetch_company_facts(profile.canonical_ticker)
             snapshot, metadata = _build_financial_snapshot_with_metadata(company_facts)
         except FatalAPIError:
             raise
@@ -647,15 +804,24 @@ class FinancialMetricsTool(BaseTool):
         self,
         settings: InvestmentResearchSettings | None = None,
         service: SecApiService | None = None,
+        market_identifier: MarketIdentifierService | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._settings = settings or InvestmentResearchSettings.from_env()
         self._service = service or SecApiService(self._settings)
+        self._market_identifier = market_identifier or MarketIdentifierService(self._settings)
 
     def _run(self, ticker: str) -> str:
+        profile = self._market_identifier.identify(company_name="", ticker=ticker)
+        if not profile.sec_applicable:
+            return _degraded_payload(
+                source="sec_provider",
+                message=f"当前 ticker {profile.canonical_ticker} 属于非 SEC 市场，SEC 数据源不适用。",
+                details=profile.as_dict(),
+            )
         try:
-            company_facts = self._service.fetch_company_facts(ticker)
+            company_facts = self._service.fetch_company_facts(profile.canonical_ticker)
             snapshot, metadata = _build_financial_snapshot_with_metadata(company_facts)
             metrics = compute_key_metrics(snapshot)
         except FatalAPIError:

@@ -80,3 +80,18 @@ def test_settings_default_company_ticker_can_be_empty(
     settings = InvestmentResearchSettings.from_env()
 
     assert settings.company_ticker == ""
+
+
+def test_settings_reads_market_identifier_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("COMPANY_RESOLVER_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("MARKET_IDENTIFIER_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("SERPER_API_KEY", "serper-key")
+    monkeypatch.setenv("SEC_API_KEY", "sec-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+
+    settings = InvestmentResearchSettings.from_env()
+
+    assert settings.market_identifier_model == "deepseek-v4-flash"

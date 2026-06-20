@@ -9,6 +9,7 @@ from multi_agent.settings import InvestmentResearchSettings
 from multi_agent.tools.investment_tools import (
     FinancialMetricsTool,
     GoogleSearchTool,
+    OfficialDisclosureSearchTool,
     PDFTextExtractTool,
     SecCompanyFactsTool,
     SecFilingSearchTool,
@@ -45,11 +46,11 @@ class MultiAgent:
             return candidate_path
         return None
 
-    def _llm(self) -> LLM:
+    def _llm(self, model_name: str | None = None) -> LLM:
         # LLM 配置统一收束到这里，便于后续替换模型或调整采样参数。
         settings = self._settings()
         return LLM(
-            model=settings.model,
+            model=model_name or settings.model,
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
             temperature=0.3,
@@ -59,9 +60,14 @@ class MultiAgent:
     def information_gathering_analyst(self) -> Agent:
         return Agent(
             config=self.agents_config["information_gathering_analyst"],  # type: ignore[index]
-            llm=self._llm(),
+            llm=self._llm(
+                self._settings().market_identifier_model
+                or self._settings().company_resolver_model
+                or self._settings().model
+            ),
             tools=[
                 GoogleSearchTool(settings=self._settings()),
+                OfficialDisclosureSearchTool(settings=self._settings()),
                 SecFilingSearchTool(settings=self._settings()),
             ],
             max_retry_limit=3,

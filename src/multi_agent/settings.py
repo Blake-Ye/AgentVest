@@ -54,6 +54,7 @@ class InvestmentResearchSettings:
     serpapi_api_key: str
     sec_api_key: str
     sec_api_email: str
+    market_identifier_model: str = ""
     max_search_results: int = 5
     http_timeout_seconds: int = 20
     max_http_retries: int = 3
@@ -86,6 +87,13 @@ class InvestmentResearchSettings:
         return cls(
             model=_read_env("MODEL", default="qwen-plus"),
             company_resolver_model=_read_env("COMPANY_RESOLVER_MODEL", default=_read_env("MODEL", default="qwen-plus")),
+            market_identifier_model=_read_env(
+                "MARKET_IDENTIFIER_MODEL",
+                default=_read_env(
+                    "COMPANY_RESOLVER_MODEL",
+                    default=_read_env("MODEL", default="qwen-plus"),
+                ),
+            ),
             openai_api_key=_read_env("OPENAI_API_KEY", required=True),
             openai_base_url=_read_env("OPENAI_BASE_URL", required=True),
             search_provider=_read_env("SEARCH_PROVIDER", default="auto").lower(),

@@ -53,3 +53,23 @@ def test_financial_agent_only_exposes_pdf_tool_when_local_file_exists(
     assert "Extract PDF Text" in financial_tool_names
     assert "Read Local Artifact" not in financial_tool_names
     assert "Write Local Artifact" not in financial_tool_names
+
+
+def test_information_agent_uses_market_identifier_model_and_disclosure_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("COMPANY_RESOLVER_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("MARKET_IDENTIFIER_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("SERPER_API_KEY", "serper-key")
+    monkeypatch.setenv("SEC_API_KEY", "sec-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+
+    crew = MultiAgent().crew()
+    information_agent = next(agent for agent in crew.agents if "信息搜集分析师" in agent.role)
+    tool_names = [tool.name for tool in information_agent.tools]
+
+    assert information_agent.llm.model == "deepseek-v4-flash"
+    assert "Official Disclosure Search" in tool_names

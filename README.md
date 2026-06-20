@@ -186,6 +186,7 @@ cp .env.example .env
 ```env
 MODEL=qwen-plus
 COMPANY_RESOLVER_MODEL=qwen-plus
+MARKET_IDENTIFIER_MODEL=deepseek-v4-flash
 OPENAI_API_KEY=your_dashscope_or_openai_compatible_key
 OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
@@ -214,6 +215,8 @@ WATCHLIST_PATH=artifacts/watchlist.json
   - CrewAI 里使用的 LLM 名称
 - `COMPANY_RESOLVER_MODEL`
   - 仅用于公司名称解析兜底的小模型；建议使用更便宜、更快的模型
+- `MARKET_IDENTIFIER_MODEL`
+  - 用于市场识别层的轻量模型配置；当前实现以规则识别为主，这个模型位预留给后续 flash 兜底判断
 - `OPENAI_API_KEY`
   - OpenAI 兼容接口的密钥，这里可接阿里 DashScope
 - `OPENAI_BASE_URL`
@@ -234,6 +237,18 @@ WATCHLIST_PATH=artifacts/watchlist.json
   - watchlist 本地存储路径，默认是 `artifacts/watchlist.json`
 
 ## 7. 运行方式
+
+### 市场识别层
+
+- 系统现在会先识别 ticker 所属市场，再决定是否适用 SEC 数据源
+- 当前内置规则支持：
+  - `AAPL` / `MSFT` 这类无后缀 ticker 识别为 `us_sec`
+  - `1810.HK` 识别为 `hkex`
+  - `600519.SH` / `000001.SZ` 识别为 `cn_a_share`
+  - `ASML.AS` / `SAP.DE` 等识别为 `eu_listed`
+- 对非 SEC ticker，`SEC Filing Search`、`SEC Company Facts`、`Financial Metrics Calculator` 不再整链路报错，而是返回结构化 `degraded` 结果
+- 新增 `Official Disclosure Search` 工具，为港股/A 股/欧洲市场返回对应官方披露入口与查询提示
+- `information_gathering_analyst` 默认优先使用 `MARKET_IDENTIFIER_MODEL`，适合挂接 `deepseek-v4-flash`
 
 ### 推荐：直接指定公司运行
 

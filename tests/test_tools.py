@@ -1,14 +1,17 @@
+import json
 from pathlib import Path
 
 import requests
 
 from multi_agent.evaluation import WorkflowEvaluation, activate_evaluation, clear_evaluation
 from multi_agent.settings import InvestmentResearchSettings
+from multi_agent.market_profile import MarketIdentifierService, MarketScope
 from multi_agent.tools.investment_tools import (
     GoogleSearchService,
     FileWriteTool,
     FatalAPIError,
     GoogleSearchTool,
+    OfficialDisclosureSearchTool,
     SecCompanyFactsTool,
     SecFilingSearchTool,
 )
@@ -253,3 +256,53 @@ def test_sec_company_facts_tool_records_financial_field_extraction_status(tmp_pa
     assert latest_metrics["financial_fields"]["revenue"]["extracted"] is True
     assert latest_metrics["financial_fields"]["gross_profit"]["extracted"] is False
     assert latest_metrics["financial_fields"]["current_assets"]["normalized_value"] == 80.0
+
+
+def test_market_identifier_classifies_common_global_tickers() -> None:
+    service = MarketIdentifierService(settings=build_settings())
+
+    aapl = service.identify(company_name="Apple Inc.", ticker="AAPL")
+    xiaomi = service.identify(company_name="Xiaomi Corporation", ticker="1810.HK")
+    maotai = service.identify(company_name="Kweichow Moutai", ticker="600519.SH")
+    asml = service.identify(company_name="ASML Holding", ticker="ASML.AS")
+
+    assert aapl.market_scope == MarketScope.US_SEC.value
+    assert aapl.sec_applicable is True
+    assert xiaomi.market_scope == MarketScope.HKEX.value
+    assert xiaomi.sec_applicable is False
+    assert maotai.market_scope == MarketScope.CN_A_SHARE.value
+    assert asml.market_scope == MarketScope.EU_LISTED.value
+
+
+def test_sec_filing_search_tool_returns_degraded_payload_for_non_sec_ticker() -> None:
+    tool = SecFilingSearchTool(settings=build_settings())
+
+    payload = json.loads(tool._run(company_name="Xiaomi Corporation", ticker="1810.HK"))
+
+    assert payload["status"] == "degraded"
+    assert payload["error_type"] == "market_not_applicable"
+    assert payload["source"] == "sec_provider"
+    assert payload["details"]["market_scope"] == MarketScope.HKEX.value
+    assert payload["details"]["sec_applicable"] is False
+
+
+def test_sec_company_facts_tool_returns_degraded_payload_for_non_sec_ticker() -> None:
+    tool = SecCompanyFactsTool(settings=build_settings())
+
+    payload = json.loads(tool._run("600519.SH"))
+
+    assert payload["status"] == "degraded"
+    assert payload["source"] == "sec_provider"
+    assert payload["details"]["market_scope"] == MarketScope.CN_A_SHARE.value
+    assert payload["details"]["sec_applicable"] is False
+
+
+def test_official_disclosure_tool_routes_non_sec_ticker_to_market_entrypoint() -> None:
+    tool = OfficialDisclosureSearchTool(settings=build_settings())
+
+    payload = json.loads(tool._run(company_name="Xiaomi Corporation", ticker="1810.HK"))
+
+    assert payload["status"] == "success"
+    assert payload["source"] == "hkex_provider"
+    assert payload["data"]["issuer_profile"]["market_scope"] == MarketScope.HKEX.value
+    assert payload["data"]["official_entrypoint"].startswith("https://www.hkexnews.hk")
