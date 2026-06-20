@@ -9,6 +9,7 @@ from multi_agent.settings import InvestmentResearchSettings
 from multi_agent.tools.investment_tools import (
     FinancialMetricsTool,
     GoogleSearchTool,
+    MarketProfileTool,
     OfficialDisclosureSearchTool,
     PDFTextExtractTool,
     SecCompanyFactsTool,
@@ -66,6 +67,7 @@ class MultiAgent:
                 or self._settings().model
             ),
             tools=[
+                MarketProfileTool(settings=self._settings()),
                 GoogleSearchTool(settings=self._settings()),
                 OfficialDisclosureSearchTool(settings=self._settings()),
                 SecFilingSearchTool(settings=self._settings()),
@@ -77,6 +79,8 @@ class MultiAgent:
     @agent
     def financial_statement_analyst(self) -> Agent:
         tools = [
+            MarketProfileTool(settings=self._settings()),
+            OfficialDisclosureSearchTool(settings=self._settings()),
             SecCompanyFactsTool(settings=self._settings()),
             FinancialMetricsTool(settings=self._settings()),
         ]

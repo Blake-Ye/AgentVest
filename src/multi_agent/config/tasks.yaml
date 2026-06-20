@@ -1,7 +1,8 @@
 market_intelligence_task:
   description: >
     请为 {company_name}（{company_ticker}）构建 {current_year} 年的市场情报简报。
-    使用 Google 搜索情报工具收集最新财报背景、产品发布、管理层表态、竞争变化
+    你必须先使用 Market Profile 工具识别市场，再结合 Google 搜索情报工具和
+    Official Disclosure Search 工具收集最新财报背景、产品发布、管理层表态、竞争变化
     和主要风险。只保留有来源支撑的事实，结果必须使用中文，且便于初级分析师阅读。
   expected_output: >
     一份中文 markdown 市场情报简报，至少包含公司概览、近期动态、竞争格局、
@@ -10,18 +11,22 @@ market_intelligence_task:
 
 filing_review_task:
   description: >
-    使用 SEC 文件检索工具，查找 {company_name}（{company_ticker}）最新的 10-K 和
-    10-Q 文件。请总结最重要的 filing 链接、提交日期、报告期以及下一步应重点阅读的
-    章节，并用中文交叉验证这些文件是否支持前一步的市场情报简报。
+    你必须先使用 Market Profile 工具判断 {company_name}（{company_ticker}）是否属于
+    SEC 市场。如果属于 `us_sec`，再使用 SEC 文件检索工具查找最新的 10-K 和 10-Q 文件；
+    如果不属于 SEC 市场，则改为使用 Official Disclosure Search 工具返回对应市场的官方披露入口、
+    查询链接和下一步应重点核查的官方材料类型。请用中文交叉验证这些资料是否支持前一步的市场情报简报。
   expected_output: >
-    一份中文 markdown filing 复核结果，列出最新 filing、说明每份文件的重要性，
-    并指出财务分析阶段应以哪份 filing 作为核心依据。
+    一份中文 markdown filing/official disclosure 复核结果，列出最新 filing 或官方披露入口，
+    说明每份资料的重要性，并指出财务分析阶段应以哪份材料作为核心依据。
   agent: information_gathering_analyst
 
 financial_analysis_task:
   description: >
-    使用 SEC 公司财务事实工具和财务指标计算器，为 {company_name}（{company_ticker}）
-    输出中文财务分析。请解释收入质量、利润率、流动性、杠杆和自由现金流。
+    你必须先使用 Market Profile 工具判断 {company_name}（{company_ticker}）所属市场。
+    如果属于 `us_sec`，优先使用 SEC 公司财务事实工具和财务指标计算器输出中文财务分析；
+    如果不属于 SEC 市场，则基于前一步识别出的官方披露入口、市场情报与可获得的财务事实，
+    输出“有依据的中文财务分析 + 明确数据缺口”，不得假装已经拿到 SEC company facts。
+    请解释收入质量、利润率、流动性、杠杆和自由现金流。
     当前本地 PDF 状态：{local_filing_pdf_available}；本地 PDF 路径：{local_filing_pdf_path}。
     只有当本地 PDF 状态为 yes 时，才允许使用 PDF 文本提取工具；如果状态不是 yes，
     不要猜测文件名、不要尝试读取不存在的本地文件。若存在数据缺口，必须明确指出，

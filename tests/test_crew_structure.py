@@ -72,4 +72,11 @@ def test_information_agent_uses_market_identifier_model_and_disclosure_tool(
     tool_names = [tool.name for tool in information_agent.tools]
 
     assert information_agent.llm.model == "deepseek-v4-flash"
+    assert "Market Profile" in tool_names
     assert "Official Disclosure Search" in tool_names
+
+    financial_agent = next(agent for agent in crew.agents if "财报分析师" in agent.role)
+    financial_tool_names = [tool.name for tool in financial_agent.tools]
+
+    assert "Market Profile" in financial_tool_names
+    assert "Official Disclosure Search" in financial_tool_names

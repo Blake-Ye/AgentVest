@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Type
+from urllib.parse import quote_plus
 
 import requests
 from pydantic import BaseModel, Field
@@ -348,6 +349,11 @@ class MarketProviderDescriptor:
     source_name: str
     market_scope: str
     official_entrypoint: str
+    query_template: str = ""
+    priority_documents: tuple[str, ...] = ()
+    supports_regulatory_filings: bool = True
+    supports_structured_facts: bool = False
+    supports_structured_ownership: bool = False
 
     def query_hint(self, *, company_name: str, ticker: str) -> str:
         normalized_name = company_name.strip()
@@ -360,11 +366,33 @@ class MarketProviderDescriptor:
             return f"{normalized_ticker} {normalized_name}".strip()
         return normalized_ticker or normalized_name
 
+    def query_url(self, *, company_name: str, ticker: str) -> str:
+        if not self.query_template:
+            return self.official_entrypoint
+        return self.query_template.format(query=quote_plus(self.query_hint(company_name=company_name, ticker=ticker)))
+
+    def as_dict(self, *, company_name: str, ticker: str) -> dict[str, Any]:
+        return {
+            "source_name": self.source_name,
+            "market_scope": self.market_scope,
+            "official_entrypoint": self.official_entrypoint,
+            "query_url": self.query_url(company_name=company_name, ticker=ticker),
+            "priority_documents": list(self.priority_documents),
+            "supports_regulatory_filings": self.supports_regulatory_filings,
+            "supports_structured_facts": self.supports_structured_facts,
+            "supports_structured_ownership": self.supports_structured_ownership,
+        }
+
 
 class SourceRouter:
     HKEX_DISCLOSURE_URL = "https://www.hkexnews.hk/search/titlesearch.xhtml"
     CN_DISCLOSURE_URL = "http://www.cninfo.com.cn/new/fulltextSearch"
     EU_DISCLOSURE_URL = "https://live.euronext.com/"
+    XETRA_DISCLOSURE_URL = "https://www.boerse-frankfurt.de/"
+    LSE_DISCLOSURE_URL = "https://www.londonstockexchange.com/"
+    BME_DISCLOSURE_URL = "https://www.bolsasymercados.es/"
+    BORSA_ITALIANA_DISCLOSURE_URL = "https://www.borsaitaliana.it/"
+    SIX_DISCLOSURE_URL = "https://www.six-group.com/"
 
     def __init__(self, settings: InvestmentResearchSettings) -> None:
         self._identifier = MarketIdentifierService(settings)
@@ -372,35 +400,110 @@ class SourceRouter:
     def identify_issuer(self, company_name: str, ticker: str) -> IssuerProfile:
         return self._identifier.identify(company_name=company_name, ticker=ticker)
 
+    def _ticker_suffix(self, canonical_ticker: str) -> str:
+        if "." not in canonical_ticker:
+            return ""
+        return canonical_ticker.rsplit(".", maxsplit=1)[-1]
+
     def provider_for_disclosures(self, profile: IssuerProfile) -> MarketProviderDescriptor:
         if profile.sec_applicable:
             return MarketProviderDescriptor(
                 source_name="sec_provider",
                 market_scope=profile.market_scope,
                 official_entrypoint="https://www.sec.gov/edgar/search/",
+                query_template="https://www.sec.gov/edgar/search/#/q={query}",
+                priority_documents=("10-K", "10-Q", "8-K", "20-F"),
+                supports_regulatory_filings=True,
+                supports_structured_facts=True,
+                supports_structured_ownership=True,
             )
         if profile.market_scope == MarketScope.HKEX.value:
             return MarketProviderDescriptor(
                 source_name="hkex_provider",
                 market_scope=profile.market_scope,
                 official_entrypoint=self.HKEX_DISCLOSURE_URL,
+                query_template="https://www.hkexnews.hk/search/titlesearch.xhtml?lang=en",
+                priority_documents=("Annual Report", "Interim Report", "Announcements"),
+                supports_regulatory_filings=True,
             )
         if profile.market_scope == MarketScope.CN_A_SHARE.value:
             return MarketProviderDescriptor(
                 source_name="cn_provider",
                 market_scope=profile.market_scope,
                 official_entrypoint=self.CN_DISCLOSURE_URL,
+                query_template="http://www.cninfo.com.cn/new/fulltextSearch?notautosubmit=&keyWord={query}",
+                priority_documents=("Annual Report", "Half-Year Report", "Announcements"),
+                supports_regulatory_filings=True,
             )
         if profile.market_scope == MarketScope.EU_LISTED.value:
+            ticker_suffix = self._ticker_suffix(profile.canonical_ticker)
+            if ticker_suffix in {"AS", "BR", "PA"}:
+                return MarketProviderDescriptor(
+                    source_name="eu_provider",
+                    market_scope=profile.market_scope,
+                    official_entrypoint=self.EU_DISCLOSURE_URL,
+                    query_template="https://live.euronext.com/en/search_instruments/{query}",
+                    priority_documents=("Annual Report", "Half-Year Report", "Regulated News"),
+                    supports_regulatory_filings=True,
+                )
+            if ticker_suffix == "DE":
+                return MarketProviderDescriptor(
+                    source_name="xetra_provider",
+                    market_scope=profile.market_scope,
+                    official_entrypoint=self.XETRA_DISCLOSURE_URL,
+                    query_template="https://www.boerse-frankfurt.de/equity-search?query={query}",
+                    priority_documents=("Annual Report", "Interim Statement", "Ad hoc Announcement"),
+                    supports_regulatory_filings=True,
+                )
+            if ticker_suffix == "L":
+                return MarketProviderDescriptor(
+                    source_name="lse_provider",
+                    market_scope=profile.market_scope,
+                    official_entrypoint=self.LSE_DISCLOSURE_URL,
+                    query_template="https://www.londonstockexchange.com/search?query={query}",
+                    priority_documents=("Annual Report", "Half-Year Report", "RNS Announcement"),
+                    supports_regulatory_filings=True,
+                )
+            if ticker_suffix == "MC":
+                return MarketProviderDescriptor(
+                    source_name="bme_provider",
+                    market_scope=profile.market_scope,
+                    official_entrypoint=self.BME_DISCLOSURE_URL,
+                    query_template="https://www.bolsasymercados.es/esp/search?query={query}",
+                    priority_documents=("Annual Report", "Half-Year Report", "Relevant Information Notice"),
+                    supports_regulatory_filings=True,
+                )
+            if ticker_suffix == "MI":
+                return MarketProviderDescriptor(
+                    source_name="borsa_italiana_provider",
+                    market_scope=profile.market_scope,
+                    official_entrypoint=self.BORSA_ITALIANA_DISCLOSURE_URL,
+                    query_template="https://www.borsaitaliana.it/borsa/searchengine/search.html?query={query}",
+                    priority_documents=("Annual Report", "Half-Year Report", "Price Sensitive Notice"),
+                    supports_regulatory_filings=True,
+                )
+            if ticker_suffix == "SW":
+                return MarketProviderDescriptor(
+                    source_name="six_provider",
+                    market_scope=profile.market_scope,
+                    official_entrypoint=self.SIX_DISCLOSURE_URL,
+                    query_template="https://www.six-group.com/en/market-data/shares/companies.html?query={query}",
+                    priority_documents=("Annual Report", "Half-Year Report", "Ad hoc Announcement"),
+                    supports_regulatory_filings=True,
+                )
             return MarketProviderDescriptor(
                 source_name="eu_provider",
                 market_scope=profile.market_scope,
                 official_entrypoint=self.EU_DISCLOSURE_URL,
+                query_template="https://live.euronext.com/en/search_instruments/{query}",
+                priority_documents=("Annual Report", "Half-Year Report", "Regulated News"),
+                supports_regulatory_filings=True,
             )
         return MarketProviderDescriptor(
             source_name="generic_official_provider",
             market_scope=profile.market_scope,
             official_entrypoint="",
+            supports_regulatory_filings=False,
         )
 
 
@@ -644,6 +747,34 @@ class OfficialDisclosureSearchInput(BaseModel):
     ticker: str = Field(..., description="The public ticker symbol to route.")
 
 
+class MarketProfileTool(BaseTool):
+    name: str = "Market Profile"
+    description: str = "Identify the market scope for a ticker and return the routed provider capability profile."
+    args_schema: Type[BaseModel] = OfficialDisclosureSearchInput
+
+    def __init__(
+        self,
+        settings: InvestmentResearchSettings | None = None,
+        router: SourceRouter | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._settings = settings or InvestmentResearchSettings.from_env()
+        self._router = router or SourceRouter(self._settings)
+
+    def _run(self, company_name: str, ticker: str) -> str:
+        profile = self._router.identify_issuer(company_name=company_name, ticker=ticker)
+        provider = self._router.provider_for_disclosures(profile)
+        return _success_payload(
+            {
+                "issuer_profile": profile.as_dict(),
+                "provider": provider.as_dict(company_name=company_name, ticker=ticker),
+                "priority_documents": list(provider.priority_documents),
+            },
+            source="market_profile",
+        )
+
+
 class OfficialDisclosureSearchTool(BaseTool):
     name: str = "Official Disclosure Search"
     description: str = "Route a company to the correct official disclosure entrypoint for its market."
@@ -675,6 +806,8 @@ class OfficialDisclosureSearchTool(BaseTool):
             return _success_payload(
                 {
                     "issuer_profile": profile.as_dict(),
+                    "provider": provider.as_dict(company_name=company_name, ticker=ticker),
+                    "priority_documents": list(provider.priority_documents),
                     "official_results": filings,
                 },
                 source="sec_provider",
@@ -683,8 +816,11 @@ class OfficialDisclosureSearchTool(BaseTool):
         return _success_payload(
             {
                 "issuer_profile": profile.as_dict(),
+                "provider": provider.as_dict(company_name=company_name, ticker=ticker),
                 "official_entrypoint": provider.official_entrypoint,
                 "query_hint": provider.query_hint(company_name=company_name, ticker=ticker),
+                "query_url": provider.query_url(company_name=company_name, ticker=ticker),
+                "priority_documents": list(provider.priority_documents),
             },
             source=provider.source_name,
         )

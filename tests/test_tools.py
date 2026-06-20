@@ -11,6 +11,7 @@ from multi_agent.tools.investment_tools import (
     FileWriteTool,
     FatalAPIError,
     GoogleSearchTool,
+    MarketProfileTool,
     OfficialDisclosureSearchTool,
     SecCompanyFactsTool,
     SecFilingSearchTool,
@@ -306,3 +307,59 @@ def test_official_disclosure_tool_routes_non_sec_ticker_to_market_entrypoint() -
     assert payload["source"] == "hkex_provider"
     assert payload["data"]["issuer_profile"]["market_scope"] == MarketScope.HKEX.value
     assert payload["data"]["official_entrypoint"].startswith("https://www.hkexnews.hk")
+    assert "Annual Report" in payload["data"]["priority_documents"]
+
+
+def test_official_disclosure_tool_routes_cn_ticker_to_cninfo() -> None:
+    tool = OfficialDisclosureSearchTool(settings=build_settings())
+
+    payload = json.loads(tool._run(company_name="Kweichow Moutai", ticker="600519.SH"))
+
+    assert payload["status"] == "success"
+    assert payload["source"] == "cn_provider"
+    assert payload["data"]["issuer_profile"]["market_scope"] == MarketScope.CN_A_SHARE.value
+    assert "cninfo.com.cn" in payload["data"]["official_entrypoint"]
+    assert payload["data"]["query_url"].startswith("http://www.cninfo.com.cn")
+
+
+def test_official_disclosure_tool_routes_eu_ticker_to_exchange_entrypoint() -> None:
+    tool = OfficialDisclosureSearchTool(settings=build_settings())
+
+    payload = json.loads(tool._run(company_name="ASML Holding", ticker="ASML.AS"))
+
+    assert payload["status"] == "success"
+    assert payload["source"] == "eu_provider"
+    assert payload["data"]["issuer_profile"]["market_scope"] == MarketScope.EU_LISTED.value
+    assert payload["data"]["official_entrypoint"].startswith("https://live.euronext.com")
+
+
+def test_official_disclosure_tool_routes_xetra_ticker_to_deutsche_boerse() -> None:
+    tool = OfficialDisclosureSearchTool(settings=build_settings())
+
+    payload = json.loads(tool._run(company_name="SAP SE", ticker="SAP.DE"))
+
+    assert payload["status"] == "success"
+    assert payload["source"] == "xetra_provider"
+    assert payload["data"]["official_entrypoint"].startswith("https://www.boerse-frankfurt.de")
+
+
+def test_official_disclosure_tool_routes_six_ticker_to_six_exchange() -> None:
+    tool = OfficialDisclosureSearchTool(settings=build_settings())
+
+    payload = json.loads(tool._run(company_name="Nestle SA", ticker="NESN.SW"))
+
+    assert payload["status"] == "success"
+    assert payload["source"] == "six_provider"
+    assert payload["data"]["official_entrypoint"].startswith("https://www.six-group.com")
+
+
+def test_market_profile_tool_returns_provider_capabilities() -> None:
+    tool = MarketProfileTool(settings=build_settings())
+
+    payload = json.loads(tool._run(company_name="Xiaomi Corporation", ticker="1810.HK"))
+
+    assert payload["status"] == "success"
+    assert payload["source"] == "market_profile"
+    assert payload["data"]["issuer_profile"]["market_scope"] == MarketScope.HKEX.value
+    assert payload["data"]["provider"]["source_name"] == "hkex_provider"
+    assert payload["data"]["provider"]["supports_structured_facts"] is False

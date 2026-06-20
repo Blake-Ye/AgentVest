@@ -247,7 +247,10 @@ WATCHLIST_PATH=artifacts/watchlist.json
   - `600519.SH` / `000001.SZ` 识别为 `cn_a_share`
   - `ASML.AS` / `SAP.DE` 等识别为 `eu_listed`
 - 对非 SEC ticker，`SEC Filing Search`、`SEC Company Facts`、`Financial Metrics Calculator` 不再整链路报错，而是返回结构化 `degraded` 结果
-- 新增 `Official Disclosure Search` 工具，为港股/A 股/欧洲市场返回对应官方披露入口与查询提示
+- 显式传入 `1810.HK`、`600519.SH`、`ASML.AS` 这类 ticker 时，解析层会直接接受该市场代码，不再强依赖 SEC mapping API
+- 新增 `Market Profile` 工具，返回 `issuer_profile`、provider 能力边界和官方披露查询链接
+- 欧洲市场不再统一折叠到一个入口；`AS/BR/PA` 走 Euronext，`DE` 走 Deutsche Boerse，`L` 走 LSE，`SW` 走 SIX
+- 新增 `Official Disclosure Search` 工具，为港股/A 股/欧洲市场返回对应官方披露入口、查询提示，以及尽可能直接可用的查询链接或入口页
 - `information_gathering_analyst` 默认优先使用 `MARKET_IDENTIFIER_MODEL`，适合挂接 `deepseek-v4-flash`
 
 ### 推荐：直接指定公司运行

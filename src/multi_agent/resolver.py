@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 import requests
 
+from multi_agent.market_profile import MarketIdentifierService
 from multi_agent.settings import InvestmentResearchSettings
 from multi_agent.tools.investment_tools import (
     _build_retry_session,
@@ -37,7 +38,6 @@ _CORPORATE_SUFFIXES = (
     "nv",
     "llc",
 )
-
 
 @dataclass(frozen=True)
 class CompanyResolution:
@@ -114,6 +114,47 @@ class OpenAICompanyResolver:
             confidence=float(parsed.get("confidence", 0.6) or 0.6),
         )
 
+    def validate_pair(self, company_name: str, ticker: str) -> tuple[bool, str] | None:
+        try:
+            response = _perform_request(
+                lambda: self.session.post(
+                    f"{self.settings.openai_base_url.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.settings.openai_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.settings.company_resolver_model,
+                        "temperature": 0,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You validate whether a company name and a public ticker refer to the same public issuer. "
+                                    "Treat dual listings, ADRs, and secondary listings of the same issuer as consistent. "
+                                    "Return strict JSON with keys: is_consistent, canonical_name, confidence."
+                                ),
+                            },
+                            {
+                                "role": "user",
+                                "content": f"company_name={company_name}\nticker={ticker}",
+                            },
+                        ],
+                        "response_format": {"type": "json_object"},
+                    },
+                    timeout=self.settings.http_timeout_seconds,
+                ),
+                service_name="Company Pair Validator LLM",
+            )
+            _raise_for_status_with_context(response, service_name="Company Pair Validator LLM")
+            payload = response.json()
+            content = payload["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+        except Exception:
+            return None
+        canonical_name = parsed.get("canonical_name")
+        return bool(parsed.get("is_consistent")), str(canonical_name).strip() if canonical_name is not None else ""
+
 
 class CompanyResolver:
     """先走别名和权威映射 API，再用轻量 LLM 兜底的公司解析器。"""
@@ -171,18 +212,22 @@ class CompanyResolver:
         settings: InvestmentResearchSettings,
         session: requests.Session | None = None,
         llm_resolver: OpenAICompanyResolver | Callable[[str], CompanyResolution | None] | None = None,
+        pair_validator: Callable[[str, str], tuple[bool, str] | bool | None] | None = None,
     ) -> None:
         self.settings = settings
         self.session = session or _build_retry_session(settings.max_http_retries)
+        default_llm_resolver = OpenAICompanyResolver(
+            settings=settings,
+            session=self.session,
+        )
         if llm_resolver is None:
-            self.llm_resolver: Callable[[str], CompanyResolution | None] = OpenAICompanyResolver(
-                settings=settings,
-                session=self.session,
-            ).resolve
+            self.llm_resolver: Callable[[str], CompanyResolution | None] = default_llm_resolver.resolve
         elif callable(llm_resolver):
             self.llm_resolver = llm_resolver
         else:
             self.llm_resolver = llm_resolver.resolve
+        self.pair_validator = pair_validator or default_llm_resolver.validate_pair
+        self.market_identifier = MarketIdentifierService(settings)
 
     def resolve(self, company_name: str, ticker: str = "") -> CompanyResolution:
         cleaned_name = company_name.strip()
@@ -192,7 +237,23 @@ class CompanyResolver:
 
         resolution = None
         if cleaned_ticker:
-            resolution = self._resolve_by_ticker(cleaned_ticker)
+            market_profile = self.market_identifier.identify(company_name=cleaned_name, ticker=cleaned_ticker)
+            if market_profile.sec_applicable:
+                resolution = self._resolve_by_ticker(cleaned_ticker)
+            elif market_profile.market_scope != "unknown":
+                canonical_name = self._validate_non_sec_ticker_alignment(cleaned_name, cleaned_ticker)
+                normalized_name = canonical_name or cleaned_name or market_profile.canonical_ticker
+                resolution = CompanyResolution(
+                    user_input=cleaned_name,
+                    normalized_name=normalized_name,
+                    ticker=market_profile.canonical_ticker,
+                    entity_type="public_company",
+                    parent_company=normalized_name,
+                    exchange=market_profile.exchange,
+                    confidence=0.95,
+                )
+            else:
+                raise ValueError(f"暂不支持识别 ticker：{cleaned_ticker}，请提供受支持市场的 ticker 或更完整的公司名称。")
             if resolution is None:
                 raise ValueError(f"无法识别 ticker：{cleaned_ticker}。")
         else:
@@ -223,6 +284,38 @@ class CompanyResolver:
             exchange=finalized.exchange,
             confidence=finalized.confidence,
         )
+
+    def _validate_non_sec_ticker_alignment(self, company_name: str, ticker: str) -> str:
+        alias_resolution = self._resolve_alias(company_name)
+        if alias_resolution is not None and alias_resolution.entity_type != "public_company":
+            raise ValueError(
+                f"输入的公司名称 {company_name} 不是可直接研究的上市公司，请确认后重试。"
+            )
+
+        validation_result = self._coerce_pair_validation_result(self.pair_validator(company_name, ticker))
+        if validation_result is None:
+            raise ValueError(
+                f"暂时无法校验公司名称 {company_name} 与 ticker {ticker} 是否一致，请确认后重试。"
+            )
+        is_consistent, canonical_name = validation_result
+        if not is_consistent:
+            raise ValueError(
+                f"输入的公司名称 {company_name} 与 ticker {ticker} 不一致，请确认后重试。"
+            )
+        if alias_resolution is not None and alias_resolution.normalized_name:
+            return alias_resolution.normalized_name
+        return canonical_name
+
+    def _coerce_pair_validation_result(
+        self,
+        validation_result: tuple[bool, str] | bool | None,
+    ) -> tuple[bool, str] | None:
+        if validation_result is None:
+            return None
+        if isinstance(validation_result, tuple):
+            is_consistent, canonical_name = validation_result
+            return bool(is_consistent), str(canonical_name).strip() if canonical_name is not None else ""
+        return bool(validation_result), ""
 
     def _resolve_alias(self, company_name: str) -> CompanyResolution | None:
         return self._ALIASES.get(company_name.strip())

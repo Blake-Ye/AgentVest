@@ -66,6 +66,40 @@ def test_workflow_inputs_auto_resolve_company_name_when_ticker_missing(
     assert inputs["company_ticker"] == "BABA"
 
 
+def test_workflow_inputs_preserve_explicit_global_ticker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubResolver:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def resolve(self, company_name: str, ticker: str = "") -> CompanyResolution:
+            assert company_name == "Xiaomi Corporation"
+            assert ticker == "1810.HK"
+            return CompanyResolution(
+                user_input=company_name,
+                normalized_name="Xiaomi Corporation",
+                ticker="1810.HK",
+                entity_type="public_company",
+                parent_company="Xiaomi Corporation",
+                exchange="Hong Kong Stock Exchange",
+                confidence=1.0,
+            )
+
+    monkeypatch.setenv("MODEL", "qwen-plus")
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    monkeypatch.setenv("SERPER_API_KEY", "serper-key")
+    monkeypatch.setenv("SEC_API_KEY", "sec-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+    monkeypatch.setattr("multi_agent.main.CompanyResolver", StubResolver)
+
+    inputs = _workflow_inputs("Xiaomi Corporation", "1810.HK")
+
+    assert inputs["company_name"] == "Xiaomi Corporation"
+    assert inputs["company_ticker"] == "1810.HK"
+
+
 def test_run_writes_evaluation_artifacts_on_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
