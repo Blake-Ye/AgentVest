@@ -2,318 +2,31 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Type
 
-import requests
 from pydantic import BaseModel, Field
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from crewai.tools import BaseTool
 
-from multi_agent.evaluation import record_api_call, record_financial_fields
+from multi_agent.evaluation import record_financial_fields
 from multi_agent.finance import CompanyFinancialSnapshot, compute_key_metrics
 from multi_agent.settings import InvestmentResearchSettings
+from multi_agent.tools.official_sec import (
+    FatalAPIError,
+    OfficialSecService,
+    _raise_for_status_with_context,
+)
+
+__all__ = [
+    "FatalAPIError",
+    "_raise_for_status_with_context",
+]
 
 try:
     from pypdf import PdfReader
 except ImportError:  # pragma: no cover - optional dependency guard
     PdfReader = None
-
-
-class FatalAPIError(RuntimeError):
-    """表示必须立即中止整个工作流的外部服务错误。"""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: int | None = None,
-        service_name: str | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.service_name = service_name
-
-
-def _build_retry_session(max_retries: int) -> requests.Session:
-    # 将常见瞬时失败交给 requests 自动重试，减少偶发网络抖动带来的失败。
-    retry = Retry(
-        total=max_retries,
-        connect=max_retries,
-        read=max_retries,
-        backoff_factor=1,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=("GET", "POST"),
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session = requests.Session()
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
-
-
-def _raise_for_status_with_context(response: Any, service_name: str) -> None:
-    """把外部 HTTP 错误转换成更适合终端用户理解的中文异常。"""
-    status_code = getattr(response, "status_code", 0)
-    if 200 <= status_code < 400:
-        return
-
-    response_text = getattr(response, "text", "")
-    if status_code in {401, 403}:
-        raise FatalAPIError(
-            f"{service_name} 返回 {status_code}，通常表示 API Key 无效、权限不足或额度受限，程序已终止。"
-            ,
-            status_code=status_code,
-            service_name=service_name,
-        )
-    if status_code == 429:
-        raise FatalAPIError(
-            f"{service_name} 返回 429，请求过于频繁或额度已用尽，程序已终止。",
-            status_code=status_code,
-            service_name=service_name,
-        )
-    if 400 <= status_code < 500:
-        raise FatalAPIError(
-            f"{service_name} 返回 {status_code}，请求未被接受，程序已终止。响应内容：{response_text[:200]}",
-            status_code=status_code,
-            service_name=service_name,
-        )
-
-    raise RuntimeError(
-        f"{service_name} 服务暂时不可用，状态码 {status_code}。响应内容：{response_text[:200]}"
-    )
-
-
-def _perform_request(request_callable: Any, *, service_name: str) -> Any:
-    try:
-        response = request_callable()
-    except requests.RequestException:
-        record_api_call(service_name=service_name, success=False, status_code=None)
-        raise
-
-    status_code = getattr(response, "status_code", None)
-    record_api_call(
-        service_name=service_name,
-        success=bool(status_code is not None and 200 <= status_code < 400),
-        status_code=status_code,
-    )
-    return response
-
-
-class GoogleSearchService:
-    """同时兼容 Serper 与 SerpApi 的 Google 搜索客户端。"""
-
-    def __init__(
-        self,
-        settings: InvestmentResearchSettings,
-        session: requests.Session | None = None,
-    ) -> None:
-        self.settings = settings
-        self.session = session or _build_retry_session(settings.max_http_retries)
-
-    def search_company_news(self, company_name: str, query: str) -> list[dict[str, str]]:
-        provider = self.settings.search_provider
-
-        if provider == "serper":
-            api_key = self._require_api_key(self.settings.serper_api_key, provider_name="Serper")
-            return self._search_via_serper(api_key=api_key, company_name=company_name, query=query)
-
-        if provider == "serpapi":
-            api_key = self._resolve_serpapi_key()
-            return self._search_via_serpapi(api_key=api_key, company_name=company_name, query=query)
-
-        return self._search_with_auto_provider(company_name=company_name, query=query)
-
-    def _search_with_auto_provider(self, company_name: str, query: str) -> list[dict[str, str]]:
-        serper_key = self.settings.serper_api_key
-        serpapi_key = self.settings.serpapi_api_key
-
-        if serper_key:
-            try:
-                return self._search_via_serper(
-                    api_key=serper_key,
-                    company_name=company_name,
-                    query=query,
-                )
-            except FatalAPIError as exc:
-                # 用户经常把 SerpApi 的 key 填进 SERPER_API_KEY，这里在鉴权失败时自动回退。
-                if exc.status_code not in {401, 403}:
-                    raise
-                fallback_key = serpapi_key or serper_key
-                return self._search_via_serpapi(
-                    api_key=fallback_key,
-                    company_name=company_name,
-                    query=query,
-                )
-
-        return self._search_via_serpapi(
-            api_key=self._resolve_serpapi_key(),
-            company_name=company_name,
-            query=query,
-        )
-
-    def _resolve_serpapi_key(self) -> str:
-        return self._require_api_key(
-            self.settings.serpapi_api_key or self.settings.serper_api_key,
-            provider_name="SerpApi",
-        )
-
-    def _require_api_key(self, api_key: str, provider_name: str) -> str:
-        if not api_key.strip():
-            raise ValueError(f"{provider_name} 的 API Key 未配置。")
-        return api_key.strip()
-
-    def _search_via_serper(self, api_key: str, company_name: str, query: str) -> list[dict[str, str]]:
-        response = _perform_request(
-            lambda: self.session.post(
-                "https://google.serper.dev/search",
-                headers={
-                    "X-API-KEY": api_key,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "q": f"{company_name} {query}",
-                    "gl": "us",
-                    "hl": "en",
-                    "num": self.settings.max_search_results,
-                },
-                timeout=self.settings.http_timeout_seconds,
-            ),
-            service_name="Google Search",
-        )
-        _raise_for_status_with_context(response, service_name="Google Search")
-        return self._normalize_search_results(payload=response.json(), provider_name="serper")
-
-    def _search_via_serpapi(self, api_key: str, company_name: str, query: str) -> list[dict[str, str]]:
-        response = _perform_request(
-            lambda: self.session.get(
-                "https://serpapi.com/search.json",
-                params={
-                    "engine": "google",
-                    "q": f"{company_name} {query}",
-                    "api_key": api_key,
-                    "num": self.settings.max_search_results,
-                    "hl": "en",
-                    "gl": "us",
-                },
-                timeout=self.settings.http_timeout_seconds,
-            ),
-            service_name="Google Search",
-        )
-        _raise_for_status_with_context(response, service_name="Google Search")
-        return self._normalize_search_results(payload=response.json(), provider_name="serpapi")
-
-    def _normalize_search_results(
-        self,
-        payload: dict[str, Any],
-        provider_name: str,
-    ) -> list[dict[str, str]]:
-        organic_results = payload.get("organic", []) if provider_name == "serper" else payload.get("organic_results", [])
-        normalized_results: list[dict[str, str]] = []
-        for result in organic_results[: self.settings.max_search_results]:
-            normalized_results.append(
-                {
-                    "title": result.get("title", ""),
-                    "link": result.get("link", ""),
-                    "snippet": result.get("snippet", ""),
-                }
-            )
-        return normalized_results
-
-
-class SecApiService:
-    """封装 SEC filing 检索与 SEC 官方 company facts 获取逻辑。"""
-
-    SEC_TICKER_LOOKUP_URL = "https://www.sec.gov/files/company_tickers.json"
-    SEC_COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-
-    def __init__(
-        self,
-        settings: InvestmentResearchSettings,
-        session: requests.Session | None = None,
-    ) -> None:
-        self.settings = settings
-        self.session = session or _build_retry_session(settings.max_http_retries)
-
-    def search_filings(
-        self,
-        company_name: str,
-        ticker: str,
-        form_type: str,
-        limit: int,
-    ) -> list[dict[str, str]]:
-        query = (
-            f'ticker:{ticker.upper()} AND formType:"{form_type}" AND companyName:"{company_name}"'
-        )
-        response = _perform_request(
-            lambda: self.session.post(
-                "https://api.sec-api.io",
-                headers={
-                    "Authorization": self.settings.sec_api_key,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "query": query,
-                    "from": "0",
-                    "size": str(limit),
-                    "sort": [{"filedAt": {"order": "desc"}}],
-                },
-                timeout=self.settings.http_timeout_seconds,
-            ),
-            service_name="SEC API",
-        )
-        _raise_for_status_with_context(response, service_name="SEC API")
-        payload = response.json()
-        normalized_results: list[dict[str, str]] = []
-        for filing in payload.get("filings", [])[:limit]:
-            normalized_results.append(
-                {
-                    "form_type": filing.get("formType", ""),
-                    "filed_at": filing.get("filedAt", ""),
-                    "filing_url": filing.get("linkToFilingDetails", "")
-                    or filing.get("linkToHtml", "")
-                    or filing.get("linkToTxt", ""),
-                    "filing_details": filing.get("description", ""),
-                    "accession_no": filing.get("accessionNo", ""),
-                }
-            )
-        return normalized_results
-
-    @lru_cache(maxsize=64)
-    def fetch_company_facts(self, ticker: str) -> dict[str, Any]:
-        cik = self._lookup_cik(ticker)
-        response = _perform_request(
-            lambda: self.session.get(
-                self.SEC_COMPANY_FACTS_URL.format(cik=cik),
-                headers={"User-Agent": f"multi-agent-investment-research {self.settings.sec_api_email}"},
-                timeout=self.settings.http_timeout_seconds,
-            ),
-            service_name="SEC Company Facts",
-        )
-        _raise_for_status_with_context(response, service_name="SEC Company Facts")
-        return response.json()
-
-    @lru_cache(maxsize=64)
-    def _lookup_cik(self, ticker: str) -> str:
-        response = _perform_request(
-            lambda: self.session.get(
-                self.SEC_TICKER_LOOKUP_URL,
-                headers={"User-Agent": f"multi-agent-investment-research {self.settings.sec_api_email}"},
-                timeout=self.settings.http_timeout_seconds,
-            ),
-            service_name="SEC Ticker Lookup",
-        )
-        _raise_for_status_with_context(response, service_name="SEC Ticker Lookup")
-        ticker_payload = response.json()
-        normalized_ticker = ticker.upper()
-        for company in ticker_payload.values():
-            if company.get("ticker", "").upper() == normalized_ticker:
-                return str(company["cik_str"]).zfill(10)
-        raise ValueError(f"Unable to find CIK for ticker: {ticker}")
 
 
 @dataclass(frozen=True)
@@ -441,11 +154,6 @@ def _build_financial_snapshot_with_metadata(
     return snapshot, metadata
 
 
-def _build_financial_snapshot(company_facts: dict[str, Any]) -> CompanyFinancialSnapshot:
-    snapshot, _ = _build_financial_snapshot_with_metadata(company_facts)
-    return snapshot
-
-
 class FileReadInput(BaseModel):
     file_path: str = Field(..., description="Absolute or relative file path to read.")
 
@@ -503,54 +211,6 @@ class PDFTextExtractTool(BaseTool):
             extracted_pages.append(page.extract_text() or "")
         return "\n".join(extracted_pages).strip()
 
-
-class GoogleSearchInput(BaseModel):
-    company_name: str = Field(..., description="The company name to investigate.")
-    query: str = Field(..., description="The specific market or news query to search.")
-
-
-class GoogleSearchTool(BaseTool):
-    name: str = "Google Search Intelligence"
-    description: str = (
-        "Search Google via Serper for recent company news, competition signals, and market events."
-    )
-    args_schema: Type[BaseModel] = GoogleSearchInput
-
-    def __init__(
-        self,
-        settings: InvestmentResearchSettings | None = None,
-        service: GoogleSearchService | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        self._settings = settings or InvestmentResearchSettings.from_env()
-        self._service = service or GoogleSearchService(self._settings)
-
-    def _run(self, company_name: str, query: str) -> str:
-        try:
-            results = self._service.search_company_news(company_name=company_name, query=query)
-        except FatalAPIError:
-            raise
-        except Exception as exc:  # pragma: no cover - network failure path
-            return f"Google 搜索失败：{exc}"
-
-        if not results:
-            return "未找到相关的 Google 搜索结果。"
-
-        formatted_results = []
-        for index, result in enumerate(results, start=1):
-            formatted_results.append(
-                "\n".join(
-                    [
-                        f"{index}. {result['title']}",
-                        f"链接：{result['link']}",
-                        f"摘要：{result['snippet']}",
-                    ]
-                )
-            )
-        return "\n\n".join(formatted_results)
-
-
 class SecFilingSearchInput(BaseModel):
     company_name: str = Field(..., description="Legal company name to search in SEC filings.")
     ticker: str = Field(..., description="Public ticker symbol, such as AAPL.")
@@ -560,20 +220,25 @@ class SecFilingSearchInput(BaseModel):
 
 class SecFilingSearchTool(BaseTool):
     name: str = "SEC Filing Search"
-    description: str = "Find the latest SEC filings for a public company using SEC API."
+    description: str = "Find the latest SEC filings for a public company using official SEC endpoints."
     args_schema: Type[BaseModel] = SecFilingSearchInput
 
     def __init__(
         self,
         settings: InvestmentResearchSettings | None = None,
-        service: SecApiService | None = None,
+        service: OfficialSecService | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._settings = settings or InvestmentResearchSettings.from_env()
-        self._service = service or SecApiService(self._settings)
+        self._service = service or OfficialSecService(self._settings)
 
     def _run(self, company_name: str, ticker: str, form_type: str = "10-K", limit: int = 3) -> str:
+        if self._settings.company_market_label and self._settings.company_market_label != "US":
+            return (
+                f"当前市场 {self._settings.company_market_label} 仅允许使用对应市场数据源，"
+                "SEC Filing Search 仅 US 市场可用。"
+            )
         try:
             filings = self._service.search_filings(
                 company_name=company_name,
@@ -614,14 +279,19 @@ class SecCompanyFactsTool(BaseTool):
     def __init__(
         self,
         settings: InvestmentResearchSettings | None = None,
-        service: SecApiService | None = None,
+        service: OfficialSecService | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._settings = settings or InvestmentResearchSettings.from_env()
-        self._service = service or SecApiService(self._settings)
+        self._service = service or OfficialSecService(self._settings)
 
     def _run(self, ticker: str) -> str:
+        if self._settings.company_market_label and self._settings.company_market_label != "US":
+            return (
+                f"当前市场 {self._settings.company_market_label} 仅允许使用对应市场数据源，"
+                "SEC Company Facts 仅 US 市场可用。"
+            )
         try:
             company_facts = self._service.fetch_company_facts(ticker)
             snapshot, metadata = _build_financial_snapshot_with_metadata(company_facts)
@@ -646,14 +316,19 @@ class FinancialMetricsTool(BaseTool):
     def __init__(
         self,
         settings: InvestmentResearchSettings | None = None,
-        service: SecApiService | None = None,
+        service: OfficialSecService | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._settings = settings or InvestmentResearchSettings.from_env()
-        self._service = service or SecApiService(self._settings)
+        self._service = service or OfficialSecService(self._settings)
 
     def _run(self, ticker: str) -> str:
+        if self._settings.company_market_label and self._settings.company_market_label != "US":
+            return (
+                f"当前市场 {self._settings.company_market_label} 仅允许使用对应市场数据源，"
+                "Financial Metrics Calculator 仅 US 市场可用。"
+            )
         try:
             company_facts = self._service.fetch_company_facts(ticker)
             snapshot, metadata = _build_financial_snapshot_with_metadata(company_facts)

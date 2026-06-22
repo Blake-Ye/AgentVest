@@ -4,12 +4,12 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
-from urllib.parse import quote
 
 import requests
 
 from multi_agent.settings import InvestmentResearchSettings
-from multi_agent.tools.investment_tools import (
+from multi_agent.tools.official_sec import (
+    OfficialSecService,
     _build_retry_session,
     _perform_request,
     _raise_for_status_with_context,
@@ -81,7 +81,11 @@ class OpenAICompanyResolver:
                                     "Return strict JSON with keys: normalized_name, ticker, entity_type, "
                                     "parent_company, exchange, confidence. "
                                     "entity_type must be one of public_company, private_company, business_unit, ambiguous. "
-                                    "If the input is a business unit, map it to the listed parent company when clear. "
+                                    "Handle Chinese short names, translated names, and common aliases for public companies. "
+                                    "Examples include colloquial or localized names such as 微软, 苹果, 谷歌, 英伟达, 腾讯. "
+                                    "If the input is a business unit, product line, or local brand name, map it to the listed parent company when clear. "
+                                    "When a widely known short name clearly refers to a listed parent company, prefer that listed parent company over returning ambiguous. "
+                                    "If multiple listed companies are plausible and you cannot determine a single best match with high confidence, return entity_type as ambiguous and leave ticker empty. "
                                     "If the company is private or no reliable ticker exists, set ticker to an empty string."
                                 ),
                             },
@@ -119,6 +123,15 @@ class CompanyResolver:
     """先走别名和权威映射 API，再用轻量 LLM 兜底的公司解析器。"""
 
     _ALIASES: dict[str, CompanyResolution] = {
+        "微软": CompanyResolution(
+            user_input="微软",
+            normalized_name="Microsoft Corporation",
+            ticker="MSFT",
+            entity_type="public_company",
+            parent_company="Microsoft Corporation",
+            exchange="NASDAQ",
+            confidence=0.99,
+        ),
         "阿里": CompanyResolution(
             user_input="阿里",
             normalized_name="Alibaba Group Holding Ltd",
@@ -174,6 +187,7 @@ class CompanyResolver:
     ) -> None:
         self.settings = settings
         self.session = session or _build_retry_session(settings.max_http_retries)
+        self.official_sec = OfficialSecService(settings=settings, session=self.session)
         if llm_resolver is None:
             self.llm_resolver: Callable[[str], CompanyResolution | None] = OpenAICompanyResolver(
                 settings=settings,
@@ -228,28 +242,13 @@ class CompanyResolver:
         return self._ALIASES.get(company_name.strip())
 
     def _resolve_by_ticker(self, ticker: str) -> CompanyResolution | None:
-        url = f"https://api.sec-api.io/mapping/ticker/{quote(ticker)}?token={self.settings.sec_api_key}"
-        response = _perform_request(
-            lambda: self.session.get(url, timeout=self.settings.http_timeout_seconds),
-            service_name="SEC Mapping API",
-        )
-        _raise_for_status_with_context(response, service_name="SEC Mapping API")
-        payload = response.json()
-        if not payload:
+        payload = self.official_sec.lookup_company_by_ticker(ticker)
+        if payload is None:
             return None
-        for item in payload:
-            if str(item.get("ticker", "")).upper() == ticker:
-                return self._from_mapping_result(ticker, item)
-        return self._from_mapping_result(ticker, payload[0])
+        return self._from_official_result(ticker, payload)
 
     def _resolve_by_name(self, company_name: str) -> CompanyResolution | None:
-        url = f"https://api.sec-api.io/mapping/name/{quote(company_name)}?token={self.settings.sec_api_key}"
-        response = _perform_request(
-            lambda: self.session.get(url, timeout=self.settings.http_timeout_seconds),
-            service_name="SEC Mapping API",
-        )
-        _raise_for_status_with_context(response, service_name="SEC Mapping API")
-        payload = response.json()
+        payload = self.official_sec.search_companies_by_name(company_name)
         if not payload:
             return None
         ranked_results = sorted(
@@ -260,10 +259,10 @@ class CompanyResolver:
                 len(str(item.get("name", ""))),
             ),
         )
-        return self._from_mapping_result(company_name, ranked_results[0])
+        return self._from_official_result(company_name, ranked_results[0])
 
-    def _from_mapping_result(self, user_input: str, item: dict[str, Any]) -> CompanyResolution:
-        normalized_name = str(item.get("name", "")).strip()
+    def _from_official_result(self, user_input: str, item: dict[str, Any]) -> CompanyResolution:
+        normalized_name = str(item.get("name") or item.get("title") or "").strip()
         return CompanyResolution(
             user_input=user_input,
             normalized_name=normalized_name,

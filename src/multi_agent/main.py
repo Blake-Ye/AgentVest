@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import re
+import signal
 import sys
 import warnings
 
@@ -14,8 +15,10 @@ from pathlib import Path
 from multi_agent.evaluation import WorkflowEvaluation, activate_evaluation, clear_evaluation
 from multi_agent.recommendation import build_structured_recommendation, build_structured_report
 from multi_agent.resolver import CompanyResolver
+from multi_agent import runtime
 from multi_agent.settings import InvestmentResearchSettings
-from multi_agent.tools.investment_tools import FatalAPIError
+from multi_agent.tools.official_sec import FatalAPIError
+from multi_agent.tools.market_validation import MarketValidationService
 from multi_agent.watchlist import WatchlistStore
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd")
@@ -26,6 +29,7 @@ _PLACEHOLDER_MARKER = "<!-- PLACEHOLDER -->"
 class RunOutputPaths:
     company_dir: Path
     run_dir: Path
+    market_validation_path: Path
     market_intelligence_path: Path
     filing_review_path: Path
     financial_analysis_path: Path
@@ -33,25 +37,28 @@ class RunOutputPaths:
     structured_recommendation_path: Path
     structured_report_path: Path
     runtime_log_path: Path
+    data_quality_review_path: Path
+    logic_compliance_review_path: Path
     latest_metrics_path: Path
     evaluation_summary_path: Path
     readme_path: Path
 
-
-def _prepare_runtime_env() -> None:
-    """将 CrewAI 的运行时数据固定到项目目录，避免污染系统环境。"""
-    project_root = Path(__file__).resolve().parents[2]
-    local_home = project_root / ".crewai_home"
-    (local_home / "Library" / "Application Support").mkdir(parents=True, exist_ok=True)
-    os.environ["HOME"] = str(local_home)
-    os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
-
-
 def _crew():
-    _prepare_runtime_env()
-    from multi_agent.crew import MultiAgent
+    return runtime.build_crew()
 
-    return MultiAgent().crew()
+
+def _flow(inputs: dict[str, str]):
+    return runtime.build_flow(inputs)
+
+
+def _use_flow_execution() -> bool:
+    return runtime.use_flow_execution()
+
+
+def _kickoff_workflow(inputs: dict[str, str]):
+    if _use_flow_execution():
+        return _flow(inputs).kickoff()
+    return _crew().kickoff(inputs=inputs)
 
 
 def _project_root() -> Path:
@@ -89,6 +96,7 @@ def _build_run_output_paths(
     return RunOutputPaths(
         company_dir=company_dir,
         run_dir=run_dir,
+        market_validation_path=run_dir / "00_market_validation.md",
         market_intelligence_path=run_dir / "01_market_intelligence.md",
         filing_review_path=run_dir / "02_filing_review.md",
         financial_analysis_path=run_dir / "03_financial_analysis.md",
@@ -96,6 +104,8 @@ def _build_run_output_paths(
         structured_recommendation_path=run_dir / "06_structured_recommendation.json",
         structured_report_path=run_dir / "07_structured_report.json",
         runtime_log_path=run_dir / "05_runtime.txt",
+        data_quality_review_path=run_dir / "08_data_quality_review.md",
+        logic_compliance_review_path=run_dir / "09_logic_compliance_review.md",
         latest_metrics_path=run_dir / "latest_run_metrics.json",
         evaluation_summary_path=run_dir / "evaluation_summary.json",
         readme_path=run_dir / "README.md",
@@ -119,6 +129,7 @@ def _write_run_readme(
             "",
             "## 文件清单",
             "",
+            "- `00_market_validation.md`：市场验证结果",
             "- `01_market_intelligence.md`：市场情报简报",
             "- `02_filing_review.md`：监管文件复核",
             "- `03_financial_analysis.md`：财务分析结果",
@@ -126,6 +137,8 @@ def _write_run_readme(
             "- `05_runtime.txt`：运行日志",
             "- `06_structured_recommendation.json`：结构化投资建议与可信度评分",
             "- `07_structured_report.json`：结构化完整报告快照",
+            "- `08_data_quality_review.md`：数据质量审查结果",
+            "- `09_logic_compliance_review.md`：逻辑与合规审查结果",
             "- `latest_run_metrics.json`：单次运行评估指标",
             "- `evaluation_summary.json`：当前目录下的评估汇总",
         ]
@@ -143,6 +156,18 @@ def _write_json_file(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _standard_markdown_outputs(output_paths: RunOutputPaths) -> tuple[tuple[Path, str], ...]:
+    return (
+        (output_paths.market_validation_path, "市场验证结果"),
+        (output_paths.market_intelligence_path, "市场情报简报"),
+        (output_paths.filing_review_path, "监管文件复核"),
+        (output_paths.financial_analysis_path, "财务分析结果"),
+        (output_paths.final_report_path, "投资备忘录"),
+        (output_paths.data_quality_review_path, "数据质量审查结果"),
+        (output_paths.logic_compliance_review_path, "逻辑与合规审查结果"),
+    )
+
+
 def _initialize_standard_output_files(
     output_paths: RunOutputPaths,
     *,
@@ -151,30 +176,8 @@ def _initialize_standard_output_files(
 ) -> None:
     company_ticker_display = company_ticker or "未解析到 ticker"
     waiting_message = f"公司：{company_name}（{company_ticker_display}）\n\n状态：运行中，结果待生成。"
-    _write_markdown_file(
-        output_paths.market_intelligence_path,
-        "市场情报简报",
-        waiting_message,
-        placeholder=True,
-    )
-    _write_markdown_file(
-        output_paths.filing_review_path,
-        "监管文件复核",
-        waiting_message,
-        placeholder=True,
-    )
-    _write_markdown_file(
-        output_paths.financial_analysis_path,
-        "财务分析结果",
-        waiting_message,
-        placeholder=True,
-    )
-    _write_markdown_file(
-        output_paths.final_report_path,
-        "投资备忘录",
-        waiting_message,
-        placeholder=True,
-    )
+    for path, title in _standard_markdown_outputs(output_paths):
+        _write_markdown_file(path, title, waiting_message, placeholder=True)
     _write_json_file(
         output_paths.structured_recommendation_path,
         {
@@ -197,10 +200,13 @@ def _initialize_standard_output_files(
 
 def _task_output_path_map(output_paths: RunOutputPaths) -> dict[str, Path]:
     return {
+        "market_validation_task": output_paths.market_validation_path,
         "market_intelligence_task": output_paths.market_intelligence_path,
         "filing_review_task": output_paths.filing_review_path,
         "financial_analysis_task": output_paths.financial_analysis_path,
         "investment_report_task": output_paths.final_report_path,
+        "data_quality_review_task": output_paths.data_quality_review_path,
+        "logic_compliance_review_task": output_paths.logic_compliance_review_path,
     }
 
 
@@ -215,6 +221,15 @@ def _extract_task_raw_outputs(result: object) -> dict[str, str]:
         if task_name and raw_content:
             extracted[task_name] = raw_content
     return extracted
+
+
+def _final_report_content_from_result(result: object) -> str:
+    report_result = _workflow_result_value(result, "report_result", "")
+    if isinstance(report_result, str):
+        return report_result.strip()
+    if report_result:
+        return str(report_result).strip()
+    return ""
 
 
 def _is_placeholder_file(path: Path) -> bool:
@@ -232,20 +247,85 @@ def _materialize_standard_outputs(output_paths: RunOutputPaths, result: object) 
         content = task_outputs.get(task_name, "").strip()
         if not content and task_name == "investment_report_task":
             content = str(getattr(result, "raw", "")).strip()
+        if not content and task_name == "investment_report_task":
+            content = _final_report_content_from_result(result)
         if content:
             path.write_text(content + "\n", encoding="utf-8")
 
 
+def _workflow_result_value(result: object, key: str, default: object = "") -> object:
+    if isinstance(result, dict):
+        return result.get(key, default)
+    return getattr(result, key, default)
+
+
+def _final_status_from_result(result: object) -> str:
+    status = str(
+        _workflow_result_value(
+            result,
+            "status",
+            _workflow_result_value(result, "final_decision", "passed"),
+        )
+    ).strip().lower()
+    if status in {"passed", "blocked"}:
+        return status
+    raise ValueError(f"未知终态：{status}")
+
+
+def _blocking_reasons_from_result(result: object) -> list[str]:
+    blocking_reasons = _workflow_result_value(result, "blocking_reasons", [])
+    if not isinstance(blocking_reasons, list):
+        return []
+    return [str(item).strip() for item in blocking_reasons if str(item).strip()]
+
+
+def _trust_score_from_result(result: object) -> int | None:
+    trust_score = _workflow_result_value(result, "trust_score", None)
+    if isinstance(trust_score, dict):
+        trust_score = trust_score.get("score")
+    if trust_score in (None, ""):
+        return None
+    try:
+        return int(trust_score)
+    except (TypeError, ValueError):
+        return None
+
+
+def _describe_trust_score(score: int) -> tuple[str, str]:
+    if score >= 80:
+        return "high", "证据较充分，可作为高优先级研究输入。"
+    if score >= 60:
+        return "medium", "证据基本够用，但仍建议人工复核关键结论。"
+    return "low", "证据不足，当前结果更适合作为线索而非结论。"
+
+
+def _write_blocked_report(output_paths: RunOutputPaths, result: object) -> None:
+    body_lines = [
+        "状态：硬门控未通过，正式投资备忘录未放行。",
+        "",
+    ]
+    trust_score = _trust_score_from_result(result)
+    if trust_score is not None:
+        body_lines.append(f"trust_score：{trust_score}")
+        body_lines.append("")
+    body_lines.append("阻断原因：")
+    blocking_reasons = _blocking_reasons_from_result(result)
+    if blocking_reasons:
+        body_lines.extend(f"- {item}" for item in blocking_reasons)
+    else:
+        body_lines.append("- 未提供阻断原因。")
+    _write_markdown_file(
+        output_paths.final_report_path,
+        "投资备忘录（已阻断）",
+        "\n".join(body_lines),
+        placeholder=False,
+    )
+
+
 def _write_failure_outputs(output_paths: RunOutputPaths, *, error_message: str) -> None:
     failure_message = f"状态：运行失败。\n\n原因：{error_message}"
-    for path, title in (
-        (output_paths.market_intelligence_path, "市场情报简报"),
-        (output_paths.filing_review_path, "监管文件复核"),
-        (output_paths.financial_analysis_path, "财务分析结果"),
-        (output_paths.final_report_path, "投资备忘录"),
-    ):
-        if _is_placeholder_file(path):
-            _write_markdown_file(path, title, failure_message, placeholder=False)
+    for path, title in _standard_markdown_outputs(output_paths):
+        _write_markdown_file(path, title, failure_message, placeholder=False)
 
 
 def _write_failure_recommendation_output(
@@ -275,13 +355,10 @@ def _write_failure_recommendation_output(
     )
 
 
-def _validate_successful_outputs(output_paths: RunOutputPaths) -> None:
-    for path in (
-        output_paths.market_intelligence_path,
-        output_paths.filing_review_path,
-        output_paths.financial_analysis_path,
-        output_paths.final_report_path,
-    ):
+def _validate_successful_outputs(output_paths: RunOutputPaths, *, final_status: str) -> None:
+    if final_status not in {"passed", "blocked"}:
+        raise RuntimeError(f"不支持的工作流结束状态：{final_status}")
+    for path, _ in _standard_markdown_outputs(output_paths):
         if not path.exists() or not path.read_text(encoding="utf-8").strip() or _is_placeholder_file(path):
             raise RuntimeError(f"运行结束但未生成规范输出文件：{path.name}")
 
@@ -301,6 +378,22 @@ def _temporary_env(overrides: dict[str, str]):
                 os.environ[key] = original
 
 
+@contextlib.contextmanager
+def _graceful_termination_signals():
+    previous_handlers: dict[int, object] = {}
+
+    def _raise_keyboard_interrupt(_signum, _frame):
+        raise KeyboardInterrupt()
+
+    try:
+        for signum in (signal.SIGTERM,):
+            previous_handlers[signum] = signal.signal(signum, _raise_keyboard_interrupt)
+        yield
+    finally:
+        for signum, previous_handler in previous_handlers.items():
+            signal.signal(signum, previous_handler)
+
+
 def _create_evaluation(
     output_paths: RunOutputPaths,
     *,
@@ -311,9 +404,12 @@ def _create_evaluation(
         artifacts_dir=output_paths.run_dir,
         final_report_path=output_paths.final_report_path,
         expected_task_outputs={
+            "market_validation_task": output_paths.market_validation_path,
             "market_intelligence_task": output_paths.market_intelligence_path,
             "filing_review_task": output_paths.filing_review_path,
             "financial_analysis_task": output_paths.financial_analysis_path,
+            "data_quality_review_task": output_paths.data_quality_review_path,
+            "logic_compliance_review_task": output_paths.logic_compliance_review_path,
         },
         company_name=company_name,
         company_ticker=company_ticker,
@@ -332,6 +428,8 @@ def _write_structured_outputs(
     company_ticker: str,
     watchlist_path: Path,
     save_to_watchlist: bool,
+    final_status: str,
+    blocking_reasons: list[str],
 ) -> dict[str, object]:
     recommendation = build_structured_recommendation(
         company_name=company_name,
@@ -345,11 +443,63 @@ def _write_structured_outputs(
         report_path=output_paths.final_report_path,
         metrics=latest_metrics,
     )
+    recommendation["status"] = final_status
+    structured_report["status"] = final_status
+    structured_report["final_decision"] = final_status
+    if final_status == "blocked":
+        recommendation["stance"] = "blocked"
+        recommendation["stance_label"] = "阻断"
+        structured_report["stance"] = "blocked"
+        structured_report["stance_label"] = "阻断"
+    if blocking_reasons:
+        recommendation["blocking_reasons"] = blocking_reasons
+        structured_report["blocking_reasons"] = blocking_reasons
     _write_json_file(output_paths.structured_recommendation_path, recommendation)
     _write_json_file(output_paths.structured_report_path, structured_report)
     if save_to_watchlist:
         WatchlistStore(watchlist_path).upsert(recommendation)
     return recommendation
+
+
+def _finalize_successful_result(output_paths: RunOutputPaths, result: object) -> str:
+    final_status = _final_status_from_result(result)
+    _materialize_standard_outputs(output_paths, result)
+    if final_status == "blocked":
+        _write_blocked_report(output_paths, result)
+    _validate_successful_outputs(output_paths, final_status=final_status)
+    return final_status
+
+
+def _annotate_latest_metrics(
+    output_paths: RunOutputPaths,
+    latest_metrics: dict[str, object],
+    *,
+    result: object,
+    final_status: str,
+) -> dict[str, object]:
+    annotated_metrics = dict(latest_metrics)
+    annotated_metrics["final_status"] = final_status
+
+    blocking_reasons = _blocking_reasons_from_result(result)
+    if blocking_reasons:
+        annotated_metrics["blocking_reasons"] = blocking_reasons
+
+    trust_score = _trust_score_from_result(result)
+    if trust_score is not None:
+        trust_level, trust_summary = _describe_trust_score(trust_score)
+        existing_trust_score = annotated_metrics.get("trust_score")
+        breakdown = {}
+        if isinstance(existing_trust_score, dict):
+            breakdown = dict(existing_trust_score.get("breakdown", {}))
+        annotated_metrics["trust_score"] = {
+            "score": trust_score,
+            "level": trust_level,
+            "summary": trust_summary,
+            "breakdown": breakdown,
+        }
+
+    _write_json_file(output_paths.latest_metrics_path, annotated_metrics)
+    return annotated_metrics
 
 
 def _print_watchlist(path: Path) -> None:
@@ -469,6 +619,11 @@ def _workflow_inputs(company_name: str, company_ticker: str) -> dict[str, str]:
     # 统一在入口处准备工作流输入，方便 CLI、测试和触发器复用同一套参数。
     settings = InvestmentResearchSettings.from_env()
     resolved_company = CompanyResolver(settings=settings).resolve(company_name, company_ticker)
+    market_validation = MarketValidationService(settings).validate(
+        company_name=resolved_company.normalized_name,
+        ticker=resolved_company.ticker,
+        exchange=resolved_company.exchange,
+    )
     artifacts_dir = _project_root() / settings.artifacts_dir
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     local_pdf_path = settings.local_filing_pdf_path.strip()
@@ -480,6 +635,8 @@ def _workflow_inputs(company_name: str, company_ticker: str) -> dict[str, str]:
     return {
         "company_name": resolved_company.normalized_name,
         "company_ticker": resolved_company.ticker,
+        "company_market_label": market_validation.market_label,
+        "market_resolution_status": market_validation.resolution_status,
         "current_year": str(datetime.now().year),
         "artifacts_dir": settings.artifacts_dir,
         "final_report_path": settings.final_report_path,
@@ -544,12 +701,19 @@ def run():
             {
                 "ARTIFACTS_DIR": str(output_paths.run_dir),
                 "FINAL_REPORT_PATH": str(output_paths.final_report_path),
+                "COMPANY_MARKET_LABEL": inputs.get("company_market_label", ""),
             }
         ):
-            result = _crew().kickoff(inputs=inputs)
-        _materialize_standard_outputs(output_paths, result)
-        _validate_successful_outputs(output_paths)
+            with _graceful_termination_signals():
+                result = _kickoff_workflow(inputs)
+        final_status = _finalize_successful_result(output_paths, result)
         latest_metrics = evaluation.finalize(success=True)
+        latest_metrics = _annotate_latest_metrics(
+            output_paths,
+            latest_metrics,
+            result=result,
+            final_status=final_status,
+        )
         _write_structured_outputs(
             output_paths,
             latest_metrics=latest_metrics,
@@ -557,6 +721,8 @@ def run():
             company_ticker=inputs["company_ticker"],
             watchlist_path=_resolve_watchlist_path(settings),
             save_to_watchlist=getattr(args, "save_to_watchlist", False),
+            final_status=final_status,
+            blocking_reasons=_blocking_reasons_from_result(result),
         )
         print(f"运行完成，文件已写入：{output_paths.run_dir}")
     except (FatalAPIError, ValueError) as error:
@@ -636,20 +802,10 @@ def test():
     except Exception as error:
         _raise_user_facing_runtime_error(RuntimeError(f"测试执行时发生错误：{error}"))
 
-def run_with_trigger():
-    """使用外部触发器参数运行 Crew。"""
-    import json
-
+def run_trigger_payload(trigger_payload: dict[str, object]):
+    """使用结构化触发器参数运行工作流。"""
     evaluation = None
     token = None
-    if len(sys.argv) < 2:
-        _raise_user_facing_runtime_error(RuntimeError("未提供触发器 JSON 参数。"))
-
-    try:
-        trigger_payload = json.loads(sys.argv[1])
-    except json.JSONDecodeError:
-        _raise_user_facing_runtime_error(RuntimeError("触发器参数不是合法 JSON。"))
-
     try:
         settings = InvestmentResearchSettings.from_env()
         workflow_inputs = _workflow_inputs(
@@ -688,6 +844,8 @@ def run_with_trigger():
             "crewai_trigger_payload": trigger_payload,
             "company_name": workflow_inputs["company_name"],
             "company_ticker": workflow_inputs["company_ticker"],
+            "company_market_label": workflow_inputs.get("company_market_label", ""),
+            "market_resolution_status": workflow_inputs.get("market_resolution_status", ""),
             "current_year": str(datetime.now().year),
             "artifacts_dir": workflow_inputs["artifacts_dir"],
             "final_report_path": workflow_inputs["final_report_path"],
@@ -698,12 +856,19 @@ def run_with_trigger():
             {
                 "ARTIFACTS_DIR": str(output_paths.run_dir),
                 "FINAL_REPORT_PATH": str(output_paths.final_report_path),
+                "COMPANY_MARKET_LABEL": workflow_inputs.get("company_market_label", ""),
             }
         ):
-            result = _crew().kickoff(inputs=inputs)
-        _materialize_standard_outputs(output_paths, result)
-        _validate_successful_outputs(output_paths)
+            with _graceful_termination_signals():
+                result = _kickoff_workflow(inputs)
+        final_status = _finalize_successful_result(output_paths, result)
         latest_metrics = evaluation.finalize(success=True)
+        latest_metrics = _annotate_latest_metrics(
+            output_paths,
+            latest_metrics,
+            result=result,
+            final_status=final_status,
+        )
         _write_structured_outputs(
             output_paths,
             latest_metrics=latest_metrics,
@@ -711,6 +876,8 @@ def run_with_trigger():
             company_ticker=workflow_inputs["company_ticker"],
             watchlist_path=_resolve_watchlist_path(settings),
             save_to_watchlist=bool(trigger_payload.get("save_to_watchlist", False)),
+            final_status=final_status,
+            blocking_reasons=_blocking_reasons_from_result(result),
         )
         print(f"运行完成，文件已写入：{output_paths.run_dir}")
         return result
@@ -758,6 +925,19 @@ def run_with_trigger():
     finally:
         if token is not None:
             clear_evaluation(token)
+
+
+def run_with_trigger():
+    """使用外部触发器参数运行 Crew。"""
+    if len(sys.argv) < 2:
+        _raise_user_facing_runtime_error(RuntimeError("未提供触发器 JSON 参数。"))
+
+    try:
+        trigger_payload = json.loads(sys.argv[1])
+    except json.JSONDecodeError:
+        _raise_user_facing_runtime_error(RuntimeError("触发器参数不是合法 JSON。"))
+
+    return run_trigger_payload(trigger_payload)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,17 @@
 
 这个项目的目标不是做一个“能演示”的 Demo，而是做一个**新人能读懂、面试能讲清楚、后续能扩展**的多 Agent 项目。
 
+## 0. 当前版本最值得展示的点
+
+- `7 Agent / 7 Task`
+  - 不是单个“大 Prompt”，而是按市场验证、事件情报、基本面、估值、数据质量、主笔、逻辑合规拆分职责链。
+- `Flow + Gate + Recurrent`
+  - 当前控制面由 `MarketReviewFlow + ConfidenceGatePolicy` 驱动，Gate 结果分为 `passed / rerun / blocked` 三态。
+- 正式报告与阻断报告边界清晰
+  - 只有 `passed` 才进入正式投资建议路径；如果 Gate 最终未通过，系统只输出阻断说明版报告，并把结构化产物里的 `stance` 标记为 `blocked`。
+- 可测试、可验证、可复盘
+  - 仓库里已经有围绕 Gate、Recurrent 路由和 CLI 交付边界的测试，适合直接拿来展示“不是玩具 Demo”。
+
 推荐配合阅读：
 
 - `docs/project_architecture.md`
@@ -24,12 +35,20 @@
 
 你可以把这个系统理解成一个自动化投研小组：
 
-- `Information Gathering Analyst`
-  负责联网搜索、公司动态、竞争格局、事件催化剂和主要风险。
-- `Financial Statement Analyst`
-  负责 SEC 公司财务事实、关键财务指标、财报文本解释。
+- `Market Validation Analyst`
+  负责先判断公司主要市场，并限制后续工具边界。
+- `Event & Guidance Analyst`
+  负责 Tavily 新闻、公司事件、管理层表述与待验证项整理。
+- `Fundamental Analyst`
+  负责官方 SEC filings 与 company facts 解读。
+- `Quant & Valuation Analyst`
+  负责财务指标、估值与风险收益权衡。
+- `Data Quality Reviewer`
+  负责证据缺失、市场误用、工具越界审查。
 - `Report Writing Analyst`
-  负责把前两位分析师的中间结果整合成结构化投资备忘录。
+  负责最终投资备忘录生成。
+- `Logic & Compliance Reviewer`
+  负责最终逻辑一致性与合规措辞复核。
 
 适合展示的简历场景：
 
@@ -39,40 +58,70 @@
 
 你在简历里可以写成：
 
-> 基于 CrewAI 构建 Agent 驱动的自动化投研系统，集成 Google Search、SEC API、PDF 解析与财务指标计算工具，自动生成结构化投资备忘录，实现从公司研究资料搜集到初稿输出的流程自动化。
+> 基于 CrewAI 构建的 Agent 驱动投研系统，集成 Tavily、官方 SEC、市场验证、双 Reviewer、结构化产物与 watchlist 持久化，实现从公司解析到投资备忘录输出的流程自动化。
 
 ## 2. 系统架构
 
+### Flow + Gate + Recurrent
+
+当前版本不只是静态的 `Crew` 串联，而是带控制流的投研工作流：
+
+1. `validate_market`
+2. `run_analysis`
+3. `apply_analysis_gate`
+4. `rerun_analysis_if_needed`
+5. `write_report`
+6. `review_report`
+7. `finalize_delivery`
+
+其中：
+
+- `ConfidenceGatePolicy`
+  - 负责把审查结果收敛为 `passed / rerun / blocked`
+- `rerun`
+  - 表示问题可修复，系统会在预算内回流重做分析
+- `blocked`
+  - 表示问题不可放行或回流预算耗尽，系统停止正式建议交付
+
 ### Agents
 
-- `information_gathering_analyst`
-  - 负责外部市场情报和 SEC 文件索引
-- `financial_statement_analyst`
-  - 负责财务事实抽取、指标计算和财报解读
+- `market_validation_analyst`
+- `event_guidance_analyst`
+- `fundamental_analyst`
+- `quant_valuation_analyst`
+- `data_quality_reviewer`
 - `report_writing_analyst`
-  - 负责最终投资报告生成
+- `logic_compliance_reviewer`
 
 ### Tasks
 
+- `market_validation_task`
+  - 输出 `00_market_validation.md`
 - `market_intelligence_task`
-  - 输出 `artifacts/01_market_intelligence.md`
+  - 输出 `01_market_intelligence.md`
 - `filing_review_task`
-  - 输出 `artifacts/02_filing_review.md`
+  - 输出 `02_filing_review.md`
 - `financial_analysis_task`
-  - 输出 `artifacts/03_financial_analysis.md`
+  - 输出 `03_financial_analysis.md`
 - `investment_report_task`
-  - 输出 `report.md`
+  - 输出 `04_investment_report.md`
+- `data_quality_review_task`
+  - 输出 `08_data_quality_review.md`
+- `logic_compliance_review_task`
+  - 输出 `09_logic_compliance_review.md`
 
 ### Tools
 
-当前系统实际接入了 4 个默认工具，外加 1 个条件工具：
+当前系统实际接入的核心工具包括：
 
-- `GoogleSearchTool`
-  - 通过 Serper 或 SerpApi 调用 Google 搜索
+- `MarketValidationTool`
+  - 基于 ticker、exchange 和官方线索输出 `US / EU / HK / UNRESOLVED`
+- `TavilySearchTool`
+  - 统一搜索新闻、公告、媒体报道和背景信息
 - `SecFilingSearchTool`
-  - 调用 SEC API 查询 10-K / 10-Q 等监管文件
+  - 通过官方 SEC `submissions` 数据返回 filings
 - `SecCompanyFactsTool`
-  - 调用 SEC XBRL company facts API 获取标准化财务事实
+  - 通过官方 SEC `companyfacts` 返回结构化财务事实
 - `FinancialMetricsTool`
   - 计算毛利率、营业利润率、净利率、流动比率、债务资产比、自由现金流
 - `PDFTextExtractTool`
@@ -98,7 +147,6 @@ multi_agent/
 │   ├── finance.py
 │   ├── main.py
 │   └── settings.py
-└── report.md
 ```
 
 新人最值得先看的 8 个文件：
@@ -120,6 +168,17 @@ multi_agent/
 - `src/multi_agent/watchlist.py`
   - watchlist 的本地持久化与去重更新
 
+如果你只想快速看懂这次项目的“硬门控 + recurrent”收口，建议先看这 4 个文件：
+
+- `src/multi_agent/flows/market_review_flow.py`
+  - Flow 主链路、`rerun` 回流和最终交付路由
+- `src/multi_agent/core/confidence_gate.py`
+  - `passed / rerun / blocked` 的规则边界
+- `src/multi_agent/tools/review_tools.py`
+  - reviewer 工具输出的结构化审查摘要
+- `tests/test_flow_routing.py`
+  - Flow 路由、预算耗尽与阻断收口的回归测试
+
 ## 4. 代码怎么读
 
 如果你是新手，建议按下面顺序看代码：
@@ -129,7 +188,7 @@ multi_agent/
 2. 再看 `settings.py`
    - 明白 API Key 和配置怎么加载
 3. 再看 `crew.py`
-   - 明白 3 个 Agent 和 4 个 Task 怎么串起来
+   - 明白 7 个 Agent 和 7 个 Task 怎么串起来
 4. 再看 `agents.yaml` 和 `tasks.yaml`
    - 明白提示词层面的角色和任务描述
 5. 最后看 `investment_tools.py`
@@ -184,15 +243,15 @@ cp .env.example .env
 然后填写如下配置：
 
 ```env
-MODEL=qwen-plus
+FAST_MODEL=qwen-plus
+DEEP_MODEL=qwen-plus
+REVIEW_MODEL=qwen-plus
 COMPANY_RESOLVER_MODEL=qwen-plus
 OPENAI_API_KEY=your_dashscope_or_openai_compatible_key
 OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
-SEARCH_PROVIDER=auto
-SERPER_API_KEY=your_serper_api_key
-SERPAPI_API_KEY=your_serpapi_api_key
-SEC_API_KEY=your_sec_api_key
+SEARCH_PROVIDER=tavily
+TAVILY_API_KEY=your_tavily_api_key
 SEC_API_EMAIL=analyst@example.com
 LOCAL_FILING_PDF_PATH=
 
@@ -201,17 +260,17 @@ DEFAULT_COMPANY_TICKER=
 MAX_SEARCH_RESULTS=5
 HTTP_TIMEOUT_SECONDS=20
 MAX_HTTP_RETRIES=3
-ARTIFACTS_DIR=artifacts
-FINAL_REPORT_PATH=report.md
-WATCHLIST_PATH=artifacts/watchlist.json
+ARTIFACT_ROOT=src/multi_agent/artifacts
+RUNS_DIR=src/multi_agent/artifacts/runs
+WATCHLIST_PATH=src/multi_agent/artifacts/watchlist.json
 ```
 
 运行入口会自动读取当前工作目录下的 `.env`；如果当前目录没有，再回退读取仓库根目录的 `.env`。
 
 ### 这些变量分别干什么
 
-- `MODEL`
-  - CrewAI 里使用的 LLM 名称
+- `FAST_MODEL` / `DEEP_MODEL` / `REVIEW_MODEL`
+  - 分别用于轻量抽取、深度分析和 Reviewer 审查的模型分层配置
 - `COMPANY_RESOLVER_MODEL`
   - 仅用于公司名称解析兜底的小模型；建议使用更便宜、更快的模型
 - `OPENAI_API_KEY`
@@ -219,15 +278,11 @@ WATCHLIST_PATH=artifacts/watchlist.json
 - `OPENAI_BASE_URL`
   - OpenAI 兼容接口地址
 - `SEARCH_PROVIDER`
-  - 搜索 provider，支持 `auto`、`serper`、`serpapi`
-- `SERPER_API_KEY`
-  - Google 搜索代理服务 Serper 的密钥
-- `SERPAPI_API_KEY`
-  - Google 搜索代理服务 SerpApi 的密钥
-- `SEC_API_KEY`
-  - `sec-api.io` 的搜索密钥
+  - 搜索 provider，当前推荐固定为 `tavily`
+- `TAVILY_API_KEY`
+  - Tavily 搜索接口密钥
 - `SEC_API_EMAIL`
-  - 访问官方 SEC Company Facts API 时的联系邮箱，用于 `User-Agent`
+  - 访问官方 SEC ticker/submissions/company facts 端点时的联系邮箱，用于 `User-Agent`
 - `LOCAL_FILING_PDF_PATH`
   - 可选，本地 PDF 财报路径；只有当这个路径真实存在时，系统才会启用 PDF 文本提取工具
 - `WATCHLIST_PATH`
@@ -290,6 +345,7 @@ conda run -n MultiAgent crewai run
 系统会按照顺序工作流生成：
 
 - `artifacts/<company_slug>__<ticker_slug>/<timestamp>/README.md`
+- `artifacts/<company_slug>__<ticker_slug>/<timestamp>/00_market_validation.md`
 - `artifacts/<company_slug>__<ticker_slug>/<timestamp>/01_market_intelligence.md`
 - `artifacts/<company_slug>__<ticker_slug>/<timestamp>/02_filing_review.md`
 - `artifacts/<company_slug>__<ticker_slug>/<timestamp>/03_financial_analysis.md`
@@ -297,16 +353,18 @@ conda run -n MultiAgent crewai run
 - `artifacts/<company_slug>__<ticker_slug>/<timestamp>/05_runtime.txt`
 - `artifacts/<company_slug>__<ticker_slug>/<timestamp>/06_structured_recommendation.json`
 - `artifacts/<company_slug>__<ticker_slug>/<timestamp>/07_structured_report.json`
+- `artifacts/<company_slug>__<ticker_slug>/<timestamp>/08_data_quality_review.md`
+- `artifacts/<company_slug>__<ticker_slug>/<timestamp>/09_logic_compliance_review.md`
 - `artifacts/<company_slug>__<ticker_slug>/<timestamp>/latest_run_metrics.json`
 - `artifacts/<company_slug>__<ticker_slug>/<timestamp>/evaluation_summary.json`
 - `artifacts/watchlist.json`
 
 无论运行成功、失败还是中断，目录内都会保留上述固定文件名，便于排查和归档：
 
-- 成功运行时，`01-04` 会保存真实产出内容。
+- 成功运行时，`00-04` 和 `08-09` 会保存真实产出内容。
 - 成功运行时，`06_structured_recommendation.json` 会保存结构化投资建议、风险、催化剂和可信度评分。
-- 成功运行时，`07_structured_report.json` 会保存更完整的结构化报告快照，适合前端、API 和数据库消费。
-- 失败或中断时，`01-04` 会保留失败说明，`06_structured_recommendation.json` 会写入失败状态，`latest_run_metrics.json` 会写明 `status` 与错误原因。
+- 成功运行时，`07_structured_report.json` 会保存更完整的结构化报告快照，适合前端、脚本入口和数据库消费。
+- 失败或中断时，`00-04` 和 `08-09` 会保留失败说明，`06_structured_recommendation.json` 会写入失败状态，`latest_run_metrics.json` 会写明 `status` 与错误原因。
 
 这就是“每一步中间产出”的落地方式。
 
@@ -386,7 +444,7 @@ conda run -n MultiAgent crewai run
 
 ### 工具层和业务层分离
 
-- `investment_tools.py` 负责联网和 I/O
+- `tools/` 负责联网和 I/O
 - `finance.py` 负责纯财务计算
 - 这样测试时可以用 stub，避免真实调用外部 API
 
@@ -404,11 +462,23 @@ conda run -n MultiAgent crewai run
 - 配置加载
 - 财务指标计算
 - Tool 输出格式
-- Crew 结构是否满足 3 Agent / 4 Task
+- `Crew` 结构是否满足 7 Agent / 7 Task
+- `ConfidenceGatePolicy` 的 `passed / rerun / blocked` 三态
+- `MarketReviewFlow` 的 recurrent 路由、预算耗尽与 blocked 收口
+- CLI 在正式报告与阻断报告之间的交付边界
 - 运行评估文件生成
 - 连续多次运行下的累计统计稳定性
 
-运行测试：
+最小展示入口：
+
+```bash
+conda run -n MultiAgent env PYTHONPATH=src python -m pytest \
+  tests/test_review_gate.py \
+  tests/test_flow_routing.py \
+  tests/test_main_cli.py -q
+```
+
+完整测试：
 
 ```bash
 conda run -n MultiAgent env PYTHONPATH=src python -m pytest tests -q
@@ -416,46 +486,65 @@ conda run -n MultiAgent env PYTHONPATH=src python -m pytest tests -q
 
 ## 10. 工作流说明
 
-### 第一步：市场情报
+先看控制语义：
 
-`Information Gathering Analyst` 使用：
+- `passed`
+  - 放行正式投资报告和正式结构化建议
+- `rerun`
+  - 说明当前分析存在可修复缺口，Flow 会触发一次定向回流
+- `blocked`
+  - 说明问题不可放行或回流后仍未修复，系统仅输出阻断说明版报告，不输出正式投资建议
 
-- Google 搜索
+这也是当前版本最核心的展示边界：**正式报告只属于 `passed`；`blocked` 只保留阻断语义产物。**
+
+### 第一步：市场验证
+
+`Market Validation Analyst` 使用：
+
+- `MarketValidationTool`
+
+目标：
+
+- 输出 `US / EU / HK / UNRESOLVED`
+- 限制后续工具白名单
+
+### 第二步：事件与指引分析
+
+`Event & Guidance Analyst` 使用：
+
+- `TavilySearchTool`
 
 目标：
 
 - 建立公司外部事实基础
-- 找近期催化剂、风险、竞争变化
+- 找近期催化剂、风险、竞争变化和待验证项
 
-### 第二步：SEC 文件梳理
+### 第三步：官方 SEC 与基本面分析
 
-还是由 `Information Gathering Analyst` 负责：
+`Fundamental Analyst` 使用：
 
-- 检索最近的 10-K / 10-Q
-- 记录 filing URL、日期、优先阅读项
-
-### 第三步：财务分析
-
-`Financial Statement Analyst` 使用：
-
-- SEC company facts
-- 财务指标计算
-- PDF 文本抽取
+- 官方 SEC filings
+- 官方 SEC company facts
+- PDF 文本抽取（可选）
 
 目标：
 
 - 把“原始财务事实”变成“可解释的分析观点”
 
-### 第四步：报告撰写
+### 第四步：估值分析
 
-`Report Writing Analyst` 使用：
+`Quant & Valuation Analyst` 使用：
 
-- 前三步的中间产物
-- 文件读写
+- 财务指标计算
 
-输出：
+### 第五步：双 Reviewer
 
-- 最终投资备忘录 `report.md`
+- `Data Quality Reviewer`
+- `Logic & Compliance Reviewer`
+
+### 第六步：报告撰写
+
+`Report Writing Analyst` 负责整合前述产物，输出最终投资备忘录 `04_investment_report.md`
 
 ## 11. 新人最容易问的 5 个问题
 
@@ -480,7 +569,7 @@ conda run -n MultiAgent env PYTHONPATH=src python -m pytest tests -q
 
 ### 3. 为什么工具要单独封装？
 
-因为联网搜索、SEC API、PDF 解析都属于“外部能力”，这部分最容易变化，也最需要单测。
+因为 Tavily、官方 SEC、PDF 解析都属于“外部能力”，这部分最容易变化，也最需要单测。
 
 ### 4. 为什么中间产物要写文件？
 
@@ -501,9 +590,9 @@ conda run -n MultiAgent env PYTHONPATH=src python -m pytest tests -q
 1. 先讲业务问题
    - 分析师做投研初稿很耗时，尤其卡在搜集信息和整理材料
 2. 再讲架构
-   - 用 3 个 Agent 分工协作
+   - 用 7 个 Agent 分工协作，并在最终交付前做双 Reviewer 审查
 3. 再讲工具
-   - Google Search、SEC API、PDF、财务计算、文件系统
+   - Tavily、官方 SEC、PDF、财务计算、文件系统
 4. 再讲稳定性
    - 重试、异常处理、中间产物记录、可测试
 5. 最后讲结果
@@ -521,19 +610,22 @@ conda run -n MultiAgent env PYTHONPATH=src python -m pytest tests -q
 
 ## 14. 常见错误排查
 
-### 报缺少 API Key
+### 报缺少环境变量
 
 先检查 `.env` 是否补全：
 
-- `SERPER_API_KEY`
-- `SEC_API_KEY`
+- `FAST_MODEL`
+- `DEEP_MODEL`
+- `REVIEW_MODEL`
+- `TAVILY_API_KEY`
 - `SEC_API_EMAIL`
 - `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
 
 如果缺失，程序会直接报出类似下面的错误，帮助你一次性补全：
 
 ```text
-Missing required environment variables: SERPER_API_KEY, SEC_API_KEY, SEC_API_EMAIL.
+Missing required environment variables: FAST_MODEL, DEEP_MODEL, REVIEW_MODEL, TAVILY_API_KEY, SEC_API_EMAIL.
 Please fill them in your .env file.
 ```
 
@@ -549,33 +641,9 @@ Please fill them in your .env file.
 
 优先检查：
 
-- `SEARCH_PROVIDER` 是否与实际 key 来源一致
-- `SERPER_API_KEY` 或 `SERPAPI_API_KEY` 是否有效
+- `SEARCH_PROVIDER` 是否为 `tavily`
+- `TAVILY_API_KEY` 是否有效
 - 是否达到配额
-
-### Serper 和 SerpApi 不要混用
-
-这两个名字很像，但它们是不同服务：
-
-- `Serper`
-  - 常见接口是 `https://google.serper.dev/search`
-  - 对应 `SERPER_API_KEY`
-- `SerpApi`
-  - 常见接口是 `https://serpapi.com/search.json`
-  - 对应 `SERPAPI_API_KEY`
-
-当前项目已经兼容两者：
-
-- 当 `SEARCH_PROVIDER=serper` 时，强制走 Serper
-- 当 `SEARCH_PROVIDER=serpapi` 时，强制走 SerpApi
-- 当 `SEARCH_PROVIDER=auto` 时，会优先尝试 Serper；如果鉴权失败且你实际上填的是 SerpApi 的 key，会自动回退到 SerpApi
-
-如果你不想记 provider 差异，推荐直接配置：
-
-```env
-SEARCH_PROVIDER=serpapi
-SERPAPI_API_KEY=your_real_serpapi_key
-```
 
 ### 遇到 401 / 403 / 429 后程序直接退出
 

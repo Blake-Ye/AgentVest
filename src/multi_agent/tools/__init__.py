@@ -2,18 +2,21 @@ from multi_agent.tools.investment_tools import (
     FileReadTool,
     FileWriteTool,
     FinancialMetricsTool,
-    GoogleSearchTool,
     PDFTextExtractTool,
     SecCompanyFactsTool,
     SecFilingSearchTool,
 )
+from multi_agent.tools.official_sec import FatalAPIError, OfficialSecService
+from multi_agent.tools.tavily_search import TavilySearchTool
 
 __all__ = [
+    "FatalAPIError",
     "FileReadTool",
     "FileWriteTool",
     "FinancialMetricsTool",
-    "GoogleSearchTool",
+    "OfficialSecService",
     "PDFTextExtractTool",
     "SecCompanyFactsTool",
     "SecFilingSearchTool",
+    "TavilySearchTool",
 ]

@@ -1,44 +1,74 @@
+market_validation_task:
+  description: >
+    请先为 {company_name}（{company_ticker}）执行市场验证。你必须根据 ticker、exchange、
+    官方注册表和可验证线索输出 US、EU、HK 或 UNRESOLVED，并明确说明允许使用哪些工具，
+    哪些结论必须阻断。结果必须使用中文，不能猜测。
+  expected_output: >
+    一份中文 markdown 市场验证结果，包含市场标签、证据、置信度、工具白名单和人工确认需求。
+  agent: market_validation_analyst
+
 market_intelligence_task:
   description: >
-    请为 {company_name}（{company_ticker}）构建 {current_year} 年的市场情报简报。
-    使用 Google 搜索情报工具收集最新财报背景、产品发布、管理层表态、竞争变化
-    和主要风险。只保留有来源支撑的事实，结果必须使用中文，且便于初级分析师阅读。
+    请为 {company_name}（{company_ticker}）构建 {current_year} 年的事件与指引分析。
+    基于 Tavily 搜索得到的新闻、公告、管理层表态和监管事件，提炼近期关键事件、
+    影响路径、催化剂与待验证项。只保留有来源支撑的事实，结果必须使用中文。
   expected_output: >
-    一份中文 markdown 市场情报简报，至少包含公司概览、近期动态、竞争格局、
-    催化剂和风险五个部分，并附上至少 5 条来源引用。
-  agent: information_gathering_analyst
+    一份中文 markdown 事件与指引分析，至少包含事件、时间、来源、影响路径、
+    置信度和待验证项，并附上至少 5 条来源引用。
+  agent: event_guidance_analyst
 
 filing_review_task:
   description: >
-    使用 SEC 文件检索工具，查找 {company_name}（{company_ticker}）最新的 10-K 和
-    10-Q 文件。请总结最重要的 filing 链接、提交日期、报告期以及下一步应重点阅读的
-    章节，并用中文交叉验证这些文件是否支持前一步的市场情报简报。
+    结合监管文件检索和 company facts 工具，为 {company_name}（{company_ticker}）
+    输出中文基本面分析。你必须明确哪些判断来自 filings、哪些来自结构化财务事实，
+    并指出收入质量、利润率、现金流和资产负债表的关键结论。
   expected_output: >
-    一份中文 markdown filing 复核结果，列出最新 filing、说明每份文件的重要性，
-    并指出财务分析阶段应以哪份 filing 作为核心依据。
-  agent: information_gathering_analyst
+    一份中文 markdown 基本面分析，包含关键 filing、财务事实摘要、利多利空、
+    以及待补充证据。
+  agent: fundamental_analyst
 
 financial_analysis_task:
   description: >
-    使用 SEC 公司财务事实工具和财务指标计算器，为 {company_name}（{company_ticker}）
-    输出中文财务分析。请解释收入质量、利润率、流动性、杠杆和自由现金流。
+    使用财务指标计算器，为 {company_name}（{company_ticker}）输出中文估值与量化分析。
+    请解释估值区间、盈利质量、流动性、杠杆和自由现金流的影响。
     当前本地 PDF 状态：{local_filing_pdf_available}；本地 PDF 路径：{local_filing_pdf_path}。
     只有当本地 PDF 状态为 yes 时，才允许使用 PDF 文本提取工具；如果状态不是 yes，
     不要猜测文件名、不要尝试读取不存在的本地文件。若存在数据缺口，必须明确指出，
     不能编造数字。
   expected_output: >
-    一份中文 markdown 财务分析，包含简洁的指标表、指标解释，以及对利多和利空
-    财务信号的平衡分析。
-  agent: financial_statement_analyst
+    一份中文 markdown 估值与量化分析，包含关键指标表、估值判断、风险收益权衡
+    和数据缺口说明。
+  agent: quant_valuation_analyst
+
+data_quality_review_task:
+  description: >
+    请审查市场验证、事件与指引分析、基本面分析和估值分析四份结果，检查来源缺失、
+    市场误用、工具越界、数据冲突和无依据结论。必须引用 reviewer tools 的结构化结果，
+    只输出审查发现，不要重写分析内容。
+  expected_output: >
+    一份中文 markdown 数据质量审查报告，按必须修复、建议修复、仅记录三级列出问题，
+    并明确对应的 gate 风险与修复方向。
+  agent: data_quality_reviewer
 
 investment_report_task:
   description: >
     请基于之前所有任务输出，为 {company_name} 撰写最终中文投资备忘录。
+    仅当 analysis gate 已通过时，才允许撰写正式投资备忘录。
+    若 gate 未通过，不得生成正式投资建议，不得擅自补充缺失证据。
     报告必须包含执行摘要、业务概览、近期动态、财务分析、风险、催化剂、
     投资建议和置信度，并达到可以给面试官或招聘经理评审的项目作品质量。
     只能使用前序任务 context 和已经生成的工作流产出，不要猜测、读取或引用
     未明确提供的本地 HTML、PDF 或其他文件路径。
   expected_output: >
     一份高质量中文 markdown 投资备忘录，具有清晰标题、引用来源、明确建议，
-    并在结尾简要说明该工作流如何提升分析师效率。
+    并在结尾简要说明该工作流如何提升分析师效率；若接收到 blocked 状态，
+    必须输出阻断说明而非正式报告。
   agent: report_writing_analyst
+
+logic_compliance_review_task:
+  description: >
+    请复核最终投资备忘录及其上游审查结果，检查逻辑跳跃、证据外推、确定性表述过强、
+    合规措辞不足和风险披露缺失。只输出审查意见，不要重写整份报告。
+  expected_output: >
+    一份中文 markdown 逻辑与合规审查报告，按必须修复、建议修复、仅记录三级列出问题。
+  agent: logic_compliance_reviewer

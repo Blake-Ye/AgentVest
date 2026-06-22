@@ -1,19 +1,23 @@
+import sys
+from pathlib import Path
+
 import pytest
 
-from multi_agent.resolver import CompanyResolution, CompanyResolver
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from multi_agent.resolver import CompanyResolution, CompanyResolver, OpenAICompanyResolver
 from multi_agent.settings import InvestmentResearchSettings
 
 
 def build_settings() -> InvestmentResearchSettings:
     return InvestmentResearchSettings(
-        model="qwen-plus",
+        fast_model="qwen-plus",
+        deep_model="qwen-plus",
+        review_model="qwen-plus",
         company_resolver_model="qwen-plus",
         openai_api_key="llm-key",
         openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        search_provider="auto",
-        serper_api_key="serper-key",
-        serpapi_api_key="",
-        sec_api_key="sec-key",
+        tavily_api_key="tvly-key",
         sec_api_email="analyst@example.com",
     )
 
@@ -32,9 +36,18 @@ class RecordingSession:
     def __init__(self, responses: dict[str, object]) -> None:
         self.responses = responses
         self.calls: list[str] = []
+        self.last_post_kwargs: dict[str, object] | None = None
 
     def get(self, url: str, **kwargs):
         self.calls.append(url)
+        response = self.responses.get(url)
+        if response is None:
+            return FakeResponse(404, {"message": "not found"})
+        return FakeResponse(200, response)
+
+    def post(self, url: str, **kwargs):
+        self.calls.append(url)
+        self.last_post_kwargs = kwargs
         response = self.responses.get(url)
         if response is None:
             return FakeResponse(404, {"message": "not found"})
@@ -57,6 +70,18 @@ def test_company_resolver_maps_business_unit_alias_to_parent_company() -> None:
     assert resolution.parent_company == "Sony Group Corporation"
 
 
+def test_company_resolver_maps_microsoft_chinese_alias_to_public_company() -> None:
+    resolver = CompanyResolver(settings=build_settings(), session=RecordingSession({}), llm_resolver=None)
+
+    resolution = resolver.resolve("微软")
+
+    assert resolution.normalized_name == "Microsoft Corporation"
+    assert resolution.ticker == "MSFT"
+    assert resolution.entity_type == "public_company"
+    assert resolution.parent_company == "Microsoft Corporation"
+    assert resolution.exchange == "NASDAQ"
+
+
 def test_company_resolver_rejects_private_company_without_ticker() -> None:
     resolver = CompanyResolver(settings=build_settings(), session=RecordingSession({}), llm_resolver=None)
 
@@ -66,18 +91,17 @@ def test_company_resolver_rejects_private_company_without_ticker() -> None:
     assert "未上市公司" in str(exc_info.value)
 
 
-def test_company_resolver_uses_sec_mapping_api_for_public_company_name() -> None:
-    url = "https://api.sec-api.io/mapping/name/Alibaba%20Group?token=sec-key"
+def test_company_resolver_uses_official_sec_ticker_directory_for_public_company_name() -> None:
+    url = "https://www.sec.gov/files/company_tickers.json"
     session = RecordingSession(
         {
-            url: [
-                {
-                    "name": "Alibaba Group Holding Ltd",
+            url: {
+                "0": {
+                    "title": "Alibaba Group Holding Ltd",
                     "ticker": "BABA",
-                    "exchange": "NYSE",
-                    "isDelisted": False,
+                    "cik_str": 1577552,
                 }
-            ]
+            }
         }
     )
     resolver = CompanyResolver(settings=build_settings(), session=session, llm_resolver=None)
@@ -90,17 +114,16 @@ def test_company_resolver_uses_sec_mapping_api_for_public_company_name() -> None
 
 
 def test_company_resolver_accepts_explicit_ticker_and_normalizes_company_name() -> None:
-    url = "https://api.sec-api.io/mapping/ticker/AAPL?token=sec-key"
+    url = "https://www.sec.gov/files/company_tickers.json"
     session = RecordingSession(
         {
-            url: [
-                {
-                    "name": "Apple Inc.",
+            url: {
+                "0": {
+                    "title": "Apple Inc.",
                     "ticker": "AAPL",
-                    "exchange": "NASDAQ",
-                    "isDelisted": False,
+                    "cik_str": 320193,
                 }
-            ]
+            }
         }
     )
     resolver = CompanyResolver(settings=build_settings(), session=session, llm_resolver=None)
@@ -113,16 +136,16 @@ def test_company_resolver_accepts_explicit_ticker_and_normalizes_company_name() 
         ticker="AAPL",
         entity_type="public_company",
         parent_company="Apple Inc.",
-        exchange="NASDAQ",
+        exchange="",
         confidence=1.0,
     )
 
 
 def test_company_resolver_falls_back_to_user_facing_error_when_llm_fails() -> None:
-    url = "https://api.sec-api.io/mapping/name/%E5%AE%8C%E5%85%A8%E6%9C%AA%E7%9F%A5%E5%85%AC%E5%8F%B8?token=sec-key"
+    url = "https://www.sec.gov/files/company_tickers.json"
     resolver = CompanyResolver(
         settings=build_settings(),
-        session=RecordingSession({url: []}),
+        session=RecordingSession({url: {}}),
         llm_resolver=FailingResolver(),
     )
 
@@ -130,3 +153,35 @@ def test_company_resolver_falls_back_to_user_facing_error_when_llm_fails() -> No
         resolver.resolve("完全未知公司")
 
     assert "无法根据输入" in str(exc_info.value)
+
+
+def test_openai_company_resolver_prompt_guides_chinese_alias_resolution() -> None:
+    session = RecordingSession(
+        {
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions": {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"normalized_name":"Microsoft Corporation","ticker":"MSFT",'
+                                '"entity_type":"public_company","parent_company":"Microsoft Corporation",'
+                                '"exchange":"NASDAQ","confidence":0.96}'
+                            )
+                        }
+                    }
+                ]
+            }
+        }
+    )
+    resolver = OpenAICompanyResolver(settings=build_settings(), session=session)
+
+    resolution = resolver.resolve("微软")
+
+    system_prompt = session.last_post_kwargs["json"]["messages"][0]["content"]  # type: ignore[index]
+    user_prompt = session.last_post_kwargs["json"]["messages"][1]["content"]  # type: ignore[index]
+
+    assert resolution.ticker == "MSFT"
+    assert "Chinese short names" in system_prompt
+    assert "common aliases" in system_prompt
+    assert "listed parent company" in system_prompt
+    assert "微软" in user_prompt

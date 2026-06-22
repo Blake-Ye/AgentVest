@@ -1,4 +1,5 @@
 import json
+import signal
 import subprocess
 import sys
 from argparse import Namespace
@@ -7,8 +8,16 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from multi_agent.core.market import MarketValidationResult, build_tool_policy
 from multi_agent.settings import InvestmentResearchSettings
-from multi_agent.main import _build_run_output_paths, _raise_user_facing_runtime_error, _workflow_inputs
+from multi_agent.main import (
+    _build_run_output_paths,
+    _final_status_from_result,
+    _raise_user_facing_runtime_error,
+    _workflow_inputs,
+)
 from multi_agent.resolver import CompanyResolution
 from multi_agent.tools.investment_tools import FatalAPIError
 
@@ -52,18 +61,38 @@ def test_workflow_inputs_auto_resolve_company_name_when_ticker_missing(
                 confidence=0.98,
             )
 
+    class StubMarketValidationService:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def validate(self, *, company_name: str, ticker: str = "", exchange: str = "") -> MarketValidationResult:
+            assert company_name == "Alibaba Group Holding Ltd"
+            assert ticker == "BABA"
+            assert exchange == "NYSE"
+            return MarketValidationResult(
+                market_label="US",
+                confidence=0.99,
+                resolution_status="confirmed",
+                evidence=["exchange=NYSE"],
+                requires_human_confirmation=False,
+                tool_policy=build_tool_policy("US"),
+            )
+
     monkeypatch.setenv("MODEL", "qwen-plus")
     monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    monkeypatch.setenv("SERPER_API_KEY", "serper-key")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
     monkeypatch.setenv("SEC_API_KEY", "sec-key")
     monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
     monkeypatch.setattr("multi_agent.main.CompanyResolver", StubResolver)
+    monkeypatch.setattr("multi_agent.main.MarketValidationService", StubMarketValidationService)
 
     inputs = _workflow_inputs("阿里", "")
 
     assert inputs["company_name"] == "Alibaba Group Holding Ltd"
     assert inputs["company_ticker"] == "BABA"
+    assert inputs["company_market_label"] == "US"
+    assert inputs["market_resolution_status"] == "confirmed"
 
 
 def test_run_writes_evaluation_artifacts_on_success(
@@ -95,9 +124,12 @@ def test_run_writes_evaluation_artifacts_on_success(
             artifacts_dir = Path(inputs["artifacts_dir"])
             artifacts_dir.mkdir(parents=True, exist_ok=True)
             for name in (
+                "00_market_validation.md",
                 "01_market_intelligence.md",
                 "02_filing_review.md",
                 "03_financial_analysis.md",
+                "08_data_quality_review.md",
+                "09_logic_compliance_review.md",
             ):
                 (artifacts_dir / name).write_text("# artifact\n", encoding="utf-8")
             Path(inputs["final_report_path"]).write_text(
@@ -120,11 +152,93 @@ def test_run_writes_evaluation_artifacts_on_success(
     latest_metrics = (run_dir / "latest_run_metrics.json").read_text(encoding="utf-8")
     assert "Apple Inc." in latest_metrics
     assert '"success": true' in latest_metrics
+    assert (run_dir / "00_market_validation.md").exists()
     assert (run_dir / "04_investment_report.md").exists()
+    assert (run_dir / "08_data_quality_review.md").exists()
+    assert (run_dir / "09_logic_compliance_review.md").exists()
     assert (run_dir / "evaluation_summary.json").exists()
     readme_content = (run_dir / "README.md").read_text(encoding="utf-8")
     assert "Apple Inc." in readme_content
+    assert "00_market_validation.md" in readme_content
     assert "04_investment_report.md" in readme_content
+    assert "09_logic_compliance_review.md" in readme_content
+
+
+def test_run_uses_flow_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="tavily",
+        tavily_api_key="tvly-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
+
+    class StubFlow:
+        def kickoff(self):
+            artifacts_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            for name in (
+                "00_market_validation.md",
+                "01_market_intelligence.md",
+                "02_filing_review.md",
+                "03_financial_analysis.md",
+                "08_data_quality_review.md",
+                "09_logic_compliance_review.md",
+            ):
+                (artifacts_dir / name).write_text("# artifact\n", encoding="utf-8")
+            (artifacts_dir / "04_investment_report.md").write_text(
+                "参考 https://example.com/report",
+                encoding="utf-8",
+            )
+            return "ok"
+
+    class StubFlowFactory:
+        def __init__(self, initial_state):
+            self.initial_state = initial_state
+
+        def kickoff(self):
+            assert self.initial_state.company_name == "Apple Inc."
+            assert self.initial_state.company_ticker == "AAPL"
+            return StubFlow().kickoff()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("USE_FLOW_EXECUTION", "1")
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(
+        main,
+        "_workflow_inputs",
+        lambda *_: {
+            "company_name": "Apple Inc.",
+            "company_ticker": "AAPL",
+            "company_market_label": "US",
+            "market_resolution_status": "confirmed",
+        },
+    )
+    monkeypatch.setattr(main, "_crew", lambda: (_ for _ in ()).throw(AssertionError("should not use crew")))
+    monkeypatch.setattr(main, "_flow", lambda inputs: StubFlowFactory(initial_state=type("State", (), inputs)()))
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+
+    main.run()
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    assert (run_dir / "00_market_validation.md").exists()
+    assert (run_dir / "04_investment_report.md").exists()
+    assert (run_dir / "09_logic_compliance_review.md").exists()
 
 
 def test_run_writes_structured_recommendation_and_watchlist_when_enabled(
@@ -162,9 +276,12 @@ def test_run_writes_structured_recommendation_and_watchlist_when_enabled(
             artifacts_dir = Path(inputs["artifacts_dir"])
             artifacts_dir.mkdir(parents=True, exist_ok=True)
             for name in (
+                "00_market_validation.md",
                 "01_market_intelligence.md",
                 "02_filing_review.md",
                 "03_financial_analysis.md",
+                "08_data_quality_review.md",
+                "09_logic_compliance_review.md",
             ):
                 (artifacts_dir / name).write_text("# artifact\n", encoding="utf-8")
             Path(inputs["final_report_path"]).write_text(
@@ -363,10 +480,13 @@ def test_run_backfills_standard_output_files_when_crew_does_not_write_files(
     class StubCrewResult:
         raw = "# 最终报告\n\n参考 https://example.com/report"
         tasks_output = [
+            StubTaskOutput("market_validation_task", "# 市场验证\n\nUS"),
             StubTaskOutput("market_intelligence_task", "# 市场情报\n\n参考 https://example.com/market"),
             StubTaskOutput("filing_review_task", "# Filing 复核\n\n参考 https://example.com/filing"),
             StubTaskOutput("financial_analysis_task", "# 财务分析\n\n参考 https://example.com/financial"),
             StubTaskOutput("investment_report_task", "# 投资备忘录\n\n参考 https://example.com/report"),
+            StubTaskOutput("data_quality_review_task", "# 数据质量审查\n\n无阻塞问题"),
+            StubTaskOutput("logic_compliance_review_task", "# 逻辑与合规审查\n\n无阻塞问题"),
         ]
 
     class StubCrew:
@@ -384,13 +504,258 @@ def test_run_backfills_standard_output_files_when_crew_does_not_write_files(
     main.run()
 
     run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    assert "市场验证" in (run_dir / "00_market_validation.md").read_text(encoding="utf-8")
     assert "市场情报" in (run_dir / "01_market_intelligence.md").read_text(encoding="utf-8")
     assert "Filing 复核" in (run_dir / "02_filing_review.md").read_text(encoding="utf-8")
     assert "财务分析" in (run_dir / "03_financial_analysis.md").read_text(encoding="utf-8")
     assert "投资备忘录" in (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
+    assert "数据质量审查" in (run_dir / "08_data_quality_review.md").read_text(encoding="utf-8")
+    assert "逻辑与合规审查" in (run_dir / "09_logic_compliance_review.md").read_text(encoding="utf-8")
     latest_metrics = (run_dir / "latest_run_metrics.json").read_text(encoding="utf-8")
     assert '"report_generated": true' in latest_metrics
     assert '"report_complete": true' in latest_metrics
+
+
+def test_run_writes_blocked_outputs_when_gate_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="auto",
+        serper_api_key="serper-key",
+        serpapi_api_key="",
+        sec_api_key="sec-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
+
+    blocked_result = {
+        "status": "blocked",
+        "trust_score": 68,
+        "blocking_reasons": [
+            "evidence_coverage_ratio<0.80",
+            "unsupported_critical_claims>0",
+        ],
+    }
+
+    def _stub_kickoff_workflow(inputs):
+        artifacts_dir = Path(inputs["artifacts_dir"])
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in (
+            ("00_market_validation.md", "# 市场验证结果\n\n市场已确认。"),
+            ("01_market_intelligence.md", "# 市场情报简报\n\n已完成情报汇总。"),
+            ("02_filing_review.md", "# 监管文件复核\n\n已完成文件复核。"),
+            ("03_financial_analysis.md", "# 财务分析结果\n\n已完成财务分析。"),
+            ("08_data_quality_review.md", "# 数据质量审查结果\n\n存在阻断问题。"),
+            ("09_logic_compliance_review.md", "# 逻辑与合规审查结果\n\n存在阻断问题。"),
+        ):
+            (artifacts_dir / name).write_text(content, encoding="utf-8")
+        return blocked_result
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+    monkeypatch.setattr(main, "_kickoff_workflow", _stub_kickoff_workflow)
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+
+    main.run()
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    report_content = (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
+    recommendation = json.loads((run_dir / "06_structured_recommendation.json").read_text(encoding="utf-8"))
+    structured_report = json.loads((run_dir / "07_structured_report.json").read_text(encoding="utf-8"))
+    latest_metrics = (run_dir / "latest_run_metrics.json").read_text(encoding="utf-8")
+
+    assert "阻断" in report_content
+    assert "68" in report_content
+    assert "evidence_coverage_ratio<0.80" in report_content
+    assert recommendation["status"] == "blocked"
+    assert recommendation["stance"] == "blocked"
+    assert recommendation["stance_label"] == "阻断"
+    assert structured_report["status"] == "blocked"
+    assert structured_report["final_decision"] == "blocked"
+    assert '"status": "completed"' in latest_metrics
+
+
+def test_run_overwrites_existing_formal_report_when_gate_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="auto",
+        serper_api_key="serper-key",
+        serpapi_api_key="",
+        sec_api_key="sec-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
+
+    blocked_result = {
+        "status": "blocked",
+        "trust_score": 52,
+        "blocking_reasons": ["hard_gate_failed"],
+        "raw": "# 投资备忘录\n\n这是一份不应被保留的正式报告。",
+    }
+
+    def _stub_kickoff_workflow(inputs):
+        artifacts_dir = Path(inputs["artifacts_dir"])
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in (
+            ("00_market_validation.md", "# 市场验证结果\n\n市场已确认。"),
+            ("01_market_intelligence.md", "# 市场情报简报\n\n已完成情报汇总。"),
+            ("02_filing_review.md", "# 监管文件复核\n\n已完成文件复核。"),
+            ("03_financial_analysis.md", "# 财务分析结果\n\n已完成财务分析。"),
+            ("08_data_quality_review.md", "# 数据质量审查结果\n\n存在阻断问题。"),
+            ("09_logic_compliance_review.md", "# 逻辑与合规审查结果\n\n存在阻断问题。"),
+        ):
+            (artifacts_dir / name).write_text(content, encoding="utf-8")
+        Path(inputs["final_report_path"]).write_text(
+            "# 投资备忘录\n\n这是运行中先写出的正式报告，不应在 blocked 时保留。\n",
+            encoding="utf-8",
+        )
+        return blocked_result
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+    monkeypatch.setattr(main, "_kickoff_workflow", _stub_kickoff_workflow)
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+
+    main.run()
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    report_content = (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
+
+    assert "已阻断" in report_content
+    assert "hard_gate_failed" in report_content
+    assert "不应在 blocked 时保留" not in report_content
+
+
+def test_run_allows_formal_report_after_rerun_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="auto",
+        serper_api_key="serper-key",
+        serpapi_api_key="",
+        sec_api_key="sec-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
+
+    final_result = {
+        "status": "passed",
+        "trust_score": 88,
+        "blocking_reasons": [],
+        "analysis_result": {"analysis_markdown": "rerun recovered"},
+        "report_result": "\n".join(
+            [
+                "# 投资备忘录",
+                "",
+                "## 执行摘要",
+                "",
+                "经过一次 rerun 后，核心证据已补齐。",
+                "",
+                "## 催化剂",
+                "",
+                "- 新产品周期",
+                "",
+                "## 风险",
+                "",
+                "- 宏观需求波动",
+                "",
+                "## 投资建议",
+                "",
+                "建议持有。",
+                "",
+                "参考 https://example.com/report",
+            ]
+        ),
+    }
+
+    def _stub_kickoff_workflow(inputs):
+        artifacts_dir = Path(inputs["artifacts_dir"])
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in (
+            ("00_market_validation.md", "# 市场验证结果\n\n市场已确认。"),
+            ("01_market_intelligence.md", "# 市场情报简报\n\n已完成情报汇总。"),
+            ("02_filing_review.md", "# 监管文件复核\n\n已完成文件复核。"),
+            ("03_financial_analysis.md", "# 财务分析结果\n\n已完成财务分析。"),
+            ("08_data_quality_review.md", "# 数据质量审查结果\n\n已完成修复复核。"),
+            ("09_logic_compliance_review.md", "# 逻辑与合规审查结果\n\n允许正式交付。"),
+        ):
+            (artifacts_dir / name).write_text(content, encoding="utf-8")
+        return final_result
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+    monkeypatch.setattr(main, "_kickoff_workflow", _stub_kickoff_workflow)
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+
+    main.run()
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    report_content = (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
+    recommendation = json.loads((run_dir / "06_structured_recommendation.json").read_text(encoding="utf-8"))
+    structured_report = json.loads((run_dir / "07_structured_report.json").read_text(encoding="utf-8"))
+    latest_metrics = json.loads((run_dir / "latest_run_metrics.json").read_text(encoding="utf-8"))
+
+    assert "<!-- PLACEHOLDER -->" not in report_content
+    assert "建议持有" in report_content
+    assert recommendation["status"] == "passed"
+    assert recommendation["stance"] == "hold"
+    assert recommendation["stance_label"] == "中性"
+    assert structured_report["status"] == "passed"
+    assert structured_report["final_decision"] == "passed"
+    assert structured_report["sections"]["investment_recommendation"].startswith("建议持有。")
+    assert latest_metrics["final_status"] == "passed"
+    assert latest_metrics["trust_score"]["score"] == 88
+
+
+def test_final_status_from_result_rejects_unknown_status() -> None:
+    with pytest.raises(ValueError, match="未知"):
+        _final_status_from_result({"status": "pending_review"})
 
 
 def test_run_writes_failed_evaluation_artifacts_on_error(
@@ -437,9 +802,11 @@ def test_run_writes_failed_evaluation_artifacts_on_error(
     assert '"success": false' in latest_metrics
     assert "403" in latest_metrics
     assert (run_dir / "README.md").exists()
+    assert "程序已终止" in (run_dir / "00_market_validation.md").read_text(encoding="utf-8")
     failure_report = (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
     assert "程序已终止" in failure_report
     assert "403" in failure_report
+    assert "程序已终止" in (run_dir / "09_logic_compliance_review.md").read_text(encoding="utf-8")
 
 
 def test_run_writes_failed_evaluation_artifacts_on_keyboard_interrupt(
@@ -486,8 +853,270 @@ def test_run_writes_failed_evaluation_artifacts_on_keyboard_interrupt(
     assert '"status": "failed"' in latest_metrics
     assert "运行被中断" in latest_metrics
     assert (run_dir / "README.md").exists()
+    assert "运行被中断" in (run_dir / "00_market_validation.md").read_text(encoding="utf-8")
     failure_report = (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
     assert "运行被中断" in failure_report
+    assert "运行被中断" in (run_dir / "09_logic_compliance_review.md").read_text(encoding="utf-8")
+
+
+def test_run_treats_sigterm_like_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="auto",
+        serper_api_key="serper-key",
+        serpapi_api_key="",
+        sec_api_key="sec-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
+
+    registered_handlers: dict[signal.Signals, object] = {}
+
+    def _stub_signal(sig: signal.Signals, handler: object) -> object:
+        previous = registered_handlers.get(sig, signal.SIG_DFL)
+        registered_handlers[sig] = handler
+        return previous
+
+    def _stub_kickoff_workflow(_inputs):
+        sigterm_handler = registered_handlers[signal.SIGTERM]
+        assert callable(sigterm_handler)
+        sigterm_handler(signal.SIGTERM, None)
+        raise AssertionError("SIGTERM handler should interrupt execution before continuing")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+    monkeypatch.setattr(main, "_kickoff_workflow", _stub_kickoff_workflow)
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+    monkeypatch.setattr(main.signal, "signal", _stub_signal)
+
+    with pytest.raises(SystemExit):
+        main.run()
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    latest_metrics = (run_dir / "latest_run_metrics.json").read_text(encoding="utf-8")
+    assert '"status": "failed"' in latest_metrics
+    assert "运行被中断" in latest_metrics
+    assert "运行被中断" in (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
+
+
+def test_run_overwrites_existing_formal_markdown_outputs_on_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="auto",
+        serper_api_key="serper-key",
+        serpapi_api_key="",
+        sec_api_key="sec-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
+
+    class PartiallyFailingCrew:
+        def kickoff(self, inputs):
+            artifacts_dir = Path(inputs["artifacts_dir"])
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            for name, content in (
+                ("00_market_validation.md", "# 市场验证结果\n\n这是失败前写出的正式内容。"),
+                ("01_market_intelligence.md", "# 市场情报简报\n\n这是失败前写出的正式内容。"),
+                ("02_filing_review.md", "# 监管文件复核\n\n这是失败前写出的正式内容。"),
+                ("03_financial_analysis.md", "# 财务分析结果\n\n这是失败前写出的正式内容。"),
+                ("08_data_quality_review.md", "# 数据质量审查结果\n\n这是失败前写出的正式内容。"),
+                ("09_logic_compliance_review.md", "# 逻辑与合规审查结果\n\n这是失败前写出的正式内容。"),
+            ):
+                (artifacts_dir / name).write_text(content, encoding="utf-8")
+            Path(inputs["final_report_path"]).write_text(
+                "# 投资备忘录\n\n这是失败前写出的正式报告，不应在异常后保留。\n",
+                encoding="utf-8",
+            )
+            raise RuntimeError("模拟未预期错误")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(main, "_crew", lambda: PartiallyFailingCrew())
+    monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+
+    with pytest.raises(SystemExit):
+        main.run()
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    for name in (
+        "00_market_validation.md",
+        "01_market_intelligence.md",
+        "02_filing_review.md",
+        "03_financial_analysis.md",
+        "04_investment_report.md",
+        "08_data_quality_review.md",
+        "09_logic_compliance_review.md",
+    ):
+        content = (run_dir / name).read_text(encoding="utf-8")
+        assert "运行投研工作流时发生未预期错误：模拟未预期错误" in content
+        assert "这是失败前写出的正式内容" not in content
+        assert "这是失败前写出的正式报告，不应在异常后保留" not in content
+
+
+def test_run_with_trigger_uses_flow_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="tavily",
+        tavily_api_key="tvly-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+
+    class StubFlow:
+        def kickoff(self):
+            artifacts_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            for name in (
+                "00_market_validation.md",
+                "01_market_intelligence.md",
+                "02_filing_review.md",
+                "03_financial_analysis.md",
+                "08_data_quality_review.md",
+                "09_logic_compliance_review.md",
+            ):
+                (artifacts_dir / name).write_text("# artifact\n", encoding="utf-8")
+            (artifacts_dir / "04_investment_report.md").write_text(
+                "参考 https://example.com/report",
+                encoding="utf-8",
+            )
+            return "ok"
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("USE_FLOW_EXECUTION", "1")
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(
+        main,
+        "_workflow_inputs",
+        lambda *_: {
+            "company_name": "Apple Inc.",
+            "company_ticker": "AAPL",
+            "company_market_label": "US",
+            "market_resolution_status": "confirmed",
+            "local_filing_pdf_path": "",
+            "local_filing_pdf_available": "no",
+        },
+    )
+    monkeypatch.setattr(main, "_crew", lambda: (_ for _ in ()).throw(AssertionError("should not use crew")))
+    monkeypatch.setattr(main, "_flow", lambda inputs: StubFlow())
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "multi_agent.main",
+            json.dumps({"company_name": "Apple Inc.", "company_ticker": "AAPL"}),
+        ],
+    )
+
+    result = main.run_with_trigger()
+
+    assert result == "ok"
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    assert (run_dir / "09_logic_compliance_review.md").exists()
+
+
+def test_run_trigger_payload_treats_sigterm_like_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="auto",
+        serper_api_key="serper-key",
+        serpapi_api_key="",
+        sec_api_key="sec-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+
+    registered_handlers: dict[signal.Signals, object] = {}
+
+    def _stub_signal(sig: signal.Signals, handler: object) -> object:
+        previous = registered_handlers.get(sig, signal.SIG_DFL)
+        registered_handlers[sig] = handler
+        return previous
+
+    def _stub_kickoff_workflow(_inputs):
+        sigterm_handler = registered_handlers[signal.SIGTERM]
+        assert callable(sigterm_handler)
+        sigterm_handler(signal.SIGTERM, None)
+        raise AssertionError("SIGTERM handler should interrupt trigger execution before continuing")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(
+        main,
+        "_workflow_inputs",
+        lambda *_: {
+            "company_name": "Apple Inc.",
+            "company_ticker": "AAPL",
+            "company_market_label": "US",
+            "market_resolution_status": "confirmed",
+            "local_filing_pdf_path": "",
+            "local_filing_pdf_available": "no",
+        },
+    )
+    monkeypatch.setattr(main, "_kickoff_workflow", _stub_kickoff_workflow)
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+    monkeypatch.setattr(main.signal, "signal", _stub_signal)
+
+    with pytest.raises(SystemExit):
+        main.run_trigger_payload({"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    latest_metrics = (run_dir / "latest_run_metrics.json").read_text(encoding="utf-8")
+    assert '"status": "failed"' in latest_metrics
+    assert "运行被中断" in latest_metrics
+    assert "运行被中断" in (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
 
 
 def test_build_run_output_paths_groups_all_outputs_in_company_folder(tmp_path: Path) -> None:
@@ -504,10 +1133,13 @@ def test_build_run_output_paths_groups_all_outputs_in_company_folder(tmp_path: P
     assert output_paths.company_dir == (
         tmp_path / "artifacts" / "shenzhen_inovance_technology_co_ltd__300124_sz"
     )
+    assert output_paths.market_validation_path.name == "00_market_validation.md"
     assert output_paths.market_intelligence_path.name == "01_market_intelligence.md"
     assert output_paths.filing_review_path.name == "02_filing_review.md"
     assert output_paths.financial_analysis_path.name == "03_financial_analysis.md"
     assert output_paths.final_report_path.name == "04_investment_report.md"
     assert output_paths.runtime_log_path.name == "05_runtime.txt"
+    assert output_paths.data_quality_review_path.name == "08_data_quality_review.md"
+    assert output_paths.logic_compliance_review_path.name == "09_logic_compliance_review.md"
     assert output_paths.latest_metrics_path.name == "latest_run_metrics.json"
     assert output_paths.readme_path.name == "README.md"
