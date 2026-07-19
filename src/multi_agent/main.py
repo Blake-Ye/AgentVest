@@ -43,6 +43,7 @@ class RunOutputPaths:
     latest_metrics_path: Path
     evaluation_summary_path: Path
     readme_path: Path
+    evidence_bundle_path: Path
 
 def _crew():
     return runtime.build_crew()
@@ -119,6 +120,7 @@ def _build_run_output_paths(
         latest_metrics_path=run_dir / "latest_run_metrics.json",
         evaluation_summary_path=run_dir / "evaluation_summary.json",
         readme_path=run_dir / "README.md",
+        evidence_bundle_path=run_dir / "10_research_evidence.json",
     )
 
 
@@ -149,6 +151,7 @@ def _write_run_readme(
             "- `07_structured_report.json`：结构化完整报告快照",
             "- `08_data_quality_review.md`：数据质量审查结果",
             "- `09_logic_compliance_review.md`：逻辑与合规审查结果",
+            "- `10_research_evidence.json`：可审计的规范化研究证据包",
             "- `final_decision.json`：最终状态单一真值源",
             "- `latest_run_metrics.json`：单次运行评估指标",
             "- `evaluation_summary.json`：当前目录下的评估汇总",

@@ -145,6 +145,40 @@ def test_official_sec_service_fetches_company_facts_from_official_endpoint() -> 
     }
 
 
+def test_official_sec_service_returns_annual_filing_identity_with_html() -> None:
+    filing_url = "https://www.sec.gov/Archives/edgar/data/320193/000032019325000010/a10-k2025.htm"
+    session = RecordingSession(
+        {
+            "https://www.sec.gov/files/company_tickers.json": {
+                "0": {"title": "Apple Inc.", "ticker": "AAPL", "cik_str": 320193}
+            },
+            "https://data.sec.gov/submissions/CIK0000320193.json": {
+                "filings": {
+                    "recent": {
+                        "form": ["10-K"],
+                        "filingDate": ["2025-11-01"],
+                        "accessionNumber": ["0000320193-25-000010"],
+                        "primaryDocument": ["a10-k2025.htm"],
+                        "primaryDocDescription": ["Annual report"],
+                    }
+                }
+            },
+            filing_url: "<html>annual filing</html>",
+        }
+    )
+    service = OfficialSecService(settings=build_settings(), session=session)
+
+    report = service.fetch_latest_annual_report("AAPL")
+
+    assert report == {
+        "html": "<html>annual filing</html>",
+        "source_url": filing_url,
+        "accession": "0000320193-25-000010",
+        "filed_at": "2025-11-01",
+        "form": "10-K",
+    }
+
+
 def test_official_sec_service_falls_back_to_cached_ticker_directory_when_request_fails(
     tmp_path: Path,
 ) -> None:

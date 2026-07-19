@@ -8,6 +8,7 @@ from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from multi_agent.settings import InvestmentResearchSettings
+from multi_agent.evaluation import record_tavily_payload
 from multi_agent.tools.official_sec import (
     FatalAPIError,
     _build_retry_session,
@@ -205,7 +206,7 @@ class TavilySearchTool(BaseTool):
         company_name: str = "",
     ) -> dict[str, Any]:
         if self._query_count >= self.MAX_QUERIES_PER_RUN:
-            return TavilySearchOutput(
+            return self._record_payload(TavilySearchOutput(
                 query=query,
                 topic=topic,
                 market_label=market_label,
@@ -216,19 +217,19 @@ class TavilySearchTool(BaseTool):
                 degraded_reason=(
                     f"Tavily 搜索预算已用尽：单次运行最多允许 {self.MAX_QUERIES_PER_RUN} 次检索。"
                 ),
-            ).model_dump()
+            ).model_dump())
         try:
             self._query_count += 1
-            return self._service.search_company_news(
+            return self._record_payload(self._service.search_company_news(
                 query=query,
                 topic=topic,
                 market_label=market_label,
                 company_name=company_name,
-            )
+            ))
         except FatalAPIError:
             raise
         except Exception as exc:  # pragma: no cover - network failure path
-            return TavilySearchOutput(
+            return self._record_payload(TavilySearchOutput(
                 query=query,
                 topic=topic,
                 market_label=market_label,
@@ -237,4 +238,9 @@ class TavilySearchTool(BaseTool):
                 results=[],
                 status="degraded",
                 degraded_reason=f"Tavily 搜索失败：{exc}",
-            ).model_dump()
+            ).model_dump())
+
+    @staticmethod
+    def _record_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        record_tavily_payload(payload)
+        return payload

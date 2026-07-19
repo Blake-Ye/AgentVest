@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from math import isfinite
 from pathlib import Path
 from typing import Any, Type
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -24,7 +25,11 @@ from multi_agent.core.evidence import (
     ToolHealthRecord,
     periods_are_compatible,
 )
-from multi_agent.evaluation import record_financial_fields
+from multi_agent.evaluation import (
+    record_financial_fields,
+    record_research_evidence,
+    recorded_tavily_payloads,
+)
 from multi_agent.finance import CompanyFinancialSnapshot, compute_key_metrics
 from multi_agent.settings import InvestmentResearchSettings
 from multi_agent.tools.official_sec import (
@@ -117,6 +122,16 @@ def build_formal_gate_snapshot(
         "missing_fields": missing_fields,
         "ready_for_formal_report": not missing_fields,
     }
+
+
+def _formal_gate_snapshot_from_evidence(bundle: ResearchEvidenceBundle) -> dict[str, Any]:
+    formal_field_names = {fact.field_name for fact in bundle.formal_facts()}
+    evidence_fields = {
+        field_name: {"extracted": field_name in formal_field_names}
+        for field_name in FORMAL_GATE_REQUIRED_FIELDS
+    }
+    evidence_fields["stock_price"] = {"extracted": bool(bundle.market_snapshots)}
+    return build_formal_gate_snapshot(evidence_fields)
 
 
 def _extract_latest_fact(company_facts: dict[str, Any], candidate_tags: list[str]) -> FinancialFieldExtraction:
@@ -349,12 +364,12 @@ def _add_total_debt(bundle: ResearchEvidenceBundle) -> None:
 def _add_services_revenue_from_filing(
     bundle: ResearchEvidenceBundle,
     filing_html: str,
+    filing_metadata: dict[str, object] | None,
 ) -> None:
     if any(fact.field_name == "segment_revenue_services" for fact in bundle.financial_facts):
         return
     extracted = _extract_services_revenue_from_filing_html(filing_html)
-    revenue = next((fact for fact in bundle.financial_facts if fact.field_name == "revenue"), None)
-    if not extracted.extracted or revenue is None:
+    if not extracted.extracted:
         bundle.tool_health.append(
             ToolHealthRecord(
                 tool_name="sec_filing_html",
@@ -371,16 +386,33 @@ def _add_services_revenue_from_filing(
             )
         )
         return
-    bundle.financial_facts.append(
-        revenue.model_copy(
-            update={
-                "field_name": "segment_revenue_services",
-                "value": extracted.normalized_value,
-                "source_tag": extracted.source_tag or "sec_filing_html",
-                "taxonomy_concept": "ProductsAndServicesPerformance.Services",
-            }
-        )
+    metadata = filing_metadata or {}
+    services_fact = FinancialFact(
+        field_name="segment_revenue_services",
+        value=extracted.normalized_value,
+        unit=str(metadata.get("unit", "USD")).strip() or "USD",
+        period_start=_optional_date(metadata.get("period_start")),
+        period_end=_optional_date(metadata.get("period_end")),
+        fiscal_year=_optional_int(metadata.get("fiscal_year")),
+        fiscal_period=str(metadata.get("fiscal_period", "")).strip() or None,
+        form=str(metadata.get("form", "")).strip() or None,
+        accession=str(metadata.get("accession", "")).strip() or None,
+        filed_at=_optional_date(metadata.get("filed_at")),
+        source_url=str(metadata.get("source_url", "")).strip() or None,
+        source_tag=extracted.source_tag or "sec_filing_html",
+        taxonomy_concept="ProductsAndServicesPerformance.Services",
     )
+    bundle.financial_facts.append(services_fact)
+    if not services_fact.formal_eligible:
+        bundle.gaps.append(
+            _evidence_gap(
+                code="services_revenue_provenance_incomplete",
+                target="fundamental_analyst",
+                fields=["segment_revenue_services"],
+                sources=[services_fact.source_url] if services_fact.source_url else [],
+                message="Services revenue is auditable but lacks filing identity or period metadata required for formal delivery.",
+            )
+        )
     bundle.tool_health.append(ToolHealthRecord(tool_name="sec_filing_html", status="healthy"))
 
 
@@ -425,23 +457,46 @@ def _add_tavily_events(
     tavily_payloads: list[dict[str, object]],
 ) -> None:
     if not tavily_payloads:
+        bundle.tool_health.append(
+            ToolHealthRecord(
+                tool_name="tavily",
+                status="degraded",
+                message="No Tavily payload was recorded for this run.",
+            )
+        )
+        bundle.gaps.append(
+            _evidence_gap(
+                code="independent_event_sources_insufficient",
+                target="event_guidance_analyst",
+                fields=["events"],
+                message="No Tavily evidence was recorded for independent event confirmation.",
+            )
+        )
         return
     degraded = False
     event_count = 0
+    source_domains: set[str] = set()
     for payload_index, payload in enumerate(tavily_payloads):
         status = str(payload.get("status", "ok")).lower()
         results = payload.get("results", [])
         if status != "ok" or not isinstance(results, list):
             degraded = True
             continue
+        artifact_ref = str(payload.get("artifact_ref", "")).strip()
+        if _is_valid_http_url(artifact_ref):
+            bundle.raw_artifact_refs.append(artifact_ref)
         for result_index, raw_result in enumerate(results):
             if not isinstance(raw_result, dict):
+                degraded = True
                 continue
             url = str(raw_result.get("url", "")).strip()
             title = str(raw_result.get("title", "")).strip()
-            if not url or not title:
+            if not title or not _is_valid_http_url(url):
+                degraded = True
                 continue
             event_count += 1
+            source_domains.add(urlparse(url).hostname or "")
+            bundle.raw_artifact_refs.append(url)
             bundle.events.append(
                 EventEvidence(
                     event_id=f"tavily-{payload_index}-{result_index}",
@@ -452,11 +507,17 @@ def _add_tavily_events(
                     confidence=0.6,
                 )
             )
-    if degraded:
+    independently_confirmed = len(source_domains) >= 2
+    if independently_confirmed:
+        bundle.events = [
+            event.model_copy(update={"independently_confirmed": True})
+            for event in bundle.events
+        ]
+    if degraded or not independently_confirmed:
         bundle.tool_health.append(ToolHealthRecord(tool_name="tavily", status="degraded"))
     else:
         bundle.tool_health.append(ToolHealthRecord(tool_name="tavily", status="healthy"))
-    if degraded or event_count == 0:
+    if degraded or not independently_confirmed or event_count == 0:
         bundle.gaps.append(
             _evidence_gap(
                 code="independent_event_sources_insufficient",
@@ -467,6 +528,11 @@ def _add_tavily_events(
         )
 
 
+def _is_valid_http_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
 def build_research_evidence_bundle(
     *,
     company_name: str,
@@ -475,12 +541,29 @@ def build_research_evidence_bundle(
     filing_html: str,
     quote_payload: dict[str, object],
     tavily_payloads: list[dict[str, object]],
+    filing_metadata: dict[str, object] | None = None,
 ) -> ResearchEvidenceBundle:
     """Normalize SEC, filing, quote, and news payloads into one auditable bundle."""
     bundle = EvidenceNormalizer().normalize_company_facts(company_name, ticker, company_facts)
-    bundle.tool_health.append(ToolHealthRecord(tool_name="sec_company_facts", status="healthy"))
+    if bundle.formal_facts():
+        bundle.tool_health.append(ToolHealthRecord(tool_name="sec_company_facts", status="healthy"))
+    else:
+        bundle.tool_health.append(
+            ToolHealthRecord(
+                tool_name="sec_company_facts",
+                status="degraded",
+                message="SEC Company Facts did not yield a formal-eligible financial claim.",
+            )
+        )
+        bundle.gaps.append(
+            _evidence_gap(
+                code="sec_companyfacts_no_formal_facts",
+                target="fundamental_analyst",
+                message="SEC Company Facts contains no formal-eligible financial facts.",
+            )
+        )
     _add_total_debt(bundle)
-    _add_services_revenue_from_filing(bundle, filing_html)
+    _add_services_revenue_from_filing(bundle, filing_html, filing_metadata)
     _add_quote_evidence(bundle, ticker, quote_payload)
     _add_tavily_events(bundle, tavily_payloads)
     return bundle
@@ -534,11 +617,18 @@ def _build_financial_snapshot_with_metadata(
         extracted=bool(total_debt_tags),
         source_tag="+".join(total_debt_tags) if total_debt_tags else None,
     )
-    diluted_shares = _extract_latest_fact(
+    shares_outstanding = _extract_latest_fact(
         company_facts,
         [
             "EntityCommonStockSharesOutstanding",
             "CommonStockSharesOutstanding",
+        ],
+    )
+    diluted_shares = _extract_latest_fact(
+        company_facts,
+        [
+            "WeightedAverageNumberOfDilutedSharesOutstanding",
+            "WeightedAverageNumberOfSharesOutstandingDiluted",
         ],
     )
     eps = _extract_latest_fact(company_facts, ["EarningsPerShareDiluted"])
@@ -579,6 +669,7 @@ def _build_financial_snapshot_with_metadata(
         "capital_expenditure": capital_expenditure_metadata.as_dict(),
         "cash_and_equivalents": cash_and_equivalents.as_dict(),
         "total_debt": total_debt.as_dict(),
+        "shares_outstanding": shares_outstanding.as_dict(),
         "diluted_shares": diluted_shares.as_dict(),
         "eps": eps.as_dict(),
         "segment_revenue_services": segment_revenue_services.as_dict(),
@@ -823,8 +914,31 @@ class FinancialMetricsTool(BaseTool):
             "source_refs": [],
         }
         filing_html = ""
+        filing_metadata: dict[str, object] | None = None
+        fetch_annual_report = getattr(self._service, "fetch_latest_annual_report", None)
         fetch_filing_html = getattr(self._service, "fetch_latest_annual_report_html", None)
-        if callable(fetch_filing_html):
+        if callable(fetch_annual_report):
+            try:
+                annual_report = fetch_annual_report(ticker)
+                filing_html = str(annual_report.get("html", ""))
+                filing_metadata = {
+                    key: value
+                    for key, value in annual_report.items()
+                    if key != "html"
+                }
+                services_revenue = _extract_services_revenue_from_filing_html(filing_html)
+                if services_revenue.extracted:
+                    metadata["segment_revenue_services"] = services_revenue.as_dict()
+                    segment_snapshot = {
+                        "services_revenue": services_revenue.normalized_value,
+                        "source_refs": [str(filing_metadata.get("source_url", "SEC annual filing"))],
+                    }
+            except FatalAPIError:
+                raise
+            except Exception:
+                filing_html = ""
+                filing_metadata = None
+        elif callable(fetch_filing_html):
             try:
                 filing_html = fetch_filing_html(ticker)
                 services_revenue = _extract_services_revenue_from_filing_html(filing_html)
@@ -834,6 +948,8 @@ class FinancialMetricsTool(BaseTool):
                         "services_revenue": services_revenue.normalized_value,
                         "source_refs": ["10-K Products and Services Performance"],
                     }
+            except FatalAPIError:
+                raise
             except Exception:
                 filing_html = ""
 
@@ -858,6 +974,8 @@ class FinancialMetricsTool(BaseTool):
                     stock_price_source_ref,
                     stock_price_source_tag,
                 ) = _extract_stock_price_from_quote_payload(quote_payload)
+            except FatalAPIError:
+                raise
             except Exception:
                 stock_price = None
                 as_of_date = None
@@ -876,7 +994,6 @@ class FinancialMetricsTool(BaseTool):
             as_of_date=as_of_date,
             source_refs=[stock_price_source_ref] if stock_price is not None and stock_price_source_ref else [],
         )
-        formal_gate_snapshot = build_formal_gate_snapshot(metadata)
         company_name = str(company_facts.get("entityName", "")).strip() or ticker.upper()
         evidence_bundle = build_research_evidence_bundle(
             company_name=company_name,
@@ -884,10 +1001,16 @@ class FinancialMetricsTool(BaseTool):
             company_facts=company_facts,
             filing_html=filing_html,
             quote_payload=quote_payload,
-            tavily_payloads=[],
+            tavily_payloads=recorded_tavily_payloads(),
+            filing_metadata=filing_metadata,
         )
+        formal_gate_snapshot = _formal_gate_snapshot_from_evidence(evidence_bundle)
+        market_snapshot["ready_for_formal_report"] = formal_gate_snapshot[
+            "ready_for_formal_report"
+        ]
 
         record_financial_fields(metadata)
+        record_research_evidence(evidence_bundle.model_dump(mode="json"))
         return json.dumps(
             {
                 "metrics": metrics,

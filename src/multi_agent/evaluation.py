@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from contextvars import ContextVar, Token
@@ -55,6 +56,23 @@ def record_financial_fields(fields: dict[str, dict[str, Any]]) -> None:
         evaluation.record_financial_fields(fields)
 
 
+def record_tavily_payload(payload: dict[str, Any]) -> None:
+    evaluation = current_evaluation()
+    if evaluation is not None:
+        evaluation.record_tavily_payload(payload)
+
+
+def recorded_tavily_payloads() -> list[dict[str, Any]]:
+    evaluation = current_evaluation()
+    return evaluation.tavily_payloads() if evaluation is not None else []
+
+
+def record_research_evidence(payload: dict[str, Any]) -> None:
+    evaluation = current_evaluation()
+    if evaluation is not None:
+        evaluation.record_research_evidence(payload)
+
+
 def record_task_completion_callback(task_output: Any) -> None:
     evaluation = current_evaluation()
     if evaluation is None:
@@ -79,6 +97,7 @@ class WorkflowEvaluation:
     _task_order: list[str] = field(default_factory=list, init=False)
     _api_calls: list[dict[str, Any]] = field(default_factory=list, init=False)
     _financial_fields: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
+    _tavily_payloads: list[dict[str, Any]] = field(default_factory=list, init=False)
 
     def start(self) -> None:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +128,15 @@ class WorkflowEvaluation:
 
     def record_financial_fields(self, fields: dict[str, dict[str, Any]]) -> None:
         self._financial_fields = json.loads(json.dumps(fields))
+
+    def record_tavily_payload(self, payload: dict[str, Any]) -> None:
+        self._tavily_payloads.append(json.loads(json.dumps(payload)))
+
+    def tavily_payloads(self) -> list[dict[str, Any]]:
+        return json.loads(json.dumps(self._tavily_payloads))
+
+    def record_research_evidence(self, payload: dict[str, Any]) -> None:
+        self._atomic_write_json(self.artifacts_dir / "10_research_evidence.json", payload)
 
     def finalize(self, success: bool, error_message: str | None = None) -> dict[str, Any]:
         if self._started_at_seconds is None:
@@ -300,3 +328,12 @@ class WorkflowEvaluation:
     def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _atomic_write_json(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+        temporary_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, path)

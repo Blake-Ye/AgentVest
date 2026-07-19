@@ -272,11 +272,12 @@ class OfficialSecService:
 
         return normalized_results
 
-    def fetch_latest_annual_report_html(self, ticker: str) -> str:
+    def fetch_latest_annual_report(self, ticker: str) -> dict[str, str]:
         filings = self.search_filings(company_name="", ticker=ticker, form_type="10-K", limit=1)
         if not filings:
-            return ""
-        filing_url = filings[0]["filing_url"]
+            return {}
+        filing = filings[0]
+        filing_url = filing["filing_url"]
         response = _perform_request(
             lambda: self.session.get(
                 filing_url,
@@ -286,7 +287,17 @@ class OfficialSecService:
             service_name="SEC Filing HTML",
         )
         _raise_for_status_with_context(response, service_name="SEC Filing HTML")
-        return response.text
+        return {
+            "html": response.text,
+            "source_url": filing_url,
+            "accession": filing.get("accession_no", ""),
+            "filed_at": filing.get("filed_at", ""),
+            "form": filing.get("form_type", "10-K"),
+        }
+
+    def fetch_latest_annual_report_html(self, ticker: str) -> str:
+        """Backward-compatible HTML-only projection for legacy callers."""
+        return self.fetch_latest_annual_report(ticker).get("html", "")
 
     def fetch_market_quote(self, ticker: str) -> dict[str, Any]:
         try:

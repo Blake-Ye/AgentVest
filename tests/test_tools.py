@@ -19,6 +19,7 @@ from multi_agent.tools.investment_tools import (
     _extract_services_revenue_from_filing_html,
 )
 from multi_agent.tools.tavily_search import TavilySearchTool
+from multi_agent.tools.official_sec import FatalAPIError
 
 
 def build_settings() -> InvestmentResearchSettings:
@@ -68,6 +69,16 @@ def apple_sources() -> dict[str, object]:
         "ticker": "AAPL",
         "company_facts": company_facts,
         "filing_html": (fixture_dir / "filing.html").read_text(encoding="utf-8"),
+        "filing_metadata": {
+            "source_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm",
+            "accession": "0000320193-25-000079",
+            "filed_at": "2025-10-31",
+            "form": "10-K",
+            "fiscal_year": 2025,
+            "fiscal_period": "FY",
+            "period_start": "2024-09-29",
+            "period_end": "2025-09-27",
+        },
         "quote_payload": json.loads((fixture_dir / "quote.json").read_text(encoding="utf-8")),
         "tavily_payloads": [json.loads((fixture_dir / "news.json").read_text(encoding="utf-8"))],
     }
@@ -89,7 +100,95 @@ def test_build_bundle_contains_all_formal_gate_facts(apple_sources: dict[str, ob
     assert quote.source_url
     assert bundle.tool_status("sec_company_facts") == "healthy"
     assert bundle.tool_status("quote") == "healthy"
-    assert bundle.tool_status("tavily") == "healthy"
+    assert bundle.tool_status("tavily") == "degraded"
+    assert any(gap.code == "independent_event_sources_insufficient" for gap in bundle.gaps)
+
+
+def test_tavily_events_require_distinct_valid_source_domains(apple_sources: dict[str, object]) -> None:
+    sources = deepcopy(apple_sources)
+    sources["tavily_payloads"] = [
+        {
+            "status": "ok",
+            "artifact_ref": "https://api.tavily.com/search/request-1",
+            "results": [
+                {
+                    "title": "Apple Services update",
+                    "url": "https://news.example.com/apple-services",
+                    "source_type": "news",
+                    "published_at": "2026-07-18T12:00:00+00:00",
+                },
+                {
+                    "title": "Apple valuation update",
+                    "url": "https://wire.example.net/apple-valuation",
+                    "source_type": "news",
+                    "published_at": "2026-07-18T13:00:00+00:00",
+                },
+                {
+                    "title": "Broken source",
+                    "url": "not-a-url",
+                    "source_type": "news",
+                    "published_at": "2026-07-18T14:00:00+00:00",
+                },
+            ],
+        }
+    ]
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    assert bundle.tool_status("tavily") == "degraded"
+    assert len(bundle.events) == 2
+    assert all(event.independently_confirmed for event in bundle.events)
+    assert "https://api.tavily.com/search/request-1" in bundle.raw_artifact_refs
+    assert all(event.source_url.startswith("https://") for event in bundle.events)
+    assert any(gap.code == "independent_event_sources_insufficient" for gap in bundle.gaps)
+
+
+def test_services_revenue_is_not_formal_without_actual_filing_metadata(
+    apple_sources: dict[str, object],
+) -> None:
+    sources = deepcopy(apple_sources)
+    sources.pop("filing_metadata", None)
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    services = bundle.require_fact("segment_revenue_services")
+    assert services.formal_eligible is False
+    assert "accession_missing" in services.quality_flags
+    assert any(gap.code == "services_revenue_provenance_incomplete" for gap in bundle.gaps)
+
+
+def test_services_revenue_retains_actual_filing_metadata(apple_sources: dict[str, object]) -> None:
+    sources = deepcopy(apple_sources)
+    sources["filing_metadata"] = {
+        "source_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm",
+        "accession": "0000320193-25-000079",
+        "filed_at": "2025-10-31",
+        "form": "10-K",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY",
+        "period_start": "2024-09-29",
+        "period_end": "2025-09-27",
+    }
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    services = bundle.require_fact("segment_revenue_services")
+    assert services.formal_eligible is True
+    assert services.source_url == sources["filing_metadata"]["source_url"]
+    assert services.accession == "0000320193-25-000079"
+
+
+def test_sec_company_facts_without_formal_facts_is_degraded(apple_sources: dict[str, object]) -> None:
+    sources = deepcopy(apple_sources)
+    for concept in sources["company_facts"]["facts"]["us-gaap"].values():
+        for entries in concept["units"].values():
+            for entry in entries:
+                entry.pop("form", None)
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    assert bundle.tool_status("sec_company_facts") == "degraded"
+    assert any(gap.code == "sec_companyfacts_no_formal_facts" for gap in bundle.gaps)
 
 
 def test_tavily_failure_is_recorded_as_degraded_not_hidden(
@@ -277,6 +376,22 @@ class StubFormalFieldCompanyFactsService:
                             ]
                         }
                     },
+                    "WeightedAverageNumberOfDilutedSharesOutstanding": {
+                        "units": {
+                            "shares": [
+                                {
+                                    "val": 14800000000,
+                                    "start": "2024-09-29",
+                                    "end": "2025-09-27",
+                                    "filed": "2025-10-31",
+                                    "fy": 2025,
+                                    "fp": "FY",
+                                    "form": "10-K",
+                                    "accn": "0000320193-25-000079",
+                                }
+                            ]
+                        }
+                    },
                     "EarningsPerShareDiluted": {
                         "units": {
                             "USD/shares": [
@@ -326,7 +441,8 @@ def test_sec_company_facts_tool_records_formal_gate_fields_from_company_facts(
     assert latest_metrics["financial_fields"]["total_debt"]["extracted"] is True
     assert latest_metrics["financial_fields"]["total_debt"]["normalized_value"] == 98.0
     assert latest_metrics["financial_fields"]["diluted_shares"]["extracted"] is True
-    assert latest_metrics["financial_fields"]["diluted_shares"]["normalized_value"] == 14900000000
+    assert latest_metrics["financial_fields"]["shares_outstanding"]["normalized_value"] == 14900000000
+    assert latest_metrics["financial_fields"]["diluted_shares"]["normalized_value"] == 14800000000
     assert latest_metrics["financial_fields"]["eps"]["extracted"] is True
     assert latest_metrics["financial_fields"]["eps"]["normalized_value"] == 7.25
 
@@ -345,6 +461,19 @@ class StubFormalReportInputsService(StubFormalFieldCompanyFactsService):
           </body>
         </html>
         """
+
+    def fetch_latest_annual_report(self, ticker: str) -> dict:
+        return {
+            "html": self.fetch_latest_annual_report_html(ticker),
+            "source_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm",
+            "accession": "0000320193-25-000079",
+            "filed_at": "2025-10-31",
+            "form": "10-K",
+            "fiscal_year": 2025,
+            "fiscal_period": "FY",
+            "period_start": "2024-09-29",
+            "period_end": "2025-09-27",
+        }
 
     def fetch_market_quote(self, _ticker: str) -> dict:
         return {
@@ -368,6 +497,104 @@ class StubFallbackMarketQuoteService(StubFormalReportInputsService):
                 }
             },
         }
+
+
+class StubIndependentTavilyService:
+    def search_company_news(self, **_kwargs: object) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "artifact_ref": "https://api.tavily.com/search/offline-request",
+            "results": [
+                {
+                    "title": "Apple source one",
+                    "url": "https://news.example.com/apple-one",
+                    "source_type": "news",
+                    "published_at": "2026-07-18T12:00:00+00:00",
+                    "snippet": "Offline fixture one.",
+                },
+                {
+                    "title": "Apple source two",
+                    "url": "https://wire.example.net/apple-two",
+                    "source_type": "news",
+                    "published_at": "2026-07-18T13:00:00+00:00",
+                    "snippet": "Offline fixture two.",
+                },
+            ],
+        }
+
+
+class FixtureEvidenceService:
+    def __init__(self, sources: dict[str, object]) -> None:
+        self._sources = sources
+
+    def fetch_company_facts(self, _ticker: str) -> dict:
+        return self._sources["company_facts"]
+
+    def fetch_latest_annual_report(self, _ticker: str) -> dict:
+        return {
+            "html": self._sources["filing_html"],
+            **self._sources["filing_metadata"],
+        }
+
+    def fetch_market_quote(self, _ticker: str) -> dict:
+        return self._sources["quote_payload"]
+
+
+def test_financial_metrics_output_uses_recorded_tavily_and_persists_evidence_artifact(
+    tmp_path: Path,
+    apple_sources: dict[str, object],
+) -> None:
+    evaluation = WorkflowEvaluation(
+        artifacts_dir=tmp_path / "run",
+        final_report_path=tmp_path / "run" / "04_investment_report.md",
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+    )
+    evaluation.start()
+    token = activate_evaluation(evaluation)
+    try:
+        tavily = TavilySearchTool(settings=build_settings(), service=StubIndependentTavilyService())
+        tavily._run(query="Apple", company_name="Apple Inc.")
+        payload = json.loads(
+            FinancialMetricsTool(
+                settings=build_settings(),
+                service=FixtureEvidenceService(apple_sources),
+            )._run("AAPL")
+        )
+    finally:
+        clear_evaluation(token)
+
+    assert payload["evidence_bundle"]["tool_health"][-1]["tool_name"] == "tavily"
+    assert payload["evidence_bundle"]["tool_health"][-1]["status"] == "healthy"
+    evidence_path = tmp_path / "run" / "10_research_evidence.json"
+    assert evidence_path.exists()
+    persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert persisted == payload["evidence_bundle"]
+    assert "https://api.tavily.com/search/offline-request" in persisted["raw_artifact_refs"]
+
+
+def test_financial_metrics_records_missing_tavily_as_degraded() -> None:
+    payload = json.loads(
+        FinancialMetricsTool(settings=build_settings(), service=StubFormalReportInputsService())._run("AAPL")
+    )
+
+    tavily_health = [item for item in payload["evidence_bundle"]["tool_health"] if item["tool_name"] == "tavily"]
+    assert tavily_health[-1]["status"] == "degraded"
+    assert any(
+        gap["code"] == "independent_event_sources_insufficient"
+        for gap in payload["evidence_bundle"]["gaps"]
+    )
+
+
+class FatalFilingService(StubFormalReportInputsService):
+    def fetch_latest_annual_report(self, _ticker: str) -> dict:
+        raise FatalAPIError("SEC filing rejected", service_name="SEC Filing HTML")
+
+
+def test_financial_metrics_reraises_fatal_filing_error() -> None:
+    with pytest.raises(FatalAPIError, match="SEC filing rejected"):
+        FinancialMetricsTool(settings=build_settings(), service=FatalFilingService())._run("AAPL")
 
 
 def test_financial_metrics_tool_builds_market_and_segment_snapshots_for_formal_gate(
@@ -403,8 +630,8 @@ def test_financial_metrics_tool_builds_market_and_segment_snapshots_for_formal_g
         clear_evaluation(token)
 
     assert payload["market_snapshot"]["stock_price"] == 333.74
-    assert payload["market_snapshot"]["diluted_shares"] == 14900000000
-    assert payload["market_snapshot"]["ready_for_formal_report"] is True
+    assert payload["market_snapshot"]["diluted_shares"] == 14800000000
+    assert payload["market_snapshot"]["ready_for_formal_report"] is False
     assert payload["segment_snapshot"]["services_revenue"] == 109158000000.0
     assert latest_metrics["financial_fields"]["stock_price"]["extracted"] is True
     assert latest_metrics["financial_fields"]["stock_price"]["normalized_value"] == 333.74
@@ -437,8 +664,10 @@ def test_financial_metrics_tool_exposes_formal_gate_fields_to_llm_output(
     assert payload["financial_fields"]["diluted_shares"]["extracted"] is True
     assert payload["financial_fields"]["stock_price"]["extracted"] is True
     assert payload["financial_fields"]["segment_revenue_services"]["extracted"] is True
-    assert payload["formal_gate_snapshot"]["missing_fields"] == []
-    assert payload["formal_gate_snapshot"]["ready_for_formal_report"] is True
+    assert {"revenue", "cash_and_equivalents", "total_debt"} <= set(
+        payload["formal_gate_snapshot"]["missing_fields"]
+    )
+    assert payload["formal_gate_snapshot"]["ready_for_formal_report"] is False
 
 
 def test_financial_metrics_tool_preserves_market_quote_source_provenance(
