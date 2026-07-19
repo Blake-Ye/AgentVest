@@ -137,22 +137,18 @@ def test_task_output_paths_are_relative_for_crewai_when_under_project_root(
     monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
     monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
-    monkeypatch.setenv(
-        "ARTIFACTS_DIR",
-        "/Users/yeziqing/Projects/AgentVest/var/runs/test_company__tst/20260622_999999",
-    )
-    monkeypatch.setenv(
-        "FINAL_REPORT_PATH",
-        "/Users/yeziqing/Projects/AgentVest/var/runs/test_company__tst/20260622_999999/04_investment_report.md",
-    )
+    project_root = Path(__file__).resolve().parents[1]
+    run_dir = project_root / "var" / "runs" / "test_company__tst" / "20260622_999999"
+    monkeypatch.setenv("ARTIFACTS_DIR", str(run_dir))
+    monkeypatch.setenv("FINAL_REPORT_PATH", str(run_dir / "04_investment_report.md"))
 
     workflow = MultiAgent()
 
     assert workflow._task_output_file(  # type: ignore[attr-defined]
-        "/Users/yeziqing/Projects/AgentVest/var/runs/test_company__tst/20260622_999999/00_market_validation.md"
+        run_dir / "00_market_validation.md"
     ) == "var/runs/test_company__tst/20260622_999999/00_market_validation.md"
     assert workflow._task_output_file(  # type: ignore[attr-defined]
-        "/Users/yeziqing/Projects/AgentVest/var/runs/test_company__tst/20260622_999999/04_investment_report.md"
+        run_dir / "04_investment_report.md"
     ) == "var/runs/test_company__tst/20260622_999999/04_investment_report.md"
 
 

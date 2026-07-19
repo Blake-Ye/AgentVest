@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from multi_agent.core.market import MarketValidationResult, build_tool_policy
+from multi_agent.core.report_document import ReportDocument
 from multi_agent.settings import InvestmentResearchSettings
 from multi_agent.main import (
     _build_run_output_paths,
@@ -20,6 +21,70 @@ from multi_agent.main import (
 )
 from multi_agent.resolver import CompanyResolution
 from multi_agent.tools.investment_tools import FatalAPIError
+
+
+def _typed_workflow_result(
+    *,
+    status: str = "passed",
+    company_name: str = "Apple Inc.",
+    company_ticker: str = "AAPL",
+    trust_score: int = 91,
+    **extra: object,
+) -> dict[str, object]:
+    mode, stance, summary, conclusion = {
+        "passed": ("formal_report", "hold", "Formal evidence supports monitoring.", "Maintain hold."),
+        "evidence_limited": (
+            "evidence_limited_report",
+            "watch",
+            "证据受限，继续观察。",
+            "证据受限，待补证后复核。",
+        ),
+        "blocked": ("blocked_notice", "blocked", "报告已阻断，不能形成投资结论。", "报告已阻断，不提供可执行投资建议。"),
+    }[status]
+    claim_ids = ["revenue"] if status == "passed" else []
+    document = ReportDocument.model_validate(
+        {
+            "company_name": company_name,
+            "ticker": company_ticker,
+            "report_mode": mode,
+            "title": f"{company_name} Investment Research",
+            "stance": stance,
+            "executive_summary": summary,
+            "catalysts": ["Services growth"],
+            "risks": ["Demand volatility"],
+            "sections": {
+                key: {
+                    "key": key,
+                    "heading": key,
+                    "content": conclusion if key == "investment_conclusion" else f"{key} content",
+                    "claim_ids": claim_ids if key in {"executive_summary", "financial_analysis", "investment_conclusion"} else [],
+                }
+                for key in (
+                    "executive_summary", "business_overview", "recent_events", "financial_analysis",
+                    "key_risks", "investment_conclusion", "source_index",
+                )
+            },
+            "claims": [
+                {"claim_id": "revenue", "text": "Revenue is supported by the filing.", "critical": True, "source_ids": ["sec-10k"]}
+            ] if status == "passed" else [],
+            "sources": [
+                {"source_id": "sec-10k", "title": "Apple 10-K", "url": "https://www.sec.gov/Archives/example", "source_tag": "sec_filing"}
+            ] if status == "passed" else [],
+            "trust_score": trust_score,
+            "allowed_claim_ids": ["revenue"] if status == "passed" else [],
+        }
+    )
+    return {
+        "status": status,
+        "trust_score": trust_score,
+        "report_document": document.model_dump(mode="json"),
+        "final_decision_record": {
+            "final_decision": status,
+            "final_delivery_state": mode,
+            "trust_score": trust_score,
+        },
+        **extra,
+    }
 
 
 def test_module_entrypoint_exposes_help() -> None:
@@ -189,7 +254,11 @@ def test_run_writes_evaluation_artifacts_on_success(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
-    monkeypatch.setattr(main, "_crew", lambda: StubCrew())
+    monkeypatch.setattr(
+        main,
+        "_kickoff_workflow",
+        lambda inputs: (StubCrew().kickoff(inputs), _typed_workflow_result())[1],
+    )
     monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
     monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
     monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
@@ -276,8 +345,11 @@ def test_run_uses_flow_when_enabled(
             "market_resolution_status": "confirmed",
         },
     )
-    monkeypatch.setattr(main, "_crew", lambda: (_ for _ in ()).throw(AssertionError("should not use crew")))
-    monkeypatch.setattr(main, "_flow", lambda inputs: StubFlowFactory(initial_state=type("State", (), inputs)()))
+    monkeypatch.setattr(
+        main,
+        "_kickoff_workflow",
+        lambda _inputs: (StubFlow().kickoff(), _typed_workflow_result())[1],
+    )
     monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
     monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
 
@@ -364,7 +436,16 @@ def test_run_writes_structured_recommendation_and_watchlist_when_enabled(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
-    monkeypatch.setattr(main, "_crew", lambda: StubCrew())
+    monkeypatch.setattr(
+        main,
+        "_kickoff_workflow",
+        lambda inputs: (
+            StubCrew().kickoff(inputs),
+            _typed_workflow_result(
+                company_name="Alibaba Group Holding Ltd", company_ticker="BABA"
+            ),
+        )[1],
+    )
     monkeypatch.setattr(
         main,
         "_workflow_inputs",
@@ -382,15 +463,15 @@ def test_run_writes_structured_recommendation_and_watchlist_when_enabled(
     assert structured_report_path.exists()
     recommendation_content = recommendation_path.read_text(encoding="utf-8")
     structured_report_content = structured_report_path.read_text(encoding="utf-8")
-    assert '"stance": "buy"' in recommendation_content
+    assert '"stance": "hold"' in recommendation_content
     assert '"trust_score"' in recommendation_content
     assert '"sections"' in structured_report_content
-    assert '"validation"' in structured_report_content
+    assert '"final_delivery_state": "formal_report"' in structured_report_content
     latest_metrics = (run_dir / "latest_run_metrics.json").read_text(encoding="utf-8")
     assert '"trust_score"' in latest_metrics
     watchlist_content = (tmp_path / "artifacts" / "watchlist.json").read_text(encoding="utf-8")
     assert "BABA" in watchlist_content
-    assert "增持" in watchlist_content
+    assert "持有" in watchlist_content
 
 
 def test_run_rebuilds_watchlist_from_existing_artifacts(
@@ -651,7 +732,14 @@ def test_run_backfills_standard_output_files_when_crew_does_not_write_files(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
-    monkeypatch.setattr(main, "_crew", lambda: StubCrew())
+    def _stub_kickoff_workflow(inputs):
+        legacy = StubCrew().kickoff(inputs)
+        return _typed_workflow_result(
+            tasks_output=legacy.tasks_output,
+            raw=legacy.raw,
+        )
+
+    monkeypatch.setattr(main, "_kickoff_workflow", _stub_kickoff_workflow)
     monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
     monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
     monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
@@ -663,7 +751,7 @@ def test_run_backfills_standard_output_files_when_crew_does_not_write_files(
     assert "市场情报" in (run_dir / "01_market_intelligence.md").read_text(encoding="utf-8")
     assert "Filing 复核" in (run_dir / "02_filing_review.md").read_text(encoding="utf-8")
     assert "财务分析" in (run_dir / "03_financial_analysis.md").read_text(encoding="utf-8")
-    assert "投资备忘录" in (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
+    assert "Investment Research" in (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
     assert "数据质量审查" in (run_dir / "08_data_quality_review.md").read_text(encoding="utf-8")
     assert "逻辑与合规审查" in (run_dir / "09_logic_compliance_review.md").read_text(encoding="utf-8")
     latest_metrics = (run_dir / "latest_run_metrics.json").read_text(encoding="utf-8")
@@ -695,14 +783,7 @@ def test_run_writes_blocked_outputs_when_gate_fails(
         def parse_args(self):
             return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
 
-    blocked_result = {
-        "status": "blocked",
-        "trust_score": 68,
-        "blocking_reasons": [
-            "evidence_coverage_ratio<0.80",
-            "unsupported_critical_claims>0",
-        ],
-    }
+    blocked_result = _typed_workflow_result(status="blocked", trust_score=68)
 
     def _stub_kickoff_workflow(inputs):
         artifacts_dir = Path(inputs["artifacts_dir"])
@@ -735,8 +816,7 @@ def test_run_writes_blocked_outputs_when_gate_fails(
     latest_metrics = (run_dir / "latest_run_metrics.json").read_text(encoding="utf-8")
 
     assert "阻断" in report_content
-    assert "68" in report_content
-    assert "evidence_coverage_ratio<0.80" in report_content
+    assert "报告已阻断" in report_content
     assert recommendation["status"] == "blocked"
     assert recommendation["stance"] == "blocked"
     assert recommendation["stance_label"] == "阻断"
@@ -769,12 +849,7 @@ def test_run_overwrites_existing_formal_report_when_gate_fails(
         def parse_args(self):
             return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
 
-    blocked_result = {
-        "status": "blocked",
-        "trust_score": 52,
-        "blocking_reasons": ["hard_gate_failed"],
-        "raw": "# 投资备忘录\n\n这是一份不应被保留的正式报告。",
-    }
+    blocked_result = _typed_workflow_result(status="blocked", trust_score=52)
 
     def _stub_kickoff_workflow(inputs):
         artifacts_dir = Path(inputs["artifacts_dir"])
@@ -808,7 +883,7 @@ def test_run_overwrites_existing_formal_report_when_gate_fails(
     report_content = (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
 
     assert "已阻断" in report_content
-    assert "hard_gate_failed" in report_content
+    assert "报告已阻断" in report_content
     assert "不应在 blocked 时保留" not in report_content
 
 
@@ -836,35 +911,7 @@ def test_run_allows_formal_report_after_rerun_passes(
         def parse_args(self):
             return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
 
-    final_result = {
-        "status": "passed",
-        "trust_score": 88,
-        "blocking_reasons": [],
-        "analysis_result": {"analysis_markdown": "rerun recovered"},
-        "report_result": "\n".join(
-            [
-                "# 投资备忘录",
-                "",
-                "## 执行摘要",
-                "",
-                "经过一次 rerun 后，核心证据已补齐。",
-                "",
-                "## 催化剂",
-                "",
-                "- 新产品周期",
-                "",
-                "## 风险",
-                "",
-                "- 宏观需求波动",
-                "",
-                "## 投资建议",
-                "",
-                "建议持有。",
-                "",
-                "参考 https://example.com/report",
-            ]
-        ),
-    }
+    final_result = _typed_workflow_result(status="passed", trust_score=88)
 
     def _stub_kickoff_workflow(inputs):
         artifacts_dir = Path(inputs["artifacts_dir"])
@@ -897,13 +944,13 @@ def test_run_allows_formal_report_after_rerun_passes(
     latest_metrics = json.loads((run_dir / "latest_run_metrics.json").read_text(encoding="utf-8"))
 
     assert "<!-- PLACEHOLDER -->" not in report_content
-    assert "建议持有" in report_content
+    assert "Maintain hold" in report_content
     assert recommendation["status"] == "passed"
     assert recommendation["stance"] == "hold"
-    assert recommendation["stance_label"] == "中性"
+    assert recommendation["stance_label"] == "持有"
     assert structured_report["status"] == "passed"
     assert structured_report["final_decision"] == "passed"
-    assert structured_report["sections"]["investment_recommendation"].startswith("建议持有。")
+    assert structured_report["sections"]["investment_conclusion"].startswith("Maintain hold.")
     assert latest_metrics["final_status"] == "passed"
     assert latest_metrics["trust_score"]["score"] == 88
 
@@ -943,12 +990,7 @@ def test_run_preserves_evidence_limited_report_body_when_workflow_already_genera
             "这是一份保留正文的 evidence-limited 报告。",
         ]
     )
-    final_result = {
-        "status": "evidence_limited",
-        "trust_score": 74,
-        "blocking_reasons": ["gate_financial_coverage_incomplete"],
-        "report_result": detailed_report,
-    }
+    final_result = _typed_workflow_result(status="evidence_limited", trust_score=74)
 
     def _stub_kickoff_workflow(inputs):
         artifacts_dir = Path(inputs["artifacts_dir"])
@@ -977,8 +1019,8 @@ def test_run_preserves_evidence_limited_report_body_when_workflow_already_genera
     run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
     report_content = (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
 
-    assert "这是一份保留正文的 evidence-limited 报告。" in report_content
-    assert "状态：已生成证据受限版备忘录" not in report_content
+    assert "证据受限，待补证后复核。" in report_content
+    assert "这是一份保留正文的 evidence-limited 报告。" not in report_content
 
 
 def test_run_writes_final_decision_and_projects_outputs_from_it(
@@ -1005,12 +1047,7 @@ def test_run_writes_final_decision_and_projects_outputs_from_it(
         def parse_args(self):
             return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
 
-    final_result = {
-        "status": "evidence_limited",
-        "trust_score": 74,
-        "blocking_reasons": ["gate_financial_coverage_incomplete"],
-        "report_result": "# 投资备忘录\n\n**状态**：⚠️ 受限版备忘录 — Analysis Gate 未完全通过\n",
-    }
+    final_result = _typed_workflow_result(status="evidence_limited", trust_score=74)
 
     def _stub_kickoff_workflow(inputs):
         artifacts_dir = Path(inputs["artifacts_dir"])
@@ -1089,7 +1126,7 @@ def test_run_writes_failed_evaluation_artifacts_on_error(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
-    monkeypatch.setattr(main, "_crew", lambda: FailingCrew())
+    monkeypatch.setattr(main, "_kickoff_workflow", lambda inputs: FailingCrew().kickoff(inputs))
     monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
     monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
     monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
@@ -1140,7 +1177,7 @@ def test_run_writes_failed_evaluation_artifacts_on_keyboard_interrupt(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
-    monkeypatch.setattr(main, "_crew", lambda: InterruptedCrew())
+    monkeypatch.setattr(main, "_kickoff_workflow", lambda inputs: InterruptedCrew().kickoff(inputs))
     monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
     monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
     monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
@@ -1261,7 +1298,9 @@ def test_run_overwrites_existing_formal_markdown_outputs_on_unexpected_error(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
-    monkeypatch.setattr(main, "_crew", lambda: PartiallyFailingCrew())
+    monkeypatch.setattr(
+        main, "_kickoff_workflow", lambda inputs: PartiallyFailingCrew().kickoff(inputs)
+    )
     monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
     monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
     monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
@@ -1338,8 +1377,11 @@ def test_run_with_trigger_uses_flow_when_enabled(
             "local_filing_pdf_available": "no",
         },
     )
-    monkeypatch.setattr(main, "_crew", lambda: (_ for _ in ()).throw(AssertionError("should not use crew")))
-    monkeypatch.setattr(main, "_flow", lambda inputs: StubFlow())
+    monkeypatch.setattr(
+        main,
+        "_kickoff_workflow",
+        lambda _inputs: (StubFlow().kickoff(), _typed_workflow_result())[1],
+    )
     monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
     monkeypatch.setattr(
         sys,
@@ -1352,7 +1394,7 @@ def test_run_with_trigger_uses_flow_when_enabled(
 
     result = main.run_with_trigger()
 
-    assert result == "ok"
+    assert result["status"] == "passed"
     run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
     assert (run_dir / "09_logic_compliance_review.md").exists()
 

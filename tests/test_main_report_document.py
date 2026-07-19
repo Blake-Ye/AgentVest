@@ -9,6 +9,7 @@ import pytest
 from multi_agent import main
 from multi_agent.core.evidence import FinancialFact, ResearchEvidenceBundle
 from multi_agent.core.report_document import (
+    ReportDocument,
     ReportGenerationContext,
     render_recommendation,
     render_structured_report,
@@ -116,20 +117,41 @@ def _output_paths(tmp_path: Path) -> main.RunOutputPaths:
     )
 
 
-def test_new_run_materializes_canonical_document_before_any_projection(tmp_path: Path) -> None:
-    output_paths = _output_paths(tmp_path)
-    output_paths.run_dir.mkdir(parents=True)
-    result = {
-        "report_context": _context().model_dump(mode="json"),
-        "report_writer_payload": _writer_payload(),
+def _workflow_result(report_mode: str = "formal_report") -> dict[str, object]:
+    document = ReportDocument.from_writer_payload(
+        context=_context(report_mode), writer_payload=_writer_payload(report_mode), trust_score=91
+    )
+    final_status = {
+        "formal_report": "passed",
+        "evidence_limited_report": "evidence_limited",
+        "blocked_notice": "blocked",
+    }[report_mode]
+    return {
+        "status": final_status,
         "trust_score": 91,
+        "report_document": document.model_dump(mode="json"),
+        "final_decision_record": {
+            "final_decision": final_status,
+            "final_delivery_state": report_mode,
+            "trust_score": 91,
+        },
     }
 
-    document = main._materialize_new_run_report_document(
-        output_paths, result=result, final_status="passed"
+
+def test_new_run_writes_canonical_delivery_package_before_any_projection(tmp_path: Path) -> None:
+    output_paths = _output_paths(tmp_path)
+    output_paths.run_dir.mkdir(parents=True)
+    result = _workflow_result()
+
+    package = main._write_new_run_delivery_package(
+        output_paths,
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        result=result,
+        final_status="passed",
     )
 
-    assert document.company_name == "Apple Inc."
+    assert package.document.company_name == "Apple Inc."
     assert output_paths.report_document_path.exists()
     assert "## 财务分析与估值" in output_paths.final_report_path.read_text(encoding="utf-8")
     assert json.loads(output_paths.report_document_path.read_text(encoding="utf-8"))["stance"] == "hold"
@@ -151,13 +173,13 @@ def test_new_run_structured_outputs_equal_direct_typed_renderers(
 ) -> None:
     output_paths = _output_paths(tmp_path)
     output_paths.run_dir.mkdir(parents=True)
-    result = {
-        "report_context": _context(report_mode).model_dump(mode="json"),
-        "report_writer_payload": _writer_payload(report_mode),
-        "trust_score": 91,
-    }
-    document = main._materialize_new_run_report_document(
-        output_paths, result=result, final_status=final_status
+    result = _workflow_result(report_mode)
+    package = main._write_new_run_delivery_package(
+        output_paths,
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        result=result,
+        final_status=final_status,
     )
     monkeypatch.setattr(
         main,
@@ -170,33 +192,18 @@ def test_new_run_structured_outputs_equal_direct_typed_renderers(
         lambda **_: (_ for _ in ()).throw(AssertionError("legacy parser must not run")),
     )
 
-    recommendation = main._write_structured_outputs(
-        output_paths,
-        final_decision={
-            "final_decision": final_status,
-            "final_delivery_state": report_mode,
-        },
-        latest_metrics={},
-        company_name="Apple Inc.",
-        company_ticker="AAPL",
-        watchlist_path=tmp_path / "watchlist.json",
-        save_to_watchlist=False,
-    )
-
     structured_report = json.loads(output_paths.structured_report_path.read_text(encoding="utf-8"))
-    assert recommendation == render_recommendation(document)
-    assert structured_report == render_structured_report(document)
+    assert package.recommendation == render_recommendation(package.document)
+    assert structured_report == render_structured_report(package.document)
 
 
 def test_new_run_refuses_direct_document_or_missing_writer_payload(tmp_path: Path) -> None:
     output_paths = _output_paths(tmp_path)
     output_paths.run_dir.mkdir(parents=True)
 
-    with pytest.raises(ValueError, match="report_context and report_writer_payload"):
+    with pytest.raises(ValueError, match="serialized report_document"):
         main._materialize_new_run_report_document(
-            output_paths,
-            result={"report_document": {"untrusted": True}, "trust_score": 91},
-            final_status="passed",
+            output_paths, result={"trust_score": 91}, final_status="passed"
         )
 
 

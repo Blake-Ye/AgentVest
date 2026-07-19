@@ -5,11 +5,13 @@ from pathlib import Path
 
 
 def prepare_runtime_env() -> None:
-    """将 CrewAI 的运行时数据固定到项目目录，避免污染系统环境。"""
+    """Keep CrewAI storage local without replacing the active Python user home."""
     project_root = Path(__file__).resolve().parents[2]
-    local_home = project_root / ".crewai_home"
-    (local_home / "Library" / "Application Support").mkdir(parents=True, exist_ok=True)
-    os.environ["HOME"] = str(local_home)
+    storage_dir = Path(
+        os.environ.get("CREWAI_STORAGE_DIR", project_root / ".crewai_storage")
+    )
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("CREWAI_STORAGE_DIR", str(storage_dir))
     os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
 
 

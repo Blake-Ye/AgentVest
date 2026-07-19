@@ -35,7 +35,9 @@ class MarketValidationTool(BaseTool):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._settings = settings or InvestmentResearchSettings.from_env()
+        self._settings = settings or (
+            service.settings if service is not None else InvestmentResearchSettings.from_env()
+        )
         self._service = service or MarketValidationService(settings=self._settings)
 
     def _run(self, company_name: str, ticker: str = "", exchange: str = "") -> dict[str, object]:

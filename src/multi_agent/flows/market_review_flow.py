@@ -66,7 +66,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         # 如果后续要做正式可观测性接入，再在 runtime 层统一打开。
         data.setdefault("tracing", False)
         super().__init__(**data)
-        self._crew_factory = crew_factory or MultiAgent()
+        self._crew_factory = crew_factory
         self._analysis_executor = analysis_executor or self._execute_existing_crew
         self._analysis_gate = analysis_gate or self._default_analysis_gate
         self._report_writer = report_writer or self._load_materialized_report
@@ -81,7 +81,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         self.state.stage_history.append(stage_name)
 
     def _execute_existing_crew(self, inputs: dict[str, Any]) -> Any:
-        return self._crew_factory.crew().kickoff(inputs=inputs)
+        crew_factory = self._crew_factory or MultiAgent()
+        return crew_factory.crew().kickoff(inputs=inputs)
 
     @staticmethod
     def _allow_stage_to_continue(_: Any) -> GateDecision:

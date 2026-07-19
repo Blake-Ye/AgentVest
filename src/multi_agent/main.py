@@ -13,16 +13,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from multi_agent.evaluation import WorkflowEvaluation, activate_evaluation, clear_evaluation
+from multi_agent import runtime
+
+runtime.prepare_runtime_env()
+
 from multi_agent.core.report_document import (
     ReportDocument,
-    ReportGenerationContext,
-    render_markdown,
     render_recommendation,
     render_structured_report,
 )
+from multi_agent.core.delivery import DeliveryPackage, write_delivery_package
+from multi_agent.core.review_contracts import FinalDecisionRecord
 from multi_agent.recommendation import build_structured_recommendation, build_structured_report
 from multi_agent.resolver import CompanyResolver
-from multi_agent import runtime
 from multi_agent.settings import InvestmentResearchSettings
 from multi_agent.tools.official_sec import FatalAPIError
 from multi_agent.tools.market_validation import MarketValidationService
@@ -235,7 +238,7 @@ def _task_output_path_map(output_paths: RunOutputPaths) -> dict[str, Path]:
 
 
 def _extract_task_raw_outputs(result: object) -> dict[str, str]:
-    task_outputs = getattr(result, "tasks_output", None)
+    task_outputs = _workflow_result_value(result, "tasks_output", None)
     extracted: dict[str, str] = {}
     if not task_outputs:
         return extracted
@@ -329,41 +332,6 @@ def _final_delivery_state_from_status(final_status: str) -> str:
     if final_status == "evidence_limited":
         return "evidence_limited_report"
     return "blocked_notice"
-
-
-def _build_final_decision_record(
-    *,
-    company_name: str,
-    company_ticker: str,
-    result: object,
-    final_status: str,
-) -> dict[str, object]:
-    return {
-        "company_name": company_name,
-        "company_ticker": company_ticker,
-        "final_decision": final_status,
-        "final_delivery_state": _final_delivery_state_from_status(final_status),
-        "trust_score": _trust_score_from_result(result),
-        "blocking_reasons": _blocking_reasons_from_result(result),
-    }
-
-
-def _write_final_decision(
-    output_paths: RunOutputPaths,
-    *,
-    company_name: str,
-    company_ticker: str,
-    result: object,
-    final_status: str,
-) -> dict[str, object]:
-    final_decision = _build_final_decision_record(
-        company_name=company_name,
-        company_ticker=company_ticker,
-        result=result,
-        final_status=final_status,
-    )
-    _write_json_file(output_paths.final_decision_path, final_decision)
-    return final_decision
 
 
 def _apply_final_decision_projection(
@@ -478,10 +446,17 @@ def _write_failure_recommendation_output(
     )
 
 
-def _validate_successful_outputs(output_paths: RunOutputPaths, *, final_status: str) -> None:
+def _validate_successful_outputs(
+    output_paths: RunOutputPaths,
+    *,
+    final_status: str,
+    require_final_report: bool = True,
+) -> None:
     if final_status not in {"passed", "blocked", "evidence_limited"}:
         raise RuntimeError(f"不支持的工作流结束状态：{final_status}")
     for path, _ in _standard_markdown_outputs(output_paths):
+        if path == output_paths.final_report_path and not require_final_report:
+            continue
         if not path.exists() or not path.read_text(encoding="utf-8").strip() or _is_placeholder_file(path):
             raise RuntimeError(f"运行结束但未生成规范输出文件：{path.name}")
 
@@ -553,6 +528,7 @@ def _write_structured_outputs(
     watchlist_path: Path,
     save_to_watchlist: bool,
 ) -> dict[str, object]:
+    """Historical projection helper; new runs use ``write_delivery_package`` instead."""
     del latest_metrics, company_name, company_ticker
     document = _load_report_document(output_paths.report_document_path)
     expected_mode = str(final_decision.get("final_delivery_state", "")).strip()
@@ -585,38 +561,53 @@ def _materialize_new_run_report_document(
     result: object,
     final_status: str,
 ) -> ReportDocument:
-    """Build every new report from locked context and untrusted writer JSON only."""
-    raw_context = _workflow_result_value(result, "report_context", None)
-    raw_payload = _workflow_result_value(result, "report_writer_payload", None)
-    if raw_context is None or not isinstance(raw_payload, dict):
-        raise ValueError(
-            "new run requires report_context and report_writer_payload; "
-            "direct report_document input is not accepted"
-        )
-    context = ReportGenerationContext.model_validate(raw_context)
-    expected_mode = _final_delivery_state_from_status(final_status)
-    if context.report_mode != expected_mode:
-        raise ValueError(
-            "report context mode does not match final delivery state: "
-            f"{context.report_mode} != {expected_mode}"
-        )
-    trust_score = _trust_score_from_result(result)
-    if trust_score is None:
-        raise ValueError("new run requires an integer trust_score for its report document")
-    document = ReportDocument.from_writer_payload(
-        context=context,
-        writer_payload=raw_payload,
-        trust_score=trust_score,
-    )
-    _write_json_file(output_paths.report_document_path, document.model_dump(mode="json"))
-    output_paths.final_report_path.write_text(render_markdown(document), encoding="utf-8")
+    """Load the already validated typed document emitted by a new workflow."""
+    raw_document = _workflow_result_value(result, "report_document", None)
+    if not isinstance(raw_document, dict):
+        raise ValueError("new run requires a serialized report_document")
+    document = ReportDocument.model_validate(raw_document)
+    if document.report_mode != _final_delivery_state_from_status(final_status):
+        raise ValueError("report document mode does not match workflow final status")
     return document
+
+
+def _materialize_new_run_final_decision(
+    result: object, *, final_status: str
+) -> FinalDecisionRecord:
+    raw_decision = _workflow_result_value(result, "final_decision_record", None)
+    if not isinstance(raw_decision, dict):
+        raise ValueError("new run requires a serialized final_decision_record")
+    decision = FinalDecisionRecord.model_validate(raw_decision)
+    if decision.final_decision != final_status:
+        raise ValueError("final_decision_record does not match workflow final status")
+    return decision
+
+
+def _write_new_run_delivery_package(
+    output_paths: RunOutputPaths,
+    *,
+    company_name: str,
+    company_ticker: str,
+    result: object,
+    final_status: str,
+) -> DeliveryPackage:
+    """Create and persist all terminal artifacts from typed workflow outputs only."""
+    document = _materialize_new_run_report_document(
+        output_paths, result=result, final_status=final_status
+    )
+    del company_name, company_ticker
+    decision = _materialize_new_run_final_decision(result, final_status=final_status)
+    package = DeliveryPackage.from_document(decision=decision, document=document)
+    write_delivery_package(paths=output_paths, package=package)  # type: ignore[arg-type]
+    return package
 
 
 def _finalize_successful_result(output_paths: RunOutputPaths, result: object) -> str:
     final_status = _final_status_from_result(result)
     _materialize_standard_outputs(output_paths, result)
-    _validate_successful_outputs(output_paths, final_status=final_status)
+    _validate_successful_outputs(
+        output_paths, final_status=final_status, require_final_report=False
+    )
     return final_status
 
 
@@ -885,18 +876,15 @@ def run():
         ):
             with _graceful_termination_signals():
                 result = _kickoff_workflow(inputs)
-        final_status = _final_status_from_result(result)
-        _materialize_new_run_report_document(
-            output_paths, result=result, final_status=final_status
-        )
         final_status = _finalize_successful_result(output_paths, result)
-        final_decision = _write_final_decision(
+        delivery_package = _write_new_run_delivery_package(
             output_paths,
             company_name=inputs["company_name"],
             company_ticker=inputs["company_ticker"],
             result=result,
             final_status=final_status,
         )
+        final_decision = delivery_package.decision.model_dump(mode="json")
         latest_metrics = evaluation.finalize(success=True)
         latest_metrics = _annotate_latest_metrics(
             output_paths,
@@ -904,15 +892,10 @@ def run():
             result=result,
             final_decision=final_decision,
         )
-        _write_structured_outputs(
-            output_paths,
-            final_decision=final_decision,
-            latest_metrics=latest_metrics,
-            company_name=inputs["company_name"],
-            company_ticker=inputs["company_ticker"],
-            watchlist_path=_resolve_watchlist_path(settings),
-            save_to_watchlist=getattr(args, "save_to_watchlist", False),
-        )
+        if getattr(args, "save_to_watchlist", False):
+            WatchlistStore(_resolve_watchlist_path(settings)).upsert(
+                delivery_package.recommendation
+            )
         print(f"运行完成，文件已写入：{output_paths.run_dir}")
     except (FatalAPIError, ValueError) as error:
         if evaluation is not None:
@@ -1054,18 +1037,15 @@ def run_trigger_payload(trigger_payload: dict[str, object]):
         ):
             with _graceful_termination_signals():
                 result = _kickoff_workflow(inputs)
-        final_status = _final_status_from_result(result)
-        _materialize_new_run_report_document(
-            output_paths, result=result, final_status=final_status
-        )
         final_status = _finalize_successful_result(output_paths, result)
-        final_decision = _write_final_decision(
+        delivery_package = _write_new_run_delivery_package(
             output_paths,
             company_name=workflow_inputs["company_name"],
             company_ticker=workflow_inputs["company_ticker"],
             result=result,
             final_status=final_status,
         )
+        final_decision = delivery_package.decision.model_dump(mode="json")
         latest_metrics = evaluation.finalize(success=True)
         latest_metrics = _annotate_latest_metrics(
             output_paths,
@@ -1073,15 +1053,10 @@ def run_trigger_payload(trigger_payload: dict[str, object]):
             result=result,
             final_decision=final_decision,
         )
-        _write_structured_outputs(
-            output_paths,
-            final_decision=final_decision,
-            latest_metrics=latest_metrics,
-            company_name=workflow_inputs["company_name"],
-            company_ticker=workflow_inputs["company_ticker"],
-            watchlist_path=_resolve_watchlist_path(settings),
-            save_to_watchlist=bool(trigger_payload.get("save_to_watchlist", False)),
-        )
+        if bool(trigger_payload.get("save_to_watchlist", False)):
+            WatchlistStore(_resolve_watchlist_path(settings)).upsert(
+                delivery_package.recommendation
+            )
         print(f"运行完成，文件已写入：{output_paths.run_dir}")
         return result
     except (FatalAPIError, ValueError) as error:
