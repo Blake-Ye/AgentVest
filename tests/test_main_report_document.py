@@ -21,6 +21,7 @@ from multi_agent.core.review_contracts import (
     FailureTaxonomy,
     ReviewContract,
 )
+from multi_agent.flows.market_review_flow import MarketReviewFlow, MarketReviewFlowState
 
 
 def _context(report_mode: str = "formal_report") -> ReportGenerationContext:
@@ -146,6 +147,38 @@ def _workflow_result(report_mode: str = "formal_report") -> dict[str, object]:
             "trust_score": 91,
         },
     }
+
+
+def test_new_flow_missing_bundle_reaches_cli_as_complete_blocked_delivery(tmp_path: Path) -> None:
+    output_paths = _output_paths(tmp_path)
+    output_paths.run_dir.mkdir(parents=True)
+    result = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"review_text": "审查通过"},
+        initial_state=MarketReviewFlowState(
+            request_id="missing-bundle", company_name="Apple Inc.", input_ticker="AAPL",
+            execution_mode="new", artifacts_dir=str(output_paths.run_dir),
+        ),
+    ).kickoff()
+
+    assert result["status"] == "blocked"
+    assert result["report_document"] is not None
+    for path, _ in main._standard_markdown_outputs(output_paths):
+        if path != output_paths.final_report_path:
+            path.write_text("blocked analysis artifact", encoding="utf-8")
+    assert main._finalize_successful_result(output_paths, result) == "blocked"
+    package = main._write_new_run_delivery_package(
+        output_paths, company_name="Apple Inc.", company_ticker="AAPL",
+        result=result, final_status="blocked",
+    )
+    assert package.decision.final_delivery_state == "blocked_notice"
+    assert package.document.report_mode == "blocked_notice"
+    assert all(section.content for section in package.document.sections.values())
+    for path in (
+        output_paths.final_decision_path, output_paths.report_document_path,
+        output_paths.final_report_path, output_paths.structured_recommendation_path,
+        output_paths.structured_report_path,
+    ):
+        assert path.exists()
 
 
 def test_new_run_writes_canonical_delivery_package_before_any_projection(tmp_path: Path) -> None:
