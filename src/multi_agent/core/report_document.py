@@ -67,10 +67,15 @@ class ReportGenerationContext(BaseModel):
     report_mode: ReportMode
     evidence_bundle: ResearchEvidenceBundle
     analysis_review_contract: ReviewContract
-    allowed_claim_ids: list[str] = Field(default_factory=list)
+    allowed_claim_ids: tuple[str, ...] = ()
+    canonical_sources_json: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_locked_delivery_mode(self) -> "ReportGenerationContext":
+        object.__setattr__(self, "evidence_bundle", self.evidence_bundle.model_copy(deep=True))
+        object.__setattr__(self, "analysis_review_contract", self.analysis_review_contract.model_copy(deep=True))
+        object.__setattr__(self, "allowed_claim_ids", tuple(self.allowed_claim_ids))
+        object.__setattr__(self, "canonical_sources_json", tuple(self.canonical_sources_json))
         if len(self.allowed_claim_ids) != len(set(self.allowed_claim_ids)):
             raise ValueError("allowed_claim_ids must be unique")
         eligibility = self.analysis_review_contract.delivery_eligibility
@@ -86,6 +91,9 @@ class ReportGenerationContext(BaseModel):
         if self.report_mode == "blocked_notice" and not eligibility.blocked_notice_required:
             raise ValueError("blocked_notice context requires blocked_notice_required")
         return self
+
+    def canonical_sources(self) -> tuple["SourceReference", ...]:
+        return tuple(SourceReference.model_validate_json(item) for item in self.canonical_sources_json)
 
 
 class ReportSection(BaseModel):
@@ -160,6 +168,29 @@ class ReportDocument(BaseModel):
                 "allowed_claim_ids": list(context.allowed_claim_ids),
             }
         )
+        canonical_sources = {source.source_id: source for source in context.canonical_sources()}
+        if canonical_sources:
+            raw_sources = payload.get("sources", [])
+            if not isinstance(raw_sources, list):
+                raise ValueError("writer sources must be a list")
+            requested_ids = []
+            for raw_source in raw_sources:
+                if not isinstance(raw_source, dict):
+                    raise ValueError("writer source must be an object")
+                source_id = str(raw_source.get("source_id", ""))
+                canonical = canonical_sources.get(source_id)
+                if canonical is None:
+                    raise ValueError(f"unknown canonical source: {source_id}")
+                if any(
+                    raw_source.get(key) not in (None, getattr(canonical, key))
+                    for key in ("title", "url", "source_tag", "field_name")
+                ):
+                    raise ValueError(f"forged canonical source: {source_id}")
+                requested_ids.append(source_id)
+            payload["sources"] = [
+                canonical_sources[source_id].model_dump()
+                for source_id in sorted(set(requested_ids))
+            ]
         return cls.model_validate(payload)
 
     @model_validator(mode="after")

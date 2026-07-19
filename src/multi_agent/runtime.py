@@ -66,6 +66,7 @@ def build_flow(inputs: dict[str, str]):
         initial_state=MarketReviewFlowState(
             request_id=inputs.get("run_id", ""),
             company_name=inputs.get("company_name", ""),
+            execution_mode="new",
             input_ticker=inputs.get("company_ticker", ""),
             current_year=inputs.get("current_year", ""),
             artifacts_dir=inputs.get("artifacts_dir", ""),

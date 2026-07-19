@@ -298,6 +298,17 @@ class MultiAgent:
 
     def targeted_analysis_crew(self, targets: list[str]) -> Crew:
         """Rerun only the agent tasks named by typed RepairAction targets."""
+        expanded_targets = list(dict.fromkeys(targets))
+        if {"fundamental_analyst", "quant_valuation_analyst"}.intersection(expanded_targets):
+            # Financial evidence is produced by the SEC/fundamental and metrics chain;
+            # always finish with the reviewer that writes the renewed strict contract.
+            expanded_targets = [
+                *expanded_targets,
+                "fundamental_analyst",
+                "quant_valuation_analyst",
+                "data_quality_reviewer",
+            ]
+        expanded_targets = list(dict.fromkeys(expanded_targets))
         task_specs = {
             "market_validation_analyst": (
                 "market_validation_task", self.market_validation_analyst,
@@ -321,7 +332,7 @@ class MultiAgent:
             ),
         }
         tasks: list[Task] = []
-        for target in targets:
+        for target in expanded_targets:
             spec = task_specs.get(target)
             if spec is None:
                 continue

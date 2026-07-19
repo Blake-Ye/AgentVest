@@ -14,7 +14,7 @@ from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
 from multi_agent.core.evidence import ResearchEvidenceBundle
 from multi_agent.core.market import MarketValidationResult
 from multi_agent.core.delivery import DeliveryValidator
-from multi_agent.core.report_document import ReportDocument, ReportGenerationContext
+from multi_agent.core.report_document import ReportDocument, ReportGenerationContext, SourceReference
 from multi_agent.core.review_contracts import (
     FinalDecisionRecord,
     GateDecision,
@@ -107,7 +107,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         return crew_factory.crew().kickoff(inputs=inputs)
 
     def _typed_run(self) -> bool:
-        return self._has_evidence_context()
+        return self.state.execution_mode == "new"
 
     def _artifact_json_path(self, filename: str) -> Path | None:
         artifacts_dir = self.state.artifacts_dir.strip()
@@ -119,6 +119,35 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _clear_new_run_artifacts(self) -> None:
+        """A rerun may only consume artifacts produced by that execution attempt."""
+        self.state.evidence_bundle = None
+        self.state.analysis_review_contract = None
+        for filename in ("10_research_evidence.json", self._ANALYSIS_CONTRACT_FILE):
+            path = self._artifact_json_path(filename)
+            if path is not None and path.exists():
+                path.unlink()
+
+    @classmethod
+    def _structured_result_payload(cls, result: Any) -> dict[str, object]:
+        if isinstance(result, dict):
+            return result
+        for attribute in ("json_dict", "pydantic"):
+            value = getattr(result, attribute, None)
+            if isinstance(value, dict):
+                return value
+            model_dump = getattr(value, "model_dump", None)
+            if callable(model_dump):
+                dumped = model_dump(mode="json")
+                if isinstance(dumped, dict):
+                    return dumped
+        model_dump = getattr(result, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump(mode="json")
+            if isinstance(dumped, dict):
+                return dumped
+        return {}
 
     @staticmethod
     def _strict_contract_payload(value: Any) -> dict[str, object] | None:
@@ -158,9 +187,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         return contract, None
 
     def _ingest_typed_analysis_result(self, result: Any) -> None:
-        if not isinstance(result, dict):
-            return
-        raw_bundle = result.get("evidence_bundle")
+        payload = self._structured_result_payload(result)
+        raw_bundle = payload.get("evidence_bundle")
         if raw_bundle is not None:
             try:
                 bundle = ResearchEvidenceBundle.model_validate(raw_bundle)
@@ -168,7 +196,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 return
             self.state.evidence_bundle = bundle
             self._persist_json_artifact("10_research_evidence.json", bundle.model_dump(mode="json"))
-        raw_contract = result.get("analysis_review_contract")
+        raw_contract = payload.get("analysis_review_contract")
         contract, error = self._load_strict_contract(
             value=raw_contract,
             filename=self._ANALYSIS_CONTRACT_FILE,
@@ -481,13 +509,16 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             return None, "invalid_review_contract"
 
     def _evidence_bundle_for_gate(self) -> ResearchEvidenceBundle | None:
-        if self.state.evidence_bundle is not None:
+        if self.state.evidence_bundle is not None and not self._typed_run():
             return self.state.evidence_bundle
         artifacts_dir = self.state.artifacts_dir.strip()
         if not artifacts_dir:
-            return None
+            return self.state.evidence_bundle
         evidence_path = Path(artifacts_dir) / "10_research_evidence.json"
         if not evidence_path.exists():
+            if self._typed_run():
+                return None
+            return self.state.evidence_bundle
             return None
         try:
             bundle = ResearchEvidenceBundle.model_validate_json(
@@ -762,10 +793,9 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
 
     def _default_analysis_gate(self, analysis_result: Any) -> GateDecision:
         if self._typed_run():
+            bundle = self._evidence_bundle_for_gate()
             raw_contract = (
-                analysis_result.get("analysis_review_contract")
-                if isinstance(analysis_result, dict)
-                else None
+                self._structured_result_payload(analysis_result).get("analysis_review_contract")
             )
             contract = self.state.analysis_review_contract
             if contract is None:
@@ -792,6 +822,13 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 if contract is None:
                     return self._typed_missing_review_contract_decision()
                 self.state.analysis_review_contract = contract
+            if bundle is None:
+                return GateDecision(
+                    passed=False,
+                    final_decision="blocked",
+                    trust_score=0,
+                    blocking_reasons=["evidence_bundle_missing"],
+                )
             return self._gate_decision_from_review_contract(contract)
         review_text = self._review_text_from_tasks_output(analysis_result)
         materialized_review_text = self._materialized_analysis_review_content()
@@ -908,6 +945,17 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 *(f"event:{event.event_id}" for event in bundle.events),
             }
         )
+        sources = [
+            SourceReference(
+                source_id=f"claim:{fact.field_name}",
+                title=f"{bundle.company_name} {fact.form or 'filing'}",
+                url=fact.source_url or "",
+                source_tag=fact.source_tag,
+                field_name=fact.field_name,
+            )
+            for fact in bundle.formal_facts()
+            if fact.source_url
+        ]
         return ReportGenerationContext(
             company_name=self.state.company_name,
             ticker=self.state.input_ticker,
@@ -915,6 +963,9 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             evidence_bundle=bundle,
             analysis_review_contract=contract,
             allowed_claim_ids=allowed_claim_ids,
+            canonical_sources_json=tuple(
+                source.model_dump_json() for source in sorted(sources, key=lambda item: item.source_id)
+            ),
         )
 
     def _typed_writer_document(self) -> ReportDocument:
@@ -922,8 +973,6 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         self.state.report_context = context
         writer_input = {
             "REPORT_CONTEXT_JSON": context.model_dump_json(),
-            "report_context": context.model_dump(mode="json"),
-            "analysis_result": self.state.analysis_result,
         }
         raw_payload = (
             self._report_writer(writer_input)
@@ -1304,6 +1353,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     @listen(validate_market)
     def run_analysis(self, inputs: dict[str, Any]) -> Any:
         self._record_stage("run_analysis")
+        if self._typed_run():
+            self._clear_new_run_artifacts()
         result = self._analysis_executor(inputs)
         self.state.analysis_result = result
         self._ingest_typed_analysis_result(result)
@@ -1332,6 +1383,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 target: self._model_tier_for_target(target)  # type: ignore[dict-item]
                 for target in targets
             }
+            self._clear_new_run_artifacts()
             result = self._analysis_executor(self._analysis_inputs())
             self.state.analysis_result = result
             self._ingest_typed_analysis_result(result)
@@ -1408,7 +1460,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     @listen(write_evidence_limited_report)
     def review_evidence_limited_report(self, report: Any) -> GateDecision:
         self._record_stage("review_report")
-        gate = self._report_reviewer(report)
+        gate = self._typed_report_gate(report) if self._typed_run() else self._report_reviewer(report)
         self._ensure_gate_consistency(gate, "review_report")
         self.state.report_gate_decision = gate
         self.state.gate_decision = gate
@@ -1435,6 +1487,36 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
 
     @listen(review_report)
     def finalize_delivery(self, report_gate: GateDecision) -> Any:
+        if self._typed_run() and report_gate.final_decision == "rerun":
+            while report_gate.final_decision == "rerun":
+                remaining = self.state.rerun_budget.get("report_writing_analyst", 0)
+                if remaining <= 0:
+                    report_gate = GateDecision(
+                        passed=False,
+                        final_decision="blocked",
+                        trust_score=report_gate.trust_score,
+                        blocking_reasons=[
+                            *report_gate.blocking_reasons,
+                            "rerun_budget_exhausted:report_writing_analyst",
+                        ],
+                    )
+                    break
+                self.state.rerun_budget["report_writing_analyst"] = remaining - 1
+                self.state.model_tier_overrides = {"report_writing_analyst": "deep"}
+                try:
+                    report = self._typed_writer_document()
+                    self.state.report_document = report
+                except ValueError:
+                    report_gate = GateDecision(
+                        passed=False,
+                        final_decision="blocked",
+                        trust_score=0,
+                        blocking_reasons=["writer_payload_invalid"],
+                    )
+                    break
+                self.state.report_result = report
+                report_gate = self._typed_report_gate(report)
+                self.state.report_gate_decision = report_gate
         self.state.report_gate_decision = report_gate
         return self._finalize(report_gate)
 

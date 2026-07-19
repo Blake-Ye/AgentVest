@@ -38,6 +38,7 @@ class EvidenceItem(BaseModel):
 class ResearchRunState(BaseModel):
     request_id: str
     company_name: str
+    execution_mode: Literal["new", "historical"] = "historical"
     input_ticker: str = ""
     input_exchange: str = ""
     market_validation: MarketValidationResult | None = None

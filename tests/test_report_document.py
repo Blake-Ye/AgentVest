@@ -10,6 +10,7 @@ from multi_agent.core.report_document import (
     REQUIRED_SECTION_KEYS,
     ReportDocument,
     ReportGenerationContext,
+    SourceReference,
     render_markdown,
     render_recommendation,
     render_structured_report,
@@ -59,6 +60,15 @@ def _formal_context() -> ReportGenerationContext:
         ),
         analysis_review_contract=review,
         allowed_claim_ids=["apple-revenue", "apple-services"],
+        canonical_sources_json=(
+            SourceReference(
+                source_id="sec-10k",
+                title="Apple 2025 Form 10-K",
+                url="https://www.sec.gov/Archives/edgar/data/320193/aapl-20250927.htm",
+                source_tag="sec_filing",
+                field_name="revenue",
+            ).model_dump_json(),
+        ),
     )
 
 
@@ -164,11 +174,30 @@ def test_formal_document_rejects_unbound_or_unknown_critical_claim(
     payload["claims"][0]["source_ids"] = []
     with pytest.raises(ValidationError, match="critical claim"):
         ReportDocument.model_validate(payload)
-
     payload = formal_apple_document.model_dump()
     payload["claims"][0]["claim_id"] = "unknown-claim"
     with pytest.raises(ValidationError, match="allowed_claim_ids"):
         ReportDocument.model_validate(payload)
+
+
+@pytest.mark.parametrize("field", ["url", "title"])
+def test_writer_cannot_forge_or_invent_canonical_sources(field: str) -> None:
+    payload = _formal_payload()
+    payload["sources"][0][field] = "https://evil.example/forged"  # type: ignore[index]
+    with pytest.raises(ValueError, match="forged canonical source"):
+        ReportDocument.from_writer_payload(
+            context=_formal_context(), writer_payload=payload, trust_score=91
+        )
+
+
+
+    payload = _formal_payload()
+    payload["sources"][0]["source_id"] = "unknown"  # type: ignore[index]
+    with pytest.raises(ValueError, match="unknown canonical source"):
+        ReportDocument.from_writer_payload(
+            context=_formal_context(), writer_payload=payload, trust_score=91
+        )
+
 
 
 @pytest.mark.parametrize(

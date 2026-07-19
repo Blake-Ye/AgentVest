@@ -93,8 +93,8 @@ def _typed_writer_payload() -> dict[str, object]:
     from multi_agent.core.report_document import REQUIRED_SECTION_KEYS, SECTION_HEADINGS
 
     source = {
-        "source_id": "sec-revenue",
-        "title": "Apple 2025 Form 10-K",
+        "source_id": "claim:revenue",
+        "title": "Apple Inc. 10-K",
         "url": "https://www.sec.gov/Archives/edgar/data/320193/example.htm",
         "source_tag": "sec_companyfacts",
         "field_name": "revenue",
@@ -103,7 +103,7 @@ def _typed_writer_payload() -> dict[str, object]:
         "claim_id": "claim:revenue",
         "text": "收入事实来自 2025 年 10-K。",
         "critical": True,
-        "source_ids": ["sec-revenue"],
+        "source_ids": ["claim:revenue"],
     }
     return {
         "title": "Apple Inc. (AAPL) 投资备忘录",
@@ -1409,7 +1409,7 @@ def test_evidence_backed_flow_rejects_legacy_summary_without_strict_contract() -
     )
 
     assert decision.final_decision == "rerun"
-    assert decision.blocking_reasons == ["analysis_review_contract_missing"]
+    assert decision.blocking_reasons == ["review_contract_missing"]
 
 
 def test_default_analysis_gate_accepts_current_reviewer_contract_shape_and_locks_limited_delivery(
@@ -2072,6 +2072,7 @@ def test_typed_flow_passes_only_from_bundle_contract_and_document() -> None:
             company_name="Apple Inc.",
             input_ticker="AAPL",
             evidence_bundle=bundle,
+            execution_mode="new",
         ),
     )
 
@@ -2093,6 +2094,7 @@ def test_typed_flow_rejects_prose_pass_without_strict_contract() -> None:
             company_name="Apple Inc.",
             input_ticker="AAPL",
             evidence_bundle=bundle,
+            execution_mode="new",
         ),
     )
 
@@ -2133,6 +2135,7 @@ def test_typed_flow_reruns_only_repair_target_with_override_and_budget() -> None
             company_name="Apple Inc.",
             input_ticker="AAPL",
             evidence_bundle=bundle,
+            execution_mode="new",
             rerun_budget={"quant_valuation_analyst": 1},
         ),
     )
@@ -2168,6 +2171,7 @@ def test_typed_flow_blocks_after_target_budget_is_exhausted() -> None:
             company_name="Apple Inc.",
             input_ticker="AAPL",
             evidence_bundle=bundle,
+            execution_mode="new",
             rerun_budget={"quant_valuation_analyst": 0},
         ),
     )
@@ -2192,6 +2196,7 @@ def test_typed_flow_blocks_malformed_writer_payload(payload: dict[str, object]) 
             company_name="Apple Inc.",
             input_ticker="AAPL",
             evidence_bundle=bundle,
+            execution_mode="new",
         ),
     )
 
@@ -2215,6 +2220,7 @@ def test_typed_flow_blocks_malformed_or_rejecting_logic_review() -> None:
             company_name="Apple Inc.",
             input_ticker="AAPL",
             evidence_bundle=bundle,
+            execution_mode="new",
         ),
     )
 
