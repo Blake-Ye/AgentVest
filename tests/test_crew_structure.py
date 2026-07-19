@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 from crewai.memory.storage import kickoff_task_outputs_storage
 
@@ -214,6 +215,17 @@ def test_reviewer_prompts_reference_gate_and_tool_outputs() -> None:
     assert "必须输出阻断说明而非正式报告" in tasks_yaml
 
 
+def test_writer_prompt_requires_revision_instructions_to_be_applied() -> None:
+    tasks_yaml = Path("src/multi_agent/config/tasks.yaml").read_text(encoding="utf-8")
+
+    writer_prompt = yaml.safe_load(tasks_yaml)["investment_report_task"]["description"]
+    assert "REPORT_CONTEXT_JSON.revision_instructions" in writer_prompt
+    assert "每一条 repair action" in writer_prompt
+    assert "每一条 rerun reason" in writer_prompt
+    assert "不得忽略 revision_instructions" in writer_prompt
+    assert "实质性修订" in writer_prompt
+
+
 def test_flow_crews_preserve_seven_agent_topology_and_allow_targeted_override(
     monkeypatch: pytest.MonkeyPatch, writable_crewai_storage: Path
 ) -> None:
@@ -280,3 +292,33 @@ def test_targeted_reviewer_context_excludes_prior_analysis_task_instances(
     assert reviewer.context == [filing, financial]
     assert all(context in targeted_tasks for context in reviewer.context)
     assert all(context not in prior_analysis_tasks for context in reviewer.context)
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_outputs"),
+    (
+        ("market_validation_analyst", ("00_market_validation.md", "08_data_quality_review.md")),
+        ("event_guidance_analyst", ("00_market_validation.md", "01_market_intelligence.md", "08_data_quality_review.md")),
+        ("fundamental_analyst", ("02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
+        ("quant_valuation_analyst", ("02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
+    ),
+)
+def test_targeted_evidence_repairs_include_producers_and_current_reviewer(
+    target: str,
+    expected_outputs: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    writable_crewai_storage: Path,
+) -> None:
+    monkeypatch.setenv("FAST_MODEL", "fast-model")
+    monkeypatch.setenv("DEEP_MODEL", "deep-model")
+    monkeypatch.setenv("REVIEW_MODEL", "review-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+
+    tasks = MultiAgent().targeted_analysis_crew([target]).tasks
+
+    assert tuple(Path(task.output_file).name for task in tasks) == expected_outputs
+    reviewer = tasks[-1]
+    assert reviewer.context == tasks[:-1]

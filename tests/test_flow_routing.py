@@ -16,7 +16,7 @@ from multi_agent.core.evidence import (
 )
 from multi_agent.core.market import MarketValidationResult, build_tool_policy
 from multi_agent.core.model_routing import ModelRouter
-from multi_agent.core.review_contracts import GateDecision, ReviewContract
+from multi_agent.core.review_contracts import GateDecision, RepairAction, ReviewContract
 from multi_agent.core.state import EvidenceItem, ResearchRunState
 from multi_agent.flows.market_review_flow import MarketReviewFlow, MarketReviewFlowState
 from multi_agent.settings import InvestmentResearchSettings
@@ -2281,3 +2281,176 @@ def test_typed_report_rework_passes_strict_feedback_to_second_writer() -> None:
     assert len(reviewed_documents) == 2
     assert reviewed_documents[0].executive_summary != reviewed_documents[1].executive_summary
     assert reviewed_documents[1].executive_summary == "已根据逻辑审查反馈重新绑定收入来源。"
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        "market_validation_analyst",
+        "event_guidance_analyst",
+        "fundamental_analyst",
+        "quant_valuation_analyst",
+    ),
+)
+def test_evidence_producer_rerun_reloads_fresh_bundle_for_next_gate(
+    target: str, tmp_path: Path
+) -> None:
+    initial_bundle = _typed_bundle()
+    fresh_facts = [
+        fact.model_copy(update={"value": fact.value + 100.0})
+        for fact in initial_bundle.financial_facts
+    ]
+    fresh_bundle = initial_bundle.model_copy(update={"financial_facts": fresh_facts})
+    rerun_contract = _typed_contract(
+        outcome="rerun",
+        actions=[{
+            "target": target,
+            "code": "refresh_evidence",
+            "instruction": "重新生成 canonical evidence。",
+        }],
+    )
+    attempts: list[dict[str, object]] = []
+    evidence_path = tmp_path / "10_research_evidence.json"
+    review_path = tmp_path / "08_data_quality_review.json"
+
+    def executor(inputs: dict[str, object]) -> dict[str, object]:
+        attempts.append(dict(inputs))
+        if len(attempts) == 1:
+            return {
+                "evidence_bundle": initial_bundle.model_dump(mode="json"),
+                "analysis_review_contract": rerun_contract.model_dump(mode="json"),
+            }
+        assert not evidence_path.exists()
+        assert not review_path.exists()
+        return {
+            "evidence_bundle": fresh_bundle.model_dump(mode="json"),
+            "analysis_review_contract": _typed_contract().model_dump(mode="json"),
+        }
+
+    flow = MarketReviewFlow(
+        analysis_executor=executor,
+        report_writer=lambda _context: _typed_writer_payload(),
+        report_reviewer=lambda _document: _typed_report_contract().model_dump(mode="json"),
+        initial_state=MarketReviewFlowState(
+            request_id=f"fresh-{target}", company_name="Apple Inc.", input_ticker="AAPL",
+            execution_mode="new", artifacts_dir=str(tmp_path), rerun_budget={target: 1},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "passed"
+    assert attempts[1]["rerun_targets"] == [target]
+    assert flow.state.evidence_bundle == fresh_bundle
+    assert ResearchEvidenceBundle.model_validate_json(evidence_path.read_text(encoding="utf-8")) == fresh_bundle
+
+
+def test_data_quality_rerun_preserves_evidence_and_rebuilds_only_review_contract(
+    tmp_path: Path,
+) -> None:
+    bundle = _typed_bundle()
+    rerun_contract = _typed_contract(
+        outcome="rerun",
+        actions=[{
+            "target": "data_quality_reviewer",
+            "code": "recheck_contract",
+            "instruction": "基于当前证据重建审查契约。",
+        }],
+    )
+    attempts: list[dict[str, object]] = []
+    evidence_path = tmp_path / "10_research_evidence.json"
+    review_path = tmp_path / "08_data_quality_review.json"
+
+    def executor(inputs: dict[str, object]) -> dict[str, object]:
+        attempts.append(dict(inputs))
+        if len(attempts) == 1:
+            return {
+                "evidence_bundle": bundle.model_dump(mode="json"),
+                "analysis_review_contract": rerun_contract.model_dump(mode="json"),
+            }
+        assert evidence_path.exists()
+        assert not review_path.exists()
+        assert ResearchEvidenceBundle.model_validate_json(evidence_path.read_text(encoding="utf-8")) == bundle
+        return {"analysis_review_contract": _typed_contract().model_dump(mode="json")}
+
+    flow = MarketReviewFlow(
+        analysis_executor=executor,
+        report_writer=lambda _context: _typed_writer_payload(),
+        report_reviewer=lambda _document: _typed_report_contract().model_dump(mode="json"),
+        initial_state=MarketReviewFlowState(
+            request_id="review-only", company_name="Apple Inc.", input_ticker="AAPL",
+            execution_mode="new", artifacts_dir=str(tmp_path),
+            rerun_budget={"data_quality_reviewer": 1},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "passed"
+    assert attempts[1]["rerun_targets"] == ["data_quality_reviewer"]
+    assert flow.state.evidence_bundle == bundle
+    assert flow.state.analysis_review_contract == _typed_contract()
+
+
+@pytest.mark.parametrize(
+    ("target", "reason"),
+    (
+        ("report_writing_analyst", "invalid_repair_phase:report_writing_analyst"),
+        ("logic_compliance_reviewer", "invalid_repair_phase:logic_compliance_reviewer"),
+    ),
+)
+def test_analysis_rerun_rejects_non_analysis_repair_targets(target: str, reason: str) -> None:
+    bundle = _typed_bundle()
+    contract = _typed_contract(
+        outcome="rerun",
+        actions=[{
+            "target": target,
+            "code": "wrong_phase",
+            "instruction": "不应由分析 rerun 执行。",
+        }],
+    )
+    executor_calls = 0
+
+    def executor(_inputs: dict[str, object]) -> dict[str, object]:
+        nonlocal executor_calls
+        executor_calls += 1
+        return {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": contract.model_dump(mode="json"),
+        }
+
+    result = MarketReviewFlow(
+        analysis_executor=executor,
+        initial_state=MarketReviewFlowState(
+            request_id=f"invalid-{target}", company_name="Apple Inc.", input_ticker="AAPL",
+            execution_mode="new", rerun_budget={target: 1},
+        ),
+    ).kickoff()
+
+    assert result["status"] == "blocked"
+    assert reason in result["blocking_reasons"]
+    assert executor_calls == 1
+
+
+def test_analysis_rerun_rejects_unknown_repair_target_before_executor() -> None:
+    flow = MarketReviewFlow(
+        initial_state=MarketReviewFlowState(
+            request_id="unknown-target", company_name="Apple Inc.", input_ticker="AAPL",
+            execution_mode="new", rerun_budget={"unrecognized_agent": 1},
+        ),
+    )
+    gate = GateDecision(
+        passed=False,
+        final_decision="rerun",
+        trust_score=0,
+        repair_actions=[RepairAction.model_construct(
+            target="unrecognized_agent",
+            code="unknown_target",
+            instruction="拒绝未知 agent。",
+        )],
+    )
+
+    route = flow._route_after_analysis_gate(gate)
+
+    assert route == "analysis_blocked"
+    assert "unsupported_repair_target:unrecognized_agent" in flow.state.analysis_gate_decision.blocking_reasons

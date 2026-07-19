@@ -19,6 +19,7 @@ from multi_agent.core.review_contracts import (
     CoverageSummary,
     DeliveryEligibility,
     FailureTaxonomy,
+    GateDecision,
     ReviewContract,
 )
 from multi_agent.flows.market_review_flow import MarketReviewFlow, MarketReviewFlowState
@@ -179,6 +180,43 @@ def test_new_flow_missing_bundle_reaches_cli_as_complete_blocked_delivery(tmp_pa
         output_paths.structured_report_path,
     ):
         assert path.exists()
+
+
+def test_validator_rejection_replaces_invalid_document_with_cli_persistable_blocked_notice(
+    tmp_path: Path,
+) -> None:
+    output_paths = _output_paths(tmp_path)
+    output_paths.run_dir.mkdir(parents=True)
+    valid_document = ReportDocument.from_writer_payload(
+        context=_context(), writer_payload=_writer_payload(), trust_score=91
+    )
+    flow = MarketReviewFlow(
+        initial_state=MarketReviewFlowState(
+            request_id="validator-rejection", company_name="Apple Inc.", input_ticker="AAPL",
+            execution_mode="new", artifacts_dir=str(output_paths.run_dir),
+        ),
+    )
+    flow.state.report_document = valid_document.model_copy(update={"stance": "watch"})
+
+    result = flow._finalize(GateDecision(passed=True, final_decision="passed", trust_score=91))
+
+    assert result["status"] == "blocked"
+    assert result["report_document"]["report_mode"] == "blocked_notice"
+    assert result["report_document"]["stance"] == "blocked"
+    assert result["final_decision_record"]["final_delivery_state"] == "blocked_notice"
+    assert flow.state.report_document is not valid_document
+    assert flow.state.report_result is flow.state.report_document
+    for path, _ in main._standard_markdown_outputs(output_paths):
+        if path != output_paths.final_report_path:
+            path.write_text("validator rejection", encoding="utf-8")
+    assert main._finalize_successful_result(output_paths, result) == "blocked"
+    package = main._write_new_run_delivery_package(
+        output_paths, company_name="Apple Inc.", company_ticker="AAPL",
+        result=result, final_status="blocked",
+    )
+    assert package.decision.final_delivery_state == "blocked_notice"
+    assert package.document.report_mode == "blocked_notice"
+    assert all(section.content for section in package.document.sections.values())
 
 
 def test_new_run_writes_canonical_delivery_package_before_any_projection(tmp_path: Path) -> None:

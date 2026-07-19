@@ -58,6 +58,14 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     }
     _ANALYSIS_CONTRACT_FILE = "08_data_quality_review.json"
     _REPORT_CONTRACT_FILE = "09_logic_compliance_review.json"
+    _EVIDENCE_PRODUCER_TARGETS = frozenset({
+        "market_validation_analyst",
+        "event_guidance_analyst",
+        "fundamental_analyst",
+        "quant_valuation_analyst",
+    })
+    _ANALYSIS_REPAIR_TARGETS = _EVIDENCE_PRODUCER_TARGETS | {"data_quality_reviewer"}
+    _REPORT_REPAIR_TARGETS = frozenset({"report_writing_analyst", "logic_compliance_reviewer"})
 
     def __init__(
         self,
@@ -123,13 +131,23 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _clear_new_run_artifacts(self) -> None:
-        """A rerun may only consume artifacts produced by that execution attempt."""
+        """Initial typed runs begin without evidence or analysis-review state."""
         self.state.evidence_bundle = None
         self.state.analysis_review_contract = None
         for filename in ("10_research_evidence.json", self._ANALYSIS_CONTRACT_FILE):
             path = self._artifact_json_path(filename)
             if path is not None and path.exists():
                 path.unlink()
+
+    def _clear_typed_rerun_artifacts(self, targets: list[str]) -> None:
+        """Clear only artifacts owned by the scheduled typed repair targets."""
+        if self._EVIDENCE_PRODUCER_TARGETS.intersection(targets):
+            self._clear_new_run_artifacts()
+            return
+        self.state.analysis_review_contract = None
+        review_path = self._artifact_json_path(self._ANALYSIS_CONTRACT_FILE)
+        if review_path is not None and review_path.exists():
+            review_path.unlink()
 
     @classmethod
     def _structured_result_payload(cls, result: Any) -> dict[str, object]:
@@ -198,6 +216,9 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 return
             self.state.evidence_bundle = bundle
             self._persist_json_artifact("10_research_evidence.json", bundle.model_dump(mode="json"))
+        elif self._typed_run():
+            # A real targeted Crew writes the canonical artifact; reload that attempt's snapshot.
+            self._evidence_bundle_for_gate()
         raw_contract = payload.get("analysis_review_contract")
         contract, error = self._load_strict_contract(
             value=raw_contract,
@@ -1222,16 +1243,27 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             return "fast"
         return "deep"
 
-    def _typed_rerun_targets_for_gate(self, gate: GateDecision) -> tuple[list[str], list[str]]:
+    def _typed_rerun_targets_for_gate(
+        self, gate: GateDecision
+    ) -> tuple[list[str], list[str], list[str]]:
         targets = sorted({action.target for action in gate.repair_actions})
         exhausted: list[str] = []
         runnable: list[str] = []
+        invalid: list[str] = []
         for target in targets:
+            if target not in self._ANALYSIS_REPAIR_TARGETS:
+                prefix = (
+                    "invalid_repair_phase"
+                    if target in self._REPORT_REPAIR_TARGETS
+                    else "unsupported_repair_target"
+                )
+                invalid.append(f"{prefix}:{target}")
+                continue
             if self.state.rerun_budget.get(target, 0) > 0:
                 runnable.append(target)
             else:
                 exhausted.append(target)
-        return runnable, exhausted
+        return runnable, exhausted, invalid
 
     def _route_after_analysis_gate(self, gate: GateDecision) -> str:
         if gate.final_decision == "passed":
@@ -1241,7 +1273,18 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             self._record_stage("analysis_evidence_limited")
             return "analysis_evidence_limited"
         if self._typed_run() and gate.final_decision == "rerun":
-            targets, exhausted = self._typed_rerun_targets_for_gate(gate)
+            targets, exhausted, invalid = self._typed_rerun_targets_for_gate(gate)
+            if invalid:
+                self.state.analysis_gate_decision = GateDecision(
+                    passed=False,
+                    final_decision="blocked",
+                    trust_score=gate.trust_score,
+                    blocking_reasons=[*gate.blocking_reasons, *invalid],
+                    repair_actions=list(gate.repair_actions),
+                )
+                self.state.gate_decision = self.state.analysis_gate_decision
+                self._record_stage("analysis_blocked")
+                return "analysis_blocked"
             if targets and not exhausted:
                 self._active_rerun_targets = targets
                 self._record_stage("analysis_needs_rerun")
@@ -1368,6 +1411,11 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                     analysis_review_contract=self.state.analysis_review_contract,
                     report_review_contract=self.state.report_review_contract,
                 )
+                blocked_document = self._blocked_document(
+                    list(gate.blocking_reasons), gate.trust_score
+                )
+                self.state.report_document = blocked_document
+                self.state.report_result = blocked_document
             self.state.final_decision_record = decision
         self._record_stage("finalize_delivery")
         self._ensure_gate_consistency(gate, "finalize_delivery")
@@ -1416,7 +1464,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 target: self._model_tier_for_target(target)  # type: ignore[dict-item]
                 for target in targets
             }
-            self._clear_new_run_artifacts()
+            self._clear_typed_rerun_artifacts(targets)
             result = self._analysis_executor(self._analysis_inputs())
             self.state.analysis_result = result
             self._ingest_typed_analysis_result(result)

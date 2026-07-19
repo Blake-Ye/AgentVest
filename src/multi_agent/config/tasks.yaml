@@ -125,7 +125,9 @@ investment_report_task:
     之外的额外文件。
     写作步骤：
     Step 1. 锁定证据边界，读取 REPORT_CONTEXT_JSON 与 analysis review contract 中的
-    delivery_eligibility、blocking_reasons、rerun_reasons。
+    delivery_eligibility、blocking_reasons、rerun_reasons。若
+    REPORT_CONTEXT_JSON.revision_instructions 非空，必须逐条读取并执行；它承载每一条
+    repair action 与每一条 rerun reason，不得忽略 revision_instructions，也不得只复述而不修改。
     Step 2. 先生成 claim plan，对每个核心 claim 绑定至少一个 artifact ref；
     没有 artifact ref 的 claim 直接删除。
     Step 3. 根据 REPORT_CONTEXT_JSON.report_mode 选择写法：
@@ -135,7 +137,9 @@ investment_report_task:
     Step 4. 执行 evidence-bound writing。每个核心结论后都附上统一格式的来源锚点：
     [来源: <artifact_id>] 或 [来源: <artifact_id> | 字段: <field_name>]。
     Step 5. 自检是否存在无来源锚点的关键结论、超出 REPORT_MODE 授权的表达、
-    或“看起来像 formal，但底层证据未闭合”的句子；如有，必须删除或降级。
+    或“看起来像 formal，但底层证据未闭合”的句子；如有，必须删除或降级。存在
+    revision_instructions 时，必须输出已针对每条指令完成实质性修订的全新 JSON payload，
+    不能原样复用上一版 payload。
     强制写作规则：强买卖建议只允许出现在 formal_report 模式；
     evidence_limited_report 模式的最高强度是“继续观察”“待补证后复核”；
     blocked_notice 模式不得出现正式建议、估值结论、强方向判断；

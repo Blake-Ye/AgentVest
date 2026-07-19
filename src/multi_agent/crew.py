@@ -299,6 +299,11 @@ class MultiAgent:
     def targeted_analysis_crew(self, targets: list[str]) -> Crew:
         """Rerun only the agent tasks named by typed RepairAction targets."""
         expanded_targets = list(dict.fromkeys(targets))
+        if "event_guidance_analyst" in expanded_targets:
+            expanded_targets.append("market_validation_analyst")
+        if {"market_validation_analyst", "event_guidance_analyst"}.intersection(expanded_targets):
+            # Evidence-changing reruns must end with a renewed strict review contract.
+            expanded_targets.append("data_quality_reviewer")
         if {"fundamental_analyst", "quant_valuation_analyst"}.intersection(expanded_targets):
             # Financial evidence is produced by the SEC/fundamental and metrics chain;
             # always finish with the reviewer that writes the renewed strict contract.
