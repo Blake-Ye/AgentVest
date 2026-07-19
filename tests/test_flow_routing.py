@@ -18,6 +18,7 @@ from multi_agent.core.market import MarketValidationResult, build_tool_policy
 from multi_agent.core.model_routing import ModelRouter
 from multi_agent.core.review_contracts import GateDecision, RepairAction, ReviewContract
 from multi_agent.core.state import EvidenceItem, ResearchRunState
+from multi_agent.evaluation import WorkflowEvaluation, activate_evaluation, clear_evaluation
 from multi_agent.flows.market_review_flow import MarketReviewFlow, MarketReviewFlowState
 from multi_agent.settings import InvestmentResearchSettings
 
@@ -2529,3 +2530,45 @@ def test_analysis_rerun_rejects_unknown_repair_target_before_executor() -> None:
 
     assert route == "analysis_blocked"
     assert "unsupported_repair_target:unrecognized_agent" in flow.state.analysis_gate_decision.blocking_reasons
+
+
+@pytest.mark.parametrize(
+    ("target", "attempt_prefix"),
+    (
+        ("event_guidance_analyst", "tavily-attempt-"),
+        ("quant_valuation_analyst", "tavily-snapshot-"),
+    ),
+)
+def test_evidence_rerun_selects_tavily_attempt_before_financial_executor(
+    target: str, attempt_prefix: str, tmp_path: Path
+) -> None:
+    evaluation = WorkflowEvaluation(
+        artifacts_dir=tmp_path,
+        final_report_path=tmp_path / "report.md",
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+    )
+    evaluation.start()
+    evaluation.record_tavily_payload({"results": [{"url": "https://prior.example.com/event"}]})
+    prior_attempt = evaluation.current_tavily_attempt_id()
+    selected_attempts: list[str | None] = []
+    token = activate_evaluation(evaluation)
+    try:
+        flow = MarketReviewFlow(
+            analysis_executor=lambda _inputs: selected_attempts.append(
+                evaluation.current_tavily_attempt_id()
+            ) or {},
+            initial_state=MarketReviewFlowState(
+                request_id=f"tavily-{target}", company_name="Apple Inc.", input_ticker="AAPL",
+                execution_mode="new", rerun_budget={target: 1},
+            ),
+        )
+        flow._active_rerun_targets = [target]
+        flow.rerun_analysis_if_needed()
+    finally:
+        clear_evaluation(token)
+
+    assert selected_attempts[0] is not None
+    assert selected_attempts[0].startswith(attempt_prefix)
+    assert selected_attempts[0] != prior_attempt

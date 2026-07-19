@@ -626,6 +626,134 @@ class FixtureEvidenceService:
         return self._sources["quote_payload"]
 
 
+class AttemptScopedTavilyService:
+    def __init__(self, results: list[dict[str, str]]) -> None:
+        self._results = results
+
+    def search_company_news(self, **_kwargs: object) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "artifact_ref": "https://api.tavily.com/search/attempt-fixture",
+            "results": self._results,
+        }
+
+
+def _tavily_result(*, title: str, url: str, event_key: str) -> dict[str, str]:
+    return {
+        "title": title,
+        "event_key": event_key,
+        "url": url,
+        "source_type": "news",
+        "published_at": "2026-07-20T12:00:00+00:00",
+        "snippet": f"{title} offline fixture.",
+    }
+
+
+def test_event_refresh_financial_metrics_uses_only_current_tavily_attempt(
+    tmp_path: Path,
+    apple_sources: dict[str, object],
+) -> None:
+    evaluation = WorkflowEvaluation(
+        artifacts_dir=tmp_path / "run",
+        final_report_path=tmp_path / "run" / "04_investment_report.md",
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+    )
+    evaluation.start()
+    token = activate_evaluation(evaluation)
+    try:
+        TavilySearchTool(
+            settings=build_settings(),
+            service=AttemptScopedTavilyService([_tavily_result(
+                title="Old leaked headline",
+                url="https://old.example.com/leaked",
+                event_key="old-event",
+            )]),
+        )._run(query="old", company_name="Apple Inc.")
+        old_attempt = evaluation.current_tavily_attempt_id()
+
+        refresh_attempt = evaluation.begin_tavily_evidence_attempt()
+        TavilySearchTool(
+            settings=build_settings(),
+            service=AttemptScopedTavilyService([
+                _tavily_result(
+                    title="New independent source one",
+                    url="https://news.example.com/new-one",
+                    event_key="new-event",
+                ),
+                _tavily_result(
+                    title="New independent source two",
+                    url="https://wire.example.net/new-two",
+                    event_key="new-event",
+                ),
+            ]),
+        )._run(query="refresh", company_name="Apple Inc.")
+        payload = json.loads(
+            FinancialMetricsTool(
+                settings=build_settings(), service=FixtureEvidenceService(apple_sources)
+            )._run("AAPL")
+        )
+    finally:
+        clear_evaluation(token)
+
+    event_urls = {event["source_url"] for event in payload["evidence_bundle"]["events"]}
+    assert old_attempt != refresh_attempt
+    assert evaluation.current_tavily_attempt_id() == refresh_attempt
+    assert "https://old.example.com/leaked" not in event_urls
+    assert event_urls == {
+        "https://news.example.com/new-one",
+        "https://wire.example.net/new-two",
+    }
+
+
+def test_financial_only_refresh_uses_immutable_prior_tavily_snapshot(
+    tmp_path: Path,
+    apple_sources: dict[str, object],
+) -> None:
+    evaluation = WorkflowEvaluation(
+        artifacts_dir=tmp_path / "run",
+        final_report_path=tmp_path / "run" / "04_investment_report.md",
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+    )
+    evaluation.start()
+    token = activate_evaluation(evaluation)
+    try:
+        TavilySearchTool(
+            settings=build_settings(),
+            service=AttemptScopedTavilyService([_tavily_result(
+                title="Prior event source",
+                url="https://prior.example.com/event",
+                event_key="prior-event",
+            )]),
+        )._run(query="prior", company_name="Apple Inc.")
+        prior_attempt = evaluation.current_tavily_attempt_id()
+        snapshot_attempt = evaluation.preserve_tavily_evidence_snapshot()
+
+        TavilySearchTool(
+            settings=build_settings(),
+            service=AttemptScopedTavilyService([_tavily_result(
+                title="Unexpected later payload",
+                url="https://later.example.com/event",
+                event_key="later-event",
+            )]),
+        )._run(query="later", company_name="Apple Inc.")
+        payload = json.loads(
+            FinancialMetricsTool(
+                settings=build_settings(), service=FixtureEvidenceService(apple_sources)
+            )._run("AAPL")
+        )
+    finally:
+        clear_evaluation(token)
+
+    event_urls = {event["source_url"] for event in payload["evidence_bundle"]["events"]}
+    assert snapshot_attempt != prior_attempt
+    assert evaluation.current_tavily_attempt_id() == snapshot_attempt
+    assert event_urls == {"https://prior.example.com/event"}
+
+
 def test_financial_metrics_output_uses_recorded_tavily_and_persists_evidence_artifact(
     tmp_path: Path,
     apple_sources: dict[str, object],

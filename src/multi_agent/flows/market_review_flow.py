@@ -26,6 +26,7 @@ from multi_agent.core.review_contracts import (
 )
 from multi_agent.core.state import ResearchRunState
 from multi_agent.crew import MultiAgent
+from multi_agent.evaluation import current_evaluation
 
 AnalysisExecutor = Callable[[dict[str, Any]], Any]
 GateEvaluator = Callable[[Any], GateDecision]
@@ -148,6 +149,15 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         review_path = self._artifact_json_path(self._ANALYSIS_CONTRACT_FILE)
         if review_path is not None and review_path.exists():
             review_path.unlink()
+
+    def _prepare_tavily_evidence_attempt(self, targets: list[str]) -> None:
+        evaluation = current_evaluation()
+        if evaluation is None or not self._EVIDENCE_PRODUCER_TARGETS.intersection(targets):
+            return
+        if "event_guidance_analyst" in targets:
+            evaluation.begin_tavily_evidence_attempt()
+            return
+        evaluation.preserve_tavily_evidence_snapshot()
 
     @classmethod
     def _structured_result_payload(cls, result: Any) -> dict[str, object]:
@@ -1463,6 +1473,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 target: self._model_tier_for_target(target)  # type: ignore[dict-item]
                 for target in targets
             }
+            self._prepare_tavily_evidence_attempt(targets)
             self._clear_typed_rerun_artifacts(targets)
             result = self._analysis_executor(self._analysis_inputs())
             self.state.analysis_result = result

@@ -97,7 +97,12 @@ class WorkflowEvaluation:
     _task_order: list[str] = field(default_factory=list, init=False)
     _api_calls: list[dict[str, Any]] = field(default_factory=list, init=False)
     _financial_fields: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
-    _tavily_payloads: list[dict[str, Any]] = field(default_factory=list, init=False)
+    _tavily_attempts: dict[str, tuple[dict[str, Any], ...]] = field(
+        default_factory=dict, init=False
+    )
+    _active_tavily_attempt_id: str | None = field(default=None, init=False)
+    _financial_tavily_attempt_id: str | None = field(default=None, init=False)
+    _tavily_attempt_sequence: int = field(default=0, init=False)
 
     def start(self) -> None:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -130,10 +135,46 @@ class WorkflowEvaluation:
         self._financial_fields = json.loads(json.dumps(fields))
 
     def record_tavily_payload(self, payload: dict[str, Any]) -> None:
-        self._tavily_payloads.append(json.loads(json.dumps(payload)))
+        attempt_id = self._ensure_tavily_attempt()
+        current = self._tavily_attempts[attempt_id]
+        self._tavily_attempts[attempt_id] = (*current, json.loads(json.dumps(payload)))
 
     def tavily_payloads(self) -> list[dict[str, Any]]:
-        return json.loads(json.dumps(self._tavily_payloads))
+        attempt_id = self._financial_tavily_attempt_id or self._active_tavily_attempt_id
+        if attempt_id is None:
+            return []
+        return json.loads(json.dumps(self._tavily_attempts.get(attempt_id, ())))
+
+    def current_tavily_attempt_id(self) -> str | None:
+        return self._financial_tavily_attempt_id or self._active_tavily_attempt_id
+
+    def begin_tavily_evidence_attempt(self) -> str:
+        """Start a fresh event-search attempt for a bundle that will be rebuilt."""
+        self._tavily_attempt_sequence += 1
+        attempt_id = f"tavily-attempt-{self._tavily_attempt_sequence}"
+        self._tavily_attempts[attempt_id] = ()
+        self._active_tavily_attempt_id = attempt_id
+        self._financial_tavily_attempt_id = attempt_id
+        return attempt_id
+
+    def preserve_tavily_evidence_snapshot(self) -> str:
+        """Freeze the prior event attempt for a financial-only evidence rebuild."""
+        source_attempt_id = self._financial_tavily_attempt_id or self._active_tavily_attempt_id
+        if source_attempt_id is None:
+            return self.begin_tavily_evidence_attempt()
+        self._tavily_attempt_sequence += 1
+        snapshot_id = f"tavily-snapshot-{self._tavily_attempt_sequence}"
+        source_payloads = self._tavily_attempts.get(source_attempt_id, ())
+        self._tavily_attempts[snapshot_id] = tuple(
+            json.loads(json.dumps(payload)) for payload in source_payloads
+        )
+        self._financial_tavily_attempt_id = snapshot_id
+        return snapshot_id
+
+    def _ensure_tavily_attempt(self) -> str:
+        if self._active_tavily_attempt_id is None:
+            return self.begin_tavily_evidence_attempt()
+        return self._active_tavily_attempt_id
 
     def record_research_evidence(self, payload: dict[str, Any]) -> None:
         self._atomic_write_json(self.artifacts_dir / "10_research_evidence.json", payload)
