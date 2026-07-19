@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -37,6 +38,18 @@ _STANCE_LABELS = {
     "watch": "观察",
     "blocked": "阻断",
 }
+
+_FORMAL_CORE_SECTION_KEYS = (
+    "executive_summary",
+    "financial_analysis",
+    "investment_conclusion",
+)
+_ACTIONABLE_RECOMMENDATION_PATTERN = re.compile(
+    r"\b(?:strong\s+buy|buy|sell|overweight|underweight)\b"
+    r"|(?:建议|维持)(?:买入|卖出|增持|减持|持有)"
+    r"|(?:买入|卖出|增持|减持|强烈推荐|目标价|评级)",
+    re.IGNORECASE,
+)
 
 
 class ReportGenerationContext(BaseModel):
@@ -153,6 +166,8 @@ class ReportDocument(BaseModel):
             raise ValueError("sections must contain exactly the required seven section keys")
         if len(self.allowed_claim_ids) != len(set(self.allowed_claim_ids)):
             raise ValueError("allowed_claim_ids must be unique")
+        if self.report_mode == "formal_report" and (not self.claims or not self.sources):
+            raise ValueError("formal_report requires source-bound critical claims and sources")
 
         self.sections = {key: self.sections[key] for key in REQUIRED_SECTION_KEYS}
         for key, section in self.sections.items():
@@ -171,6 +186,7 @@ class ReportDocument(BaseModel):
         known_source_ids = set(source_ids)
 
         for claim in self.claims:
+            claim.source_ids = sorted(set(claim.source_ids))
             unknown_source_ids = set(claim.source_ids) - known_source_ids
             if unknown_source_ids:
                 raise ValueError(
@@ -216,6 +232,12 @@ class ReportDocument(BaseModel):
                 )
             if not self.executive_summary.strip() or not self.catalysts or not self.risks:
                 raise ValueError("formal_report requires summary, catalysts, and risks")
+            critical_claim_ids = {claim.claim_id for claim in self.claims if claim.critical}
+            for section_key in _FORMAL_CORE_SECTION_KEYS:
+                if not critical_claim_ids.intersection(self.sections[section_key].claim_ids):
+                    raise ValueError(
+                        f"formal_report core section {section_key} requires a critical claim"
+                    )
         elif self.report_mode == "evidence_limited_report":
             if self.stance != "watch":
                 raise ValueError("evidence_limited_report requires watch stance")
@@ -226,6 +248,22 @@ class ReportDocument(BaseModel):
                 raise ValueError("blocked_notice requires blocked stance")
             if "阻断" not in self.executive_summary:
                 raise ValueError("blocked_notice requires 阻断 disclosure")
+        if self.report_mode in {"evidence_limited_report", "blocked_notice"}:
+            conclusion_text = "\n".join(
+                [
+                    self.executive_summary,
+                    *self.catalysts,
+                    *self.risks,
+                    *(
+                        self.sections[key].content
+                        for key in _FORMAL_CORE_SECTION_KEYS
+                    ),
+                ]
+            )
+            if _ACTIONABLE_RECOMMENDATION_PATTERN.search(conclusion_text):
+                raise ValueError(
+                    f"{self.report_mode} cannot contain actionable recommendation language"
+                )
         return self
 
 

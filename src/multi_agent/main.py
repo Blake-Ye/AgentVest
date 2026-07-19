@@ -13,6 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from multi_agent.evaluation import WorkflowEvaluation, activate_evaluation, clear_evaluation
+from multi_agent.core.report_document import (
+    ReportDocument,
+    ReportGenerationContext,
+    render_markdown,
+    render_recommendation,
+    render_structured_report,
+)
 from multi_agent.recommendation import build_structured_recommendation, build_structured_report
 from multi_agent.resolver import CompanyResolver
 from multi_agent import runtime
@@ -44,6 +51,7 @@ class RunOutputPaths:
     evaluation_summary_path: Path
     readme_path: Path
     evidence_bundle_path: Path
+    report_document_path: Path
 
 def _crew():
     return runtime.build_crew()
@@ -121,6 +129,7 @@ def _build_run_output_paths(
         evaluation_summary_path=run_dir / "evaluation_summary.json",
         readme_path=run_dir / "README.md",
         evidence_bundle_path=run_dir / "10_research_evidence.json",
+        report_document_path=run_dir / "11_report_document.json",
     )
 
 
@@ -152,6 +161,7 @@ def _write_run_readme(
             "- `08_data_quality_review.md`：数据质量审查结果",
             "- `09_logic_compliance_review.md`：逻辑与合规审查结果",
             "- `10_research_evidence.json`：可审计的规范化研究证据包",
+            "- `11_report_document.json`：报告交付的规范化单一真值",
             "- `final_decision.json`：最终状态单一真值源",
             "- `latest_run_metrics.json`：单次运行评估指标",
             "- `evaluation_summary.json`：当前目录下的评估汇总",
@@ -543,25 +553,16 @@ def _write_structured_outputs(
     watchlist_path: Path,
     save_to_watchlist: bool,
 ) -> dict[str, object]:
-    final_status = str(final_decision.get("final_decision", "passed")).strip()
-    final_delivery_state = str(final_decision.get("final_delivery_state", "")).strip()
-    blocking_reasons = [
-        str(item).strip()
-        for item in final_decision.get("blocking_reasons", [])
-        if str(item).strip()
-    ]
-    recommendation = build_structured_recommendation(
-        company_name=company_name,
-        company_ticker=company_ticker,
-        report_path=output_paths.final_report_path,
-        metrics=latest_metrics,
-    )
-    structured_report = build_structured_report(
-        company_name=company_name,
-        company_ticker=company_ticker,
-        report_path=output_paths.final_report_path,
-        metrics=latest_metrics,
-    )
+    del latest_metrics, company_name, company_ticker
+    document = _load_report_document(output_paths.report_document_path)
+    expected_mode = str(final_decision.get("final_delivery_state", "")).strip()
+    if document.report_mode != expected_mode:
+        raise ValueError(
+            "report document mode does not match final delivery state: "
+            f"{document.report_mode} != {expected_mode}"
+        )
+    recommendation = render_recommendation(document)
+    structured_report = render_structured_report(document)
     _apply_final_decision_projection(
         recommendation,
         structured_report,
@@ -574,20 +575,52 @@ def _write_structured_outputs(
     return recommendation
 
 
+def _load_report_document(path: Path) -> ReportDocument:
+    if not path.exists():
+        raise ValueError(f"new run is missing canonical report document: {path.name}")
+    try:
+        return ReportDocument.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise ValueError(f"invalid canonical report document: {path.name}") from error
+
+
+def _materialize_new_run_report_document(
+    output_paths: RunOutputPaths,
+    *,
+    result: object,
+    final_status: str,
+) -> ReportDocument:
+    """Build every new report from locked context and untrusted writer JSON only."""
+    raw_context = _workflow_result_value(result, "report_context", None)
+    raw_payload = _workflow_result_value(result, "report_writer_payload", None)
+    if raw_context is None or not isinstance(raw_payload, dict):
+        raise ValueError(
+            "new run requires report_context and report_writer_payload; "
+            "direct report_document input is not accepted"
+        )
+    context = ReportGenerationContext.model_validate(raw_context)
+    expected_mode = _final_delivery_state_from_status(final_status)
+    if context.report_mode != expected_mode:
+        raise ValueError(
+            "report context mode does not match final delivery state: "
+            f"{context.report_mode} != {expected_mode}"
+        )
+    trust_score = _trust_score_from_result(result)
+    if trust_score is None:
+        raise ValueError("new run requires an integer trust_score for its report document")
+    document = ReportDocument.from_writer_payload(
+        context=context,
+        writer_payload=raw_payload,
+        trust_score=trust_score,
+    )
+    _write_json_file(output_paths.report_document_path, document.model_dump(mode="json"))
+    output_paths.final_report_path.write_text(render_markdown(document), encoding="utf-8")
+    return document
+
+
 def _finalize_successful_result(output_paths: RunOutputPaths, result: object) -> str:
     final_status = _final_status_from_result(result)
     _materialize_standard_outputs(output_paths, result)
-    if final_status == "blocked":
-        _write_blocked_report(output_paths, result)
-    if (
-        final_status == "evidence_limited"
-        and (
-            not output_paths.final_report_path.exists()
-            or _is_placeholder_file(output_paths.final_report_path)
-            or not output_paths.final_report_path.read_text(encoding="utf-8").strip()
-        )
-    ):
-        _write_evidence_limited_report(output_paths, result)
     _validate_successful_outputs(output_paths, final_status=final_status)
     return final_status
 
@@ -690,18 +723,25 @@ def _rebuild_watchlist_from_artifacts(
         if not company_name or not company_ticker:
             continue
 
-        recommendation = build_structured_recommendation(
-            company_name=company_name,
-            company_ticker=company_ticker,
-            report_path=report_path,
-            metrics=latest_metrics,
-        )
-        structured_report = build_structured_report(
-            company_name=company_name,
-            company_ticker=company_ticker,
-            report_path=report_path,
-            metrics=latest_metrics,
-        )
+        report_document_path = run_dir / "11_report_document.json"
+        if report_document_path.exists():
+            document = _load_report_document(report_document_path)
+            recommendation = render_recommendation(document)
+            structured_report = render_structured_report(document)
+        else:
+            # Historical runs predate ReportDocument and are rebuilt from Markdown only here.
+            recommendation = build_structured_recommendation(
+                company_name=company_name,
+                company_ticker=company_ticker,
+                report_path=report_path,
+                metrics=latest_metrics,
+            )
+            structured_report = build_structured_report(
+                company_name=company_name,
+                company_ticker=company_ticker,
+                report_path=report_path,
+                metrics=latest_metrics,
+            )
         final_decision = _load_json_file(run_dir / "final_decision.json")
         if final_decision:
             _apply_final_decision_projection(
@@ -849,6 +889,10 @@ def run():
         ):
             with _graceful_termination_signals():
                 result = _kickoff_workflow(inputs)
+        final_status = _final_status_from_result(result)
+        _materialize_new_run_report_document(
+            output_paths, result=result, final_status=final_status
+        )
         final_status = _finalize_successful_result(output_paths, result)
         final_decision = _write_final_decision(
             output_paths,
@@ -1014,6 +1058,10 @@ def run_trigger_payload(trigger_payload: dict[str, object]):
         ):
             with _graceful_termination_signals():
                 result = _kickoff_workflow(inputs)
+        final_status = _final_status_from_result(result)
+        _materialize_new_run_report_document(
+            output_paths, result=result, final_status=final_status
+        )
         final_status = _finalize_successful_result(output_paths, result)
         final_decision = _write_final_decision(
             output_paths,

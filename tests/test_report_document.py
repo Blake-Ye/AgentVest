@@ -172,6 +172,83 @@ def test_formal_document_rejects_unbound_or_unknown_critical_claim(
 
 
 @pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("claims", [], "source-bound critical claims"),
+        ("sources", [], "source-bound critical claims"),
+    ],
+)
+def test_formal_document_requires_source_bound_critical_claims(
+    formal_apple_document: ReportDocument,
+    field: str,
+    value: list[object],
+    message: str,
+) -> None:
+    payload = formal_apple_document.model_dump()
+    payload[field] = value
+
+    with pytest.raises(ValidationError, match=message):
+        ReportDocument.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "section_key",
+    ("executive_summary", "financial_analysis", "investment_conclusion"),
+)
+def test_formal_document_requires_critical_claims_in_each_core_section(
+    formal_apple_document: ReportDocument, section_key: str
+) -> None:
+    payload = formal_apple_document.model_dump()
+    payload["sections"][section_key]["claim_ids"] = []
+
+    with pytest.raises(ValidationError, match=f"core section {section_key}"):
+        ReportDocument.model_validate(payload)
+
+
+def test_claim_source_ids_are_deduplicated_before_rendering(
+    formal_apple_document: ReportDocument,
+) -> None:
+    payload = formal_apple_document.model_dump()
+    payload["claims"][0]["source_ids"] = ["sec-10k", "sec-10k"]
+
+    document = ReportDocument.model_validate(payload)
+
+    assert document.claims[0].source_ids == ["sec-10k"]
+    assert render_markdown(document).count("[sec-10k](") == render_markdown(
+        formal_apple_document
+    ).count("[sec-10k](")
+
+
+@pytest.mark.parametrize(
+    ("mode", "stance", "field", "value"),
+    [
+        ("evidence_limited_report", "watch", "executive_summary", "建议买入该股票。证据受限。"),
+        ("evidence_limited_report", "watch", "investment_conclusion", "Strong buy。"),
+        ("blocked_notice", "blocked", "executive_summary", "本报告已阻断，建议卖出。"),
+        ("blocked_notice", "blocked", "financial_analysis", "维持增持评级。"),
+    ],
+)
+def test_limited_or_blocked_document_rejects_actionable_recommendation_language(
+    formal_apple_document: ReportDocument,
+    mode: str,
+    stance: str,
+    field: str,
+    value: str,
+) -> None:
+    payload = formal_apple_document.model_dump()
+    payload["report_mode"] = mode
+    payload["stance"] = stance
+    payload["executive_summary"] = "证据受限，继续观察。" if mode == "evidence_limited_report" else "报告已阻断。"
+    if field in payload["sections"]:
+        payload["sections"][field]["content"] = value
+    else:
+        payload[field] = value
+
+    with pytest.raises(ValidationError, match="actionable recommendation"):
+        ReportDocument.model_validate(payload)
+
+
+@pytest.mark.parametrize(
     ("path", "value", "message"),
     [
         (("claims",), "duplicate", "claim_id"),
