@@ -75,8 +75,8 @@ def test_periodless_fact_is_not_formal_eligible():
     assert "period_end_missing" in fact.quality_flags
 
 
-def test_flow_and_stock_facts_are_not_period_compatible():
-    flow_period = FinancialFact(
+def test_financial_facts_from_different_fiscal_years_are_not_period_compatible():
+    current_period = FinancialFact(
         field_name="revenue", value=100, unit="USD",
         period_start=date(2024, 9, 29), period_end=date(2025, 9, 27),
         fiscal_year=2025, fiscal_period="FY", form="10-K",
@@ -84,10 +84,19 @@ def test_flow_and_stock_facts_are_not_period_compatible():
         source_url="https://www.sec.gov/Archives/edgar/data/320193/filing.htm",
         source_tag="sec_companyfacts",
     )
-    instant_period = flow_period.model_copy(
-        update={"field_name": "cash_and_equivalents", "period_start": None}
+    stale_period = current_period.model_copy(
+        update={
+            "field_name": "diluted_shares",
+            "value": 15,
+            "unit": "shares",
+            "period_start": date(2022, 9, 25),
+            "period_end": date(2023, 9, 30),
+            "fiscal_year": 2023,
+            "accession": "0000320193-23-000106",
+            "filed_at": date(2023, 11, 3),
+        }
     )
-    assert periods_are_compatible(flow_period, instant_period) is False
+    assert periods_are_compatible(current_period, stale_period) is False
 ```
 
 - [ ] **Step 2: Run tests and verify the contract does not exist yet**
