@@ -297,8 +297,8 @@ def test_targeted_reviewer_context_excludes_prior_analysis_task_instances(
 @pytest.mark.parametrize(
     ("target", "expected_outputs"),
     (
-        ("market_validation_analyst", ("00_market_validation.md", "08_data_quality_review.md")),
-        ("event_guidance_analyst", ("00_market_validation.md", "01_market_intelligence.md", "08_data_quality_review.md")),
+        ("market_validation_analyst", ("00_market_validation.md", "02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
+        ("event_guidance_analyst", ("00_market_validation.md", "01_market_intelligence.md", "02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
         ("fundamental_analyst", ("02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
         ("quant_valuation_analyst", ("02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
     ),
@@ -322,3 +322,8 @@ def test_targeted_evidence_repairs_include_producers_and_current_reviewer(
     assert tuple(Path(task.output_file).name for task in tasks) == expected_outputs
     reviewer = tasks[-1]
     assert reviewer.context == tasks[:-1]
+    quant_task = next(task for task in tasks if Path(task.output_file).name == "03_financial_analysis.md")
+    assert "Financial Metrics Calculator" in [tool.name for tool in quant_task.agent.tools]
+    if target == "event_guidance_analyst":
+        event_task = next(task for task in tasks if Path(task.output_file).name == "01_market_intelligence.md")
+        assert event_task in quant_task.context

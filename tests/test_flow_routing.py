@@ -2345,6 +2345,81 @@ def test_evidence_producer_rerun_reloads_fresh_bundle_for_next_gate(
     assert ResearchEvidenceBundle.model_validate_json(evidence_path.read_text(encoding="utf-8")) == fresh_bundle
 
 
+def test_event_rerun_reloads_fresh_canonical_bundle_from_crewai_artifacts(
+    tmp_path: Path,
+) -> None:
+    initial_bundle = _typed_bundle()
+    fresh_bundle = initial_bundle.model_copy(update={
+        "financial_facts": [
+            fact.model_copy(update={"value": fact.value + 200.0})
+            for fact in initial_bundle.financial_facts
+        ],
+    })
+    rerun_contract = _typed_contract(
+        outcome="rerun",
+        actions=[{
+            "target": "event_guidance_analyst",
+            "code": "refresh_event_evidence",
+            "instruction": "使用当前 Tavily 事件输出重建证据。",
+        }],
+    )
+    evidence_path = tmp_path / "10_research_evidence.json"
+    review_path = tmp_path / "08_data_quality_review.json"
+    targeted_inputs: list[dict[str, object]] = []
+
+    class FakeCrewOutput:
+        json_dict = None
+        pydantic = None
+        raw = "CrewOutput without inline evidence bundle"
+        tasks_output = [_StubTaskOutput("data_quality_review_task", "fresh review artifact")]
+
+    class FakeCrew:
+        def __init__(self, *, targeted: bool) -> None:
+            self.targeted = targeted
+
+        def kickoff(self, *, inputs: dict[str, object]) -> FakeCrewOutput:
+            if not self.targeted:
+                evidence_path.write_text(initial_bundle.model_dump_json(), encoding="utf-8")
+                review_path.write_text(rerun_contract.model_dump_json(), encoding="utf-8")
+                return FakeCrewOutput()
+            targeted_inputs.append(dict(inputs))
+            assert inputs["rerun_targets"] == ["event_guidance_analyst"]
+            assert not evidence_path.exists()
+            assert not review_path.exists()
+            evidence_path.write_text(fresh_bundle.model_dump_json(), encoding="utf-8")
+            review_path.write_text(_typed_contract().model_dump_json(), encoding="utf-8")
+            return FakeCrewOutput()
+
+    class FakeCrewFactory:
+        def configure_run(self, **_kwargs: object) -> None:
+            pass
+
+        def analysis_crew(self) -> FakeCrew:
+            return FakeCrew(targeted=False)
+
+        def targeted_analysis_crew(self, targets: list[str]) -> FakeCrew:
+            assert targets == ["event_guidance_analyst"]
+            return FakeCrew(targeted=True)
+
+    flow = MarketReviewFlow(
+        crew_factory=FakeCrewFactory(),
+        report_writer=lambda _context: _typed_writer_payload(),
+        report_reviewer=lambda _document: _typed_report_contract().model_dump(mode="json"),
+        initial_state=MarketReviewFlowState(
+            request_id="artifact-event-rerun", company_name="Apple Inc.", input_ticker="AAPL",
+            execution_mode="new", artifacts_dir=str(tmp_path),
+            rerun_budget={"event_guidance_analyst": 1},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "passed"
+    assert targeted_inputs
+    assert flow.state.evidence_bundle == fresh_bundle
+    assert ResearchEvidenceBundle.model_validate_json(evidence_path.read_text(encoding="utf-8")) == fresh_bundle
+
+
 def test_data_quality_rerun_preserves_evidence_and_rebuilds_only_review_contract(
     tmp_path: Path,
 ) -> None:

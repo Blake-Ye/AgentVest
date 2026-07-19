@@ -301,12 +301,14 @@ class MultiAgent:
         expanded_targets = list(dict.fromkeys(targets))
         if "event_guidance_analyst" in expanded_targets:
             expanded_targets.append("market_validation_analyst")
-        if {"market_validation_analyst", "event_guidance_analyst"}.intersection(expanded_targets):
-            # Evidence-changing reruns must end with a renewed strict review contract.
-            expanded_targets.append("data_quality_reviewer")
-        if {"fundamental_analyst", "quant_valuation_analyst"}.intersection(expanded_targets):
-            # Financial evidence is produced by the SEC/fundamental and metrics chain;
-            # always finish with the reviewer that writes the renewed strict contract.
+        if {
+            "market_validation_analyst",
+            "event_guidance_analyst",
+            "fundamental_analyst",
+            "quant_valuation_analyst",
+        }.intersection(expanded_targets):
+            # Canonical evidence is renewed only after the filing, FinancialMetricsTool, and
+            # strict-review chain has consumed the current market/event task outputs.
             expanded_targets = [
                 *expanded_targets,
                 "fundamental_analyst",
@@ -352,6 +354,7 @@ class MultiAgent:
             ),
             "quant_valuation_analyst": (
                 "market_validation_analyst",
+                "event_guidance_analyst",
                 "fundamental_analyst",
             ),
             "data_quality_reviewer": (

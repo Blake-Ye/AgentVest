@@ -542,7 +542,6 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             if self._typed_run():
                 return None
             return self.state.evidence_bundle
-            return None
         try:
             bundle = ResearchEvidenceBundle.model_validate_json(
                 evidence_path.read_text(encoding="utf-8")
