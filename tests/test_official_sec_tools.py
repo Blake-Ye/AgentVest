@@ -77,6 +77,7 @@ def test_official_sec_service_builds_filings_from_official_submissions() -> None
                     "recent": {
                         "form": ["10-K", "8-K", "10-K"],
                         "filingDate": ["2025-11-01", "2025-10-15", "2024-11-02"],
+                        "reportDate": ["2025-09-27", "2025-10-15", "2024-09-28"],
                         "accessionNumber": [
                             "0000320193-25-000010",
                             "0000320193-25-000008",
@@ -109,6 +110,7 @@ def test_official_sec_service_builds_filings_from_official_submissions() -> None
             "filing_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019325000010/a10-k2025.htm",
             "filing_details": "Annual report",
             "accession_no": "0000320193-25-000010",
+            "report_date": "2025-09-27",
         },
         {
             "form_type": "10-K",
@@ -116,6 +118,7 @@ def test_official_sec_service_builds_filings_from_official_submissions() -> None
             "filing_url": "https://www.sec.gov/Archives/edgar/data/320193/000032019324000090/a10-k2024.htm",
             "filing_details": "Annual report",
             "accession_no": "0000320193-24-000090",
+            "report_date": "2024-09-28",
         },
     ]
     assert session.requests[1][0] == "https://data.sec.gov/submissions/CIK0000320193.json"
@@ -157,6 +160,7 @@ def test_official_sec_service_returns_annual_filing_identity_with_html() -> None
                     "recent": {
                         "form": ["10-K"],
                         "filingDate": ["2025-11-01"],
+                        "reportDate": ["2025-09-27"],
                         "accessionNumber": ["0000320193-25-000010"],
                         "primaryDocument": ["a10-k2025.htm"],
                         "primaryDocDescription": ["Annual report"],
@@ -176,6 +180,7 @@ def test_official_sec_service_returns_annual_filing_identity_with_html() -> None
         "accession": "0000320193-25-000010",
         "filed_at": "2025-11-01",
         "form": "10-K",
+        "report_date": "2025-09-27",
     }
 
 

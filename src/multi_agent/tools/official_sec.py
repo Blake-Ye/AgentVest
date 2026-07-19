@@ -241,6 +241,7 @@ class OfficialSecService:
 
         forms = recent_filings.get("form", [])
         filed_dates = recent_filings.get("filingDate", [])
+        report_dates = recent_filings.get("reportDate", [])
         accession_numbers = recent_filings.get("accessionNumber", [])
         primary_documents = recent_filings.get("primaryDocument", [])
         descriptions = recent_filings.get("primaryDocDescription", [])
@@ -265,6 +266,7 @@ class OfficialSecService:
                     "filing_url": filing_url,
                     "filing_details": str(descriptions[index]),
                     "accession_no": accession_number,
+                    "report_date": str(report_dates[index]) if index < len(report_dates) else "",
                 }
             )
             if len(normalized_results) >= limit:
@@ -293,6 +295,7 @@ class OfficialSecService:
             "accession": filing.get("accession_no", ""),
             "filed_at": filing.get("filed_at", ""),
             "form": filing.get("form_type", "10-K"),
+            "report_date": filing.get("report_date", ""),
         }
 
     def fetch_latest_annual_report_html(self, ticker: str) -> str:

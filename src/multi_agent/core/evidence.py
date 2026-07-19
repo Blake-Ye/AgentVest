@@ -81,6 +81,8 @@ class EventEvidence(BaseModel):
     source_type: str
     confidence: float = Field(ge=0.0, le=1.0)
     independently_confirmed: bool = False
+    corroboration_key: str = ""
+    corroborating_source_urls: list[str] = Field(default_factory=list)
 
 
 class ToolHealthRecord(BaseModel):

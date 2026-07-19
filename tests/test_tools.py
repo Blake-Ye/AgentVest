@@ -113,12 +113,14 @@ def test_tavily_events_require_distinct_valid_source_domains(apple_sources: dict
             "results": [
                 {
                     "title": "Apple Services update",
+                    "event_key": "apple-services-growth",
                     "url": "https://news.example.com/apple-services",
                     "source_type": "news",
                     "published_at": "2026-07-18T12:00:00+00:00",
                 },
                 {
-                    "title": "Apple valuation update",
+                    "title": "Apple Services growth corroboration",
+                    "event_key": "apple-services-growth",
                     "url": "https://wire.example.net/apple-valuation",
                     "source_type": "news",
                     "published_at": "2026-07-18T13:00:00+00:00",
@@ -141,6 +143,79 @@ def test_tavily_events_require_distinct_valid_source_domains(apple_sources: dict
     assert "https://api.tavily.com/search/request-1" in bundle.raw_artifact_refs
     assert all(event.source_url.startswith("https://") for event in bundle.events)
     assert any(gap.code == "independent_event_sources_insufficient" for gap in bundle.gaps)
+
+
+def test_tavily_does_not_confirm_unrelated_events_across_domains(
+    apple_sources: dict[str, object],
+) -> None:
+    sources = deepcopy(apple_sources)
+    sources["tavily_payloads"] = [
+        {
+            "status": "ok",
+            "results": [
+                {
+                    "title": "Apple launches a product",
+                    "event_key": "apple-product-launch",
+                    "url": "https://news.example.com/apple-product",
+                    "source_type": "news",
+                },
+                {
+                    "title": "Apple faces a lawsuit",
+                    "event_key": "apple-lawsuit",
+                    "url": "https://wire.example.net/apple-lawsuit",
+                    "source_type": "news",
+                },
+            ],
+        }
+    ]
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    assert bundle.tool_status("tavily") == "degraded"
+    assert all(event.independently_confirmed is False for event in bundle.events)
+    assert any(gap.code == "independent_event_sources_insufficient" for gap in bundle.gaps)
+
+
+def test_tavily_subdomains_of_one_publisher_do_not_confirm_event(
+    apple_sources: dict[str, object],
+) -> None:
+    sources = deepcopy(apple_sources)
+    sources["tavily_payloads"] = [
+        {
+            "status": "ok",
+            "results": [
+                {
+                    "title": "Apple Services update",
+                    "event_key": "apple-services-growth",
+                    "url": "https://www.publisher.co.uk/apple-services",
+                    "source_type": "news",
+                },
+                {
+                    "title": "Apple Services corroboration",
+                    "event_key": "apple-services-growth",
+                    "url": "https://news.publisher.co.uk/apple-services",
+                    "source_type": "news",
+                },
+            ],
+        }
+    ]
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    assert bundle.tool_status("tavily") == "degraded"
+    assert all(event.independently_confirmed is False for event in bundle.events)
+
+
+def test_tavily_degraded_reason_is_preserved_in_tool_health(apple_sources: dict[str, object]) -> None:
+    sources = deepcopy(apple_sources)
+    sources["tavily_payloads"] = [
+        {"status": "degraded", "degraded_reason": "request budget exhausted", "results": []}
+    ]
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    tavily_health = [item for item in bundle.tool_health if item.tool_name == "tavily"]
+    assert tavily_health[-1].message == "request budget exhausted"
 
 
 def test_services_revenue_is_not_formal_without_actual_filing_metadata(
@@ -507,6 +582,7 @@ class StubIndependentTavilyService:
             "results": [
                 {
                     "title": "Apple source one",
+                    "event_key": "apple-services-growth",
                     "url": "https://news.example.com/apple-one",
                     "source_type": "news",
                     "published_at": "2026-07-18T12:00:00+00:00",
@@ -514,6 +590,7 @@ class StubIndependentTavilyService:
                 },
                 {
                     "title": "Apple source two",
+                    "event_key": "apple-services-growth",
                     "url": "https://wire.example.net/apple-two",
                     "source_type": "news",
                     "published_at": "2026-07-18T13:00:00+00:00",
@@ -572,6 +649,46 @@ def test_financial_metrics_output_uses_recorded_tavily_and_persists_evidence_art
     persisted = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert persisted == payload["evidence_bundle"]
     assert "https://api.tavily.com/search/offline-request" in persisted["raw_artifact_refs"]
+
+
+def test_runtime_path_establishes_services_period_from_same_accession_revenue(
+    tmp_path: Path,
+    apple_sources: dict[str, object],
+) -> None:
+    sources = deepcopy(apple_sources)
+    filing_metadata = sources["filing_metadata"]
+    for field in ("fiscal_year", "fiscal_period", "period_start", "period_end"):
+        filing_metadata.pop(field)
+    filing_metadata["report_date"] = "2025-09-27"
+    evaluation = WorkflowEvaluation(
+        artifacts_dir=tmp_path / "run",
+        final_report_path=tmp_path / "run" / "04_investment_report.md",
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+    )
+    evaluation.start()
+    token = activate_evaluation(evaluation)
+    try:
+        payload = json.loads(
+            FinancialMetricsTool(
+                settings=build_settings(),
+                service=FixtureEvidenceService(sources),
+            )._run("AAPL")
+        )
+    finally:
+        clear_evaluation(token)
+
+    services = next(
+        fact
+        for fact in payload["evidence_bundle"]["financial_facts"]
+        if fact["field_name"] == "segment_revenue_services"
+    )
+    assert services["source_url"] == sources["filing_metadata"]["source_url"]
+    assert services["accession"] == "0000320193-25-000079"
+    assert services["period_start"] == "2024-09-29"
+    assert services["period_end"] == "2025-09-27"
+    assert services["quality_flags"] == []
 
 
 def test_financial_metrics_records_missing_tavily_as_degraded() -> None:

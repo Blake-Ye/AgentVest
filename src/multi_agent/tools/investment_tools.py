@@ -386,7 +386,8 @@ def _add_services_revenue_from_filing(
             )
         )
         return
-    metadata = filing_metadata or {}
+    metadata = dict(filing_metadata or {})
+    _complete_filing_period_from_revenue(bundle, metadata)
     services_fact = FinancialFact(
         field_name="segment_revenue_services",
         value=extracted.normalized_value,
@@ -414,6 +415,46 @@ def _add_services_revenue_from_filing(
             )
         )
     bundle.tool_health.append(ToolHealthRecord(tool_name="sec_filing_html", status="healthy"))
+
+
+def _complete_filing_period_from_revenue(
+    bundle: ResearchEvidenceBundle,
+    filing_metadata: dict[str, object],
+) -> None:
+    """Fill a filing's period only when its own identity matches a formal SEC revenue fact."""
+    accession = str(filing_metadata.get("accession", "")).strip()
+    source_url = str(filing_metadata.get("source_url", "")).strip()
+    report_date = _optional_date(filing_metadata.get("report_date"))
+    if not accession or not source_url:
+        return
+    revenue = next(
+        (
+            fact
+            for fact in bundle.financial_facts
+            if fact.field_name == "revenue"
+            and fact.formal_eligible
+            and fact.accession == accession
+            and fact.form == str(filing_metadata.get("form", "10-K")).strip()
+        ),
+        None,
+    )
+    if revenue is None:
+        return
+    if report_date is not None and revenue.period_end != report_date:
+        bundle.gaps.append(
+            _evidence_gap(
+                code="filing_report_date_mismatch",
+                target="fundamental_analyst",
+                fields=["segment_revenue_services"],
+                sources=[source_url, revenue.source_url] if revenue.source_url else [source_url],
+                message="The annual filing report date does not match the same-accession formal revenue period.",
+            )
+        )
+        return
+    filing_metadata.setdefault("fiscal_year", revenue.fiscal_year)
+    filing_metadata.setdefault("fiscal_period", revenue.fiscal_period)
+    filing_metadata.setdefault("period_start", revenue.period_start.isoformat() if revenue.period_start else None)
+    filing_metadata.setdefault("period_end", revenue.period_end.isoformat() if revenue.period_end else None)
 
 
 def _add_quote_evidence(
@@ -475,12 +516,18 @@ def _add_tavily_events(
         return
     degraded = False
     event_count = 0
-    source_domains: set[str] = set()
+    degraded_reasons: list[str] = []
+    event_group_indexes: dict[str, list[int]] = {}
+    event_group_domains: dict[str, set[str]] = {}
+    event_group_urls: dict[str, list[str]] = {}
     for payload_index, payload in enumerate(tavily_payloads):
         status = str(payload.get("status", "ok")).lower()
         results = payload.get("results", [])
         if status != "ok" or not isinstance(results, list):
             degraded = True
+            reason = str(payload.get("degraded_reason", "")).strip()
+            if reason:
+                degraded_reasons.append(reason)
             continue
         artifact_ref = str(payload.get("artifact_ref", "")).strip()
         if _is_valid_http_url(artifact_ref):
@@ -493,10 +540,15 @@ def _add_tavily_events(
             title = str(raw_result.get("title", "")).strip()
             if not title or not _is_valid_http_url(url):
                 degraded = True
+                degraded_reasons.append("Tavily returned an invalid event source URL or title.")
                 continue
             event_count += 1
-            source_domains.add(urlparse(url).hostname or "")
+            corroboration_key = _event_corroboration_key(raw_result, title)
+            publisher_domain = _registrable_publisher_domain(url)
             bundle.raw_artifact_refs.append(url)
+            event_group_indexes.setdefault(corroboration_key, []).append(len(bundle.events))
+            event_group_domains.setdefault(corroboration_key, set()).add(publisher_domain)
+            event_group_urls.setdefault(corroboration_key, []).append(url)
             bundle.events.append(
                 EventEvidence(
                     event_id=f"tavily-{payload_index}-{result_index}",
@@ -505,19 +557,31 @@ def _add_tavily_events(
                     source_url=url,
                     source_type=str(raw_result.get("source_type", "news")) or "news",
                     confidence=0.6,
+                    corroboration_key=corroboration_key,
+                    corroborating_source_urls=[url],
                 )
             )
-    independently_confirmed = len(source_domains) >= 2
-    if independently_confirmed:
-        bundle.events = [
-            event.model_copy(update={"independently_confirmed": True})
-            for event in bundle.events
-        ]
-    if degraded or not independently_confirmed:
-        bundle.tool_health.append(ToolHealthRecord(tool_name="tavily", status="degraded"))
+    unconfirmed_groups = {
+        key for key, domains in event_group_domains.items() if len(domains) < 2
+    }
+    for corroboration_key, indexes in event_group_indexes.items():
+        group_sources = list(dict.fromkeys(event_group_urls[corroboration_key]))
+        confirmed = corroboration_key not in unconfirmed_groups
+        for index in indexes:
+            bundle.events[index] = bundle.events[index].model_copy(
+                update={
+                    "independently_confirmed": confirmed,
+                    "corroborating_source_urls": group_sources,
+                }
+            )
+    if degraded or unconfirmed_groups:
+        message = "; ".join(dict.fromkeys(degraded_reasons))
+        bundle.tool_health.append(
+            ToolHealthRecord(tool_name="tavily", status="degraded", message=message)
+        )
     else:
         bundle.tool_health.append(ToolHealthRecord(tool_name="tavily", status="healthy"))
-    if degraded or not independently_confirmed or event_count == 0:
+    if degraded or unconfirmed_groups or event_count == 0:
         bundle.gaps.append(
             _evidence_gap(
                 code="independent_event_sources_insufficient",
@@ -531,6 +595,27 @@ def _add_tavily_events(
 def _is_valid_http_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _event_corroboration_key(raw_result: dict[str, object], title: str) -> str:
+    explicit_key = str(
+        raw_result.get("event_key", raw_result.get("corroboration_key", ""))
+    ).strip()
+    if explicit_key:
+        return explicit_key.lower()
+    normalized_title = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+    return normalized_title or "unclassified-event"
+
+
+def _registrable_publisher_domain(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower().strip(".")
+    labels = [label for label in host.split(".") if label]
+    if len(labels) < 2:
+        return host
+    country_second_level = {"ac", "co", "com", "edu", "gov", "net", "org"}
+    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in country_second_level:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
 
 
 def build_research_evidence_bundle(
