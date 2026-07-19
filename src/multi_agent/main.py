@@ -210,6 +210,10 @@ def _initialize_standard_output_files(
     waiting_message = f"公司：{company_name}（{company_ticker_display}）\n\n状态：运行中，结果待生成。"
     for path, title in _standard_markdown_outputs(output_paths):
         _write_markdown_file(path, title, waiting_message, placeholder=True)
+    output_paths.runtime_log_path.write_text(
+        f"公司：{company_name}（{company_ticker_display}）\n状态：运行已初始化。\n",
+        encoding="utf-8",
+    )
     _write_json_file(
         output_paths.structured_recommendation_path,
         {

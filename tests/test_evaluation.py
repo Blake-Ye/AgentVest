@@ -217,3 +217,38 @@ def test_workflow_evaluation_remains_stable_across_repeated_runs(tmp_path: Path)
     assert written_summary["api_calls"]["total"] == total_runs
     assert written_summary["api_calls"]["failures"] == expected_failures
     assert written_summary["api_calls"]["failure_rate"] == round(expected_failures / total_runs, 3)
+
+
+def test_formal_delivery_success_requires_all_semantic_completion_metrics(tmp_path: Path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    (artifacts_dir / "final_decision.json").write_text(
+        json.dumps(
+            {
+                "company_name": "Apple Inc.",
+                "company_ticker": "AAPL",
+                "final_decision": "passed",
+                "final_delivery_state": "formal_report",
+                "trust_score": 91,
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = artifacts_dir / "04_investment_report.md"
+    report.write_text("incomplete formal report", encoding="utf-8")
+    evaluator = WorkflowEvaluation(
+        artifacts_dir=artifacts_dir,
+        final_report_path=report,
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        time_source=StepClock([0.0, 1.0]),
+    )
+
+    evaluator.start()
+    metrics = evaluator.finalize(success=True)
+
+    assert metrics["success"] is False
+    assert metrics["status"] == "failed"
+    assert metrics["report_sections_complete"] is False
+    assert metrics["delivery_validation_passed"] is False

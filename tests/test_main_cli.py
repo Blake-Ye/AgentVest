@@ -210,7 +210,7 @@ def test_workflow_inputs_includes_run_id(monkeypatch: pytest.MonkeyPatch) -> Non
     assert inputs["run_id"] == "20260615_103045"
 
 
-def test_run_writes_evaluation_artifacts_on_success(
+def test_run_marks_incomplete_formal_delivery_as_failed_in_evaluation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -270,7 +270,8 @@ def test_run_writes_evaluation_artifacts_on_success(
     run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
     latest_metrics = (run_dir / "latest_run_metrics.json").read_text(encoding="utf-8")
     assert "Apple Inc." in latest_metrics
-    assert '"success": true' in latest_metrics
+    assert '"success": false' in latest_metrics
+    assert '"formal_fact_provenance_complete": false' in latest_metrics
     assert (run_dir / "00_market_validation.md").exists()
     assert (run_dir / "04_investment_report.md").exists()
     assert (run_dir / "08_data_quality_review.md").exists()

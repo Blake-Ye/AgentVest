@@ -10,6 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from multi_agent.core.delivery import DeliveryPackage, DeliveryValidator
+from multi_agent.core.evidence import ResearchEvidenceBundle
+from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
+from multi_agent.core.report_document import REQUIRED_SECTION_KEYS, ReportDocument
+from multi_agent.core.review_contracts import FinalDecisionRecord
 from multi_agent.recommendation import calculate_trust_score
 
 
@@ -241,12 +246,22 @@ class WorkflowEvaluation:
         artifact_inventory = self._build_artifact_inventory()
         report_generated, report_complete, citation_count = self._inspect_report()
         financial_fields_success_rate = self._calculate_financial_fields_success_rate()
+        semantic_metrics, final_decision = self._semantic_delivery_metrics()
+        formal_delivery_complete = all(semantic_metrics.values())
+        effective_success = success and (
+            final_decision != "passed" or formal_delivery_complete
+        )
+        semantic_error = (
+            "formal_delivery_semantic_validation_failed"
+            if success and final_decision == "passed" and not formal_delivery_complete
+            else None
+        )
         metrics = {
             "started_at": self.started_at_iso,
             "finished_at": _utc_now_iso(),
-            "status": "completed" if success else "failed",
-            "success": success,
-            "error_message": error_message,
+            "status": "completed" if effective_success else "failed",
+            "success": effective_success,
+            "error_message": error_message or semantic_error,
             "company_name": self.company_name,
             "company_ticker": self.company_ticker,
             "total_runtime_seconds": _round_metric(finished_at_seconds - started_at_seconds),
@@ -261,6 +276,7 @@ class WorkflowEvaluation:
             "artifacts": artifact_inventory,
             "financial_fields": self._financial_fields,
             "financial_fields_success_rate": financial_fields_success_rate,
+            **semantic_metrics,
         }
         metrics["trust_score"] = calculate_trust_score(metrics)
 
@@ -333,6 +349,176 @@ class WorkflowEvaluation:
             1 for field in self._financial_fields.values() if field.get("extracted", False)
         )
         return _round_metric(extracted_count / len(self._financial_fields))
+
+    def _semantic_delivery_metrics(self) -> tuple[dict[str, bool], str | None]:
+        """Validate persisted formal-delivery truth after the CLI has written it."""
+        names = {
+            "decision": "final_decision.json",
+            "document": "11_report_document.json",
+            "markdown": "04_investment_report.md",
+            "recommendation": "06_structured_recommendation.json",
+            "structured_report": "07_structured_report.json",
+            "evidence": "10_research_evidence.json",
+        }
+        paths = {key: self.artifacts_dir / filename for key, filename in names.items()}
+        payloads = {
+            key: self._read_json_object(path)
+            for key, path in paths.items()
+            if key != "markdown"
+        }
+        decision = self._validated_final_decision(payloads.get("decision"))
+        document = self._validated_report_document(payloads.get("document"))
+        structured_report = payloads.get("structured_report")
+        recommendation = payloads.get("recommendation")
+        evidence = self._validated_evidence_bundle(payloads.get("evidence"))
+
+        report_sections_complete = self._sections_complete(document, structured_report)
+        structured_outputs_complete = self._structured_outputs_complete(
+            recommendation, structured_report
+        )
+        formal_fact_provenance_complete = self._formal_fact_provenance_complete(evidence)
+        decision_projection_consistent = self._decision_projection_consistent(
+            decision, document, recommendation, structured_report
+        )
+        delivery_validation_passed = self._delivery_validation_passed(
+            paths, decision, document
+        )
+        return (
+            {
+                "report_sections_complete": report_sections_complete,
+                "structured_outputs_complete": structured_outputs_complete,
+                "formal_fact_provenance_complete": formal_fact_provenance_complete,
+                "decision_projection_consistent": decision_projection_consistent,
+                "delivery_validation_passed": delivery_validation_passed,
+            },
+            decision.final_decision if decision is not None else None,
+        )
+
+    @staticmethod
+    def _read_json_object(path: Path) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _validated_final_decision(payload: dict[str, Any] | None) -> FinalDecisionRecord | None:
+        try:
+            return FinalDecisionRecord.model_validate(payload)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _validated_report_document(payload: dict[str, Any] | None) -> ReportDocument | None:
+        try:
+            return ReportDocument.model_validate(payload)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _validated_evidence_bundle(
+        payload: dict[str, Any] | None,
+    ) -> ResearchEvidenceBundle | None:
+        try:
+            return ResearchEvidenceBundle.model_validate(payload)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _sections_complete(
+        document: ReportDocument | None, structured_report: dict[str, Any] | None
+    ) -> bool:
+        if document is None or not isinstance(structured_report, dict):
+            return False
+        sections = structured_report.get("sections")
+        return (
+            tuple(document.sections) == REQUIRED_SECTION_KEYS
+            and all(section.content.strip() for section in document.sections.values())
+            and isinstance(sections, dict)
+            and tuple(sections) == REQUIRED_SECTION_KEYS
+            and all(str(value).strip() for value in sections.values())
+        )
+
+    @staticmethod
+    def _structured_outputs_complete(
+        recommendation: dict[str, Any] | None, structured_report: dict[str, Any] | None
+    ) -> bool:
+        if not isinstance(recommendation, dict) or not isinstance(structured_report, dict):
+            return False
+        return bool(
+            str(recommendation.get("summary", "")).strip()
+            and isinstance(recommendation.get("catalysts"), list)
+            and recommendation["catalysts"]
+            and isinstance(recommendation.get("risks"), list)
+            and recommendation["risks"]
+            and str(structured_report.get("title", "")).strip()
+            and isinstance(structured_report.get("sections"), dict)
+        )
+
+    @staticmethod
+    def _formal_fact_provenance_complete(bundle: ResearchEvidenceBundle | None) -> bool:
+        if bundle is None:
+            return False
+        required_financial_fields = set(FORMAL_GATE_REQUIRED_FIELDS) - {"stock_price"}
+        facts_by_field = {
+            fact.field_name: fact for fact in bundle.financial_facts if fact.formal_eligible
+        }
+        return all(
+            field_name in facts_by_field
+            and bool(facts_by_field[field_name].source_url)
+            and bool(facts_by_field[field_name].period_end)
+            and bool(facts_by_field[field_name].accession)
+            and bool(facts_by_field[field_name].form)
+            and bool(facts_by_field[field_name].source_tag)
+            for field_name in required_financial_fields
+        )
+
+    @staticmethod
+    def _decision_projection_consistent(
+        decision: FinalDecisionRecord | None,
+        document: ReportDocument | None,
+        recommendation: dict[str, Any] | None,
+        structured_report: dict[str, Any] | None,
+    ) -> bool:
+        if (
+            decision is None
+            or document is None
+            or not isinstance(recommendation, dict)
+            or not isinstance(structured_report, dict)
+        ):
+            return False
+        return (
+            document.company_name == decision.company_name
+            and document.ticker.upper() == decision.company_ticker.upper()
+            and document.report_mode == decision.final_delivery_state
+            and recommendation.get("status") == decision.final_decision
+            and recommendation.get("final_delivery_state") == decision.final_delivery_state
+            and recommendation.get("stance") == document.stance
+            and structured_report.get("final_decision") == decision.final_decision
+            and structured_report.get("final_delivery_state") == decision.final_delivery_state
+            and structured_report.get("stance") == document.stance
+        )
+
+    @staticmethod
+    def _delivery_validation_passed(
+        paths: dict[str, Path],
+        decision: FinalDecisionRecord | None,
+        document: ReportDocument | None,
+    ) -> bool:
+        if decision is None or document is None:
+            return False
+        try:
+            package = DeliveryPackage(
+                decision_json=paths["decision"].read_text(encoding="utf-8"),
+                document_json=paths["document"].read_text(encoding="utf-8"),
+                markdown=paths["markdown"].read_text(encoding="utf-8"),
+                recommendation_json=paths["recommendation"].read_text(encoding="utf-8"),
+                structured_report_json=paths["structured_report"].read_text(encoding="utf-8"),
+            )
+        except OSError:
+            return False
+        return DeliveryValidator().validate_package(package).valid
 
     def _update_summary(self, latest_metrics: dict[str, Any]) -> dict[str, Any]:
         summary_path = self.artifacts_dir / "evaluation_summary.json"
