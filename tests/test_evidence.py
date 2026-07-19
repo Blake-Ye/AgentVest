@@ -228,6 +228,45 @@ def test_ambiguous_only_evidence_emits_targeted_period_gap():
     )
 
 
+@pytest.mark.parametrize(
+    ("missing_key", "missing_flag"),
+    [("fy", "fiscal_year_missing"), ("fp", "fiscal_period_missing")],
+)
+def test_ambiguous_period_fact_is_auditable_but_not_formal(
+    missing_key,
+    missing_flag,
+):
+    entry = {
+        "start": "2024-09-29",
+        "end": "2025-09-27",
+        "val": 416_161_000_000,
+        "fy": 2025,
+        "fp": "FY",
+        "form": "10-K",
+        "filed": "2025-10-31",
+        "accn": "0000320193-25-000079",
+    }
+    entry.pop(missing_key)
+    payload = {
+        "cik": 320193,
+        "facts": {"us-gaap": {"Revenues": {"units": {"USD": [entry]}}}},
+    }
+
+    bundle = EvidenceNormalizer().normalize_company_facts(
+        company_name="Apple Inc.", ticker="AAPL", payload=payload
+    )
+
+    revenue = bundle.require_fact("revenue")
+    assert revenue in bundle.financial_facts
+    assert missing_flag in revenue.quality_flags
+    assert revenue.formal_eligible is False
+    assert bundle.formal_facts() == []
+    assert any(
+        gap.code == "ambiguous_financial_period" and gap.fields == ["revenue"]
+        for gap in bundle.gaps
+    )
+
+
 def test_point_in_time_shares_are_exposed_as_shares_outstanding_not_diluted(
     apple_companyfacts,
 ):

@@ -28,7 +28,15 @@ class FinancialFact(BaseModel):
 
     @model_validator(mode="after")
     def derive_quality_flags(self) -> "FinancialFact":
-        required = ("period_end", "form", "accession", "filed_at", "source_url")
+        required = (
+            "fiscal_year",
+            "fiscal_period",
+            "period_end",
+            "form",
+            "accession",
+            "filed_at",
+            "source_url",
+        )
         self.quality_flags = sorted(
             set(self.quality_flags)
             | {f"{name}_missing" for name in required if getattr(self, name) in (None, "")}
