@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from multi_agent.core.evidence import EvidenceTarget
 
@@ -51,6 +51,7 @@ FinalDeliveryState = Literal[
     "blocked_notice",
 ]
 GateControlDecision = Literal["passed", "rerun", "blocked", "evidence_limited"]
+ToolHealthStatus = Literal["healthy", "degraded", "failed"]
 
 
 class RepairAction(BaseModel):
@@ -120,11 +121,23 @@ class CoverageSummary(BaseModel):
 class ToolHealthSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    overall_status: str = "healthy"
+    overall_status: ToolHealthStatus = "healthy"
     failed_tools: list[str] = Field(default_factory=list)
     degraded_tools: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     tool_status: list[dict[str, str]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_overall_status(self) -> "ToolHealthSummary":
+        if self.overall_status == "healthy" and (self.failed_tools or self.degraded_tools):
+            raise ValueError("overall_status=healthy requires no failed_tools or degraded_tools")
+        if self.overall_status == "failed" and not self.failed_tools:
+            raise ValueError("overall_status=failed requires failed_tools")
+        if self.overall_status == "degraded" and not (
+            self.degraded_tools or self.failed_tools
+        ):
+            raise ValueError("overall_status=degraded requires degraded_tools or failed_tools")
+        return self
 
 
 class ReviewDecision(BaseModel):

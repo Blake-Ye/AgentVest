@@ -107,6 +107,7 @@ class ConfidenceGatePolicy:
         )
         reviewed_degraded = set(contract.tool_health_summary.degraded_tools)
         reviewed_failed = set(contract.tool_health_summary.failed_tools)
+        reviewed_status = contract.tool_health_summary.overall_status
         actions: list[RepairAction] = []
         if raw_degraded:
             actions.append(
@@ -134,6 +135,18 @@ class ConfidenceGatePolicy:
             )
         declared_problem_tools = reviewed_degraded | reviewed_failed
         raw_problem_tools = set(raw_degraded) | set(raw_failed)
+        if not _tool_health_summary_is_consistent(
+            status=reviewed_status,
+            failed_tools=reviewed_failed,
+            degraded_tools=reviewed_degraded,
+        ):
+            actions.append(
+                RepairAction(
+                    target="data_quality_reviewer",
+                    code="tool_health_contract_inconsistent",
+                    instruction="修复审查契约中 overall_status 与工具列表的矛盾后重新审查。",
+                )
+            )
         if declared_problem_tools != raw_problem_tools or (
             raw_problem_tools and contract.tool_health_summary.overall_status == "healthy"
         ):
@@ -221,3 +234,15 @@ def _deduplicate_actions(actions: list[RepairAction]) -> list[RepairAction]:
         )
         unique[key] = normalized
     return [unique[key] for key in sorted(unique)]
+
+
+def _tool_health_summary_is_consistent(
+    *, status: object, failed_tools: set[str], degraded_tools: set[str]
+) -> bool:
+    if status == "healthy":
+        return not failed_tools and not degraded_tools
+    if status == "failed":
+        return bool(failed_tools)
+    if status == "degraded":
+        return bool(degraded_tools or failed_tools)
+    return False

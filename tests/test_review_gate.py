@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from multi_agent.core.confidence_gate import ConfidenceGatePolicy
 from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
-from multi_agent.core.review_contracts import RepairAction, ReviewContract
+from multi_agent.core.review_contracts import RepairAction, ReviewContract, ToolHealthSummary
 from multi_agent.tools.investment_tools import build_research_evidence_bundle
 
 
@@ -324,3 +324,32 @@ def test_duplicate_repair_actions_canonicalize_field_and_source_order(apple_bund
     assert result.final_decision == "rerun"
     assert result.repair_actions[0].fields == ["cash", "revenue"]
     assert result.repair_actions[0].sources == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    "tool_health_summary",
+    [
+        {"overall_status": "failed"},
+        {"overall_status": "degraded"},
+        {"overall_status": "healthy", "failed_tools": ["quote"]},
+        {"overall_status": "healthy", "degraded_tools": ["tavily"]},
+    ],
+)
+def test_contract_rejects_inconsistent_tool_health_summary(
+    tool_health_summary: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="overall_status"):
+        _contract(tool_health_summary=tool_health_summary)
+
+
+def test_gate_reruns_for_nonhealthy_summary_that_bypasses_model_validation(apple_bundle) -> None:
+    contract = _contract().model_copy(
+        update={"tool_health_summary": ToolHealthSummary.model_construct(overall_status="failed")}
+    )
+
+    result = ConfidenceGatePolicy.default().evaluate(_healthy_bundle(apple_bundle), contract)
+
+    assert result.final_decision == "rerun"
+    assert [action.code for action in result.repair_actions] == [
+        "tool_health_contract_inconsistent"
+    ]

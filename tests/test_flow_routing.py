@@ -55,6 +55,7 @@ def test_review_contract_accepts_analysis_and_report_stage_payloads() -> None:
             "gate_financial_coverage_score": 0.5,
         },
         tool_health_summary={
+            "overall_status": "degraded",
             "failed_tools": [],
             "degraded_tools": ["financial_field_completeness_tool"],
         },
@@ -84,6 +85,7 @@ def test_review_contract_accepts_analysis_and_report_stage_payloads() -> None:
             "gate_financial_coverage_score": 1.0,
         },
         tool_health_summary={
+            "overall_status": "failed",
             "failed_tools": ["consistency_checker"],
             "degraded_tools": [],
         },
