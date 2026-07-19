@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field
 
 from multi_agent.core.evidence import ResearchEvidenceBundle
 from multi_agent.core.market import MarketValidationResult
-from multi_agent.core.review_contracts import GateDecision
+from multi_agent.core.report_document import ReportDocument, ReportGenerationContext
+from multi_agent.core.review_contracts import FinalDecisionRecord, GateDecision, ReviewContract
 
 ModelTier: TypeAlias = Literal["fast", "deep", "review"]
 FinalDecision: TypeAlias = Literal["passed", "blocked", "evidence_limited"]
@@ -44,3 +45,8 @@ class ResearchRunState(BaseModel):
     gate_decision: GateDecision | None = None
     final_decision: FinalDecision | None = None
     evidence_bundle: ResearchEvidenceBundle | None = None
+    analysis_review_contract: ReviewContract | None = None
+    report_review_contract: ReviewContract | None = None
+    report_context: ReportGenerationContext | None = None
+    report_document: ReportDocument | None = None
+    final_decision_record: FinalDecisionRecord | None = None

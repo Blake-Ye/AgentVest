@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from multi_agent.core.report_document import render_recommendation, render_structured_report
+
 _URL_PATTERN = re.compile(r"https?://[^\s)>\"']+")
 
 
@@ -202,6 +204,7 @@ def _infer_stance(report_content: str) -> tuple[str, str]:
     return "watch", "观察"
 
 
+# Historical Markdown parser retained only for rebuilding legacy report artifacts.
 def build_structured_report(
     *,
     company_name: str,
@@ -262,6 +265,7 @@ def build_structured_report(
     }
 
 
+# Historical Markdown parser retained only for rebuilding legacy recommendation artifacts.
 def build_structured_recommendation(
     *,
     company_name: str,
