@@ -14,7 +14,9 @@ from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
 from multi_agent.core.evidence import ResearchEvidenceBundle
 from multi_agent.core.market import MarketValidationResult
 from multi_agent.core.delivery import DeliveryValidator
-from multi_agent.core.report_document import ReportDocument, ReportGenerationContext, SourceReference
+from multi_agent.core.report_document import (
+    REQUIRED_SECTION_KEYS, SECTION_HEADINGS, ReportDocument, ReportGenerationContext, SourceReference,
+)
 from multi_agent.core.review_contracts import (
     FinalDecisionRecord,
     GateDecision,
@@ -933,7 +935,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             "blocked": "blocked_notice",
         }.get(gate.final_decision, "blocked_notice")
 
-    def _build_report_context(self) -> ReportGenerationContext:
+    def _build_report_context(self, revision_instructions: tuple[str, ...] = ()) -> ReportGenerationContext:
         gate = self.state.analysis_gate_decision or self.state.gate_decision
         bundle = self._evidence_bundle_for_gate()
         contract = self.state.analysis_review_contract
@@ -956,6 +958,16 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             for fact in bundle.formal_facts()
             if fact.source_url
         ]
+        sources.extend(
+            SourceReference(source_id=f"market:{index}", title="市场快照", url=item.source_url,
+                            source_tag=item.source_tag, field_name="stock_price")
+            for index, item in enumerate(bundle.market_snapshots)
+        )
+        sources.extend(
+            SourceReference(source_id=f"event:{item.event_id}", title=item.title, url=item.source_url,
+                            source_tag=item.source_type, field_name=None)
+            for item in bundle.events if item.independently_confirmed
+        )
         return ReportGenerationContext(
             company_name=self.state.company_name,
             ticker=self.state.input_ticker,
@@ -966,10 +978,11 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             canonical_sources_json=tuple(
                 source.model_dump_json() for source in sorted(sources, key=lambda item: item.source_id)
             ),
+            revision_instructions=revision_instructions,
         )
 
-    def _typed_writer_document(self) -> ReportDocument:
-        context = self._build_report_context()
+    def _typed_writer_document(self, revision_instructions: tuple[str, ...] = ()) -> ReportDocument:
+        context = self._build_report_context(revision_instructions)
         self.state.report_context = context
         writer_input = {
             "REPORT_CONTEXT_JSON": context.model_dump_json(),
@@ -1300,8 +1313,28 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             )
         return result
 
+    def _blocked_document(self, reasons: list[str], trust_score: int) -> ReportDocument:
+        reason = "；".join(reasons) or "控制面未满足交付条件"
+        return ReportDocument.model_validate({
+            "company_name": self.state.company_name,
+            "ticker": self.state.input_ticker,
+            "report_mode": "blocked_notice",
+            "title": f"{self.state.company_name} 投资研究阻断通知",
+            "stance": "blocked",
+            "executive_summary": f"报告已阻断：{reason}。",
+            "catalysts": ["阻断状态下不提供催化剂判断。"],
+            "risks": [reason],
+            "sections": {
+                key: {"key": key, "heading": SECTION_HEADINGS[key], "content": f"报告已阻断：{reason}。", "claim_ids": []}
+                for key in REQUIRED_SECTION_KEYS
+            },
+            "claims": [], "sources": [], "trust_score": trust_score, "allowed_claim_ids": [],
+        })
+
     def _finalize(self, gate: GateDecision) -> dict[str, Any]:
         gate = self._coerce_terminal_gate(gate)
+        if self._typed_run() and gate.final_decision == "blocked" and self.state.report_document is None:
+            self.state.report_document = self._blocked_document(list(gate.blocking_reasons), gate.trust_score)
         if self._typed_run():
             decision = FinalDecisionRecord(
                 company_name=self.state.company_name,
@@ -1503,8 +1536,12 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                     break
                 self.state.rerun_budget["report_writing_analyst"] = remaining - 1
                 self.state.model_tier_overrides = {"report_writing_analyst": "deep"}
+                feedback = tuple([
+                    *self.state.report_review_contract.rerun_reasons,
+                    *(action.instruction for action in self.state.report_review_contract.repair_actions),
+                ]) if self.state.report_review_contract is not None else tuple(report_gate.blocking_reasons)
                 try:
-                    report = self._typed_writer_document()
+                    report = self._typed_writer_document(feedback)
                     self.state.report_document = report
                 except ValueError:
                     report_gate = GateDecision(

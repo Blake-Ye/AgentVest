@@ -69,6 +69,7 @@ class ReportGenerationContext(BaseModel):
     analysis_review_contract: ReviewContract
     allowed_claim_ids: tuple[str, ...] = ()
     canonical_sources_json: tuple[str, ...] = ()
+    revision_instructions: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def validate_locked_delivery_mode(self) -> "ReportGenerationContext":
