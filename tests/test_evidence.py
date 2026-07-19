@@ -77,7 +77,7 @@ def test_financial_facts_from_different_fiscal_years_are_not_period_compatible()
     assert periods_are_compatible(current_period, stale_period) is False
 
 
-def test_flow_and_instant_facts_with_same_fiscal_period_are_compatible():
+def test_mixed_instant_and_flow_facts_with_same_period_identity_are_compatible():
     revenue = FinancialFact(
         field_name="revenue",
         value=100,
@@ -102,6 +102,64 @@ def test_flow_and_instant_facts_with_same_fiscal_period_are_compatible():
     )
 
     assert periods_are_compatible(revenue, shares) is True
+
+
+def test_same_end_annual_and_quarterly_facts_are_not_period_compatible():
+    annual = FinancialFact(
+        field_name="revenue",
+        value=100,
+        unit="USD",
+        period_start=date(2024, 9, 29),
+        period_end=date(2025, 9, 27),
+        fiscal_year=2025,
+        fiscal_period="FY",
+        source_tag="sec_companyfacts",
+    )
+    quarterly = annual.model_copy(
+        update={"period_start": date(2025, 6, 29), "fiscal_period": "Q4"}
+    )
+
+    assert periods_are_compatible(annual, quarterly) is False
+
+
+def test_same_period_flows_with_different_durations_are_not_period_compatible():
+    annual = FinancialFact(
+        field_name="revenue",
+        value=100,
+        unit="USD",
+        period_start=date(2024, 9, 29),
+        period_end=date(2025, 9, 27),
+        fiscal_year=2025,
+        fiscal_period="FY",
+        source_tag="sec_companyfacts",
+    )
+    shorter_duration = annual.model_copy(update={"period_start": date(2025, 1, 1)})
+
+    assert periods_are_compatible(annual, shorter_duration) is False
+
+
+def test_normalizer_prefers_annual_over_newer_quarterly_same_end_candidate(apple_companyfacts):
+    entries = apple_companyfacts["facts"]["us-gaap"][
+        "RevenueFromContractWithCustomerExcludingAssessedTax"
+    ]["units"]["USD"]
+    quarterly = dict(entries[-1])
+    quarterly.update(
+        {
+            "start": "2025-06-29",
+            "val": 99_000_000_000,
+            "fp": "Q4",
+            "filed": "2025-11-15",
+        }
+    )
+    entries.append(quarterly)
+
+    bundle = EvidenceNormalizer().normalize_company_facts(
+        company_name="Apple Inc.", ticker="AAPL", payload=apple_companyfacts
+    )
+
+    revenue = bundle.require_fact("revenue")
+    assert revenue.value == 416_161_000_000
+    assert revenue.fiscal_period == "FY"
 
 
 def test_financial_fact_with_incomplete_period_metadata_is_not_period_compatible():
@@ -182,6 +240,19 @@ def test_point_in_time_shares_are_exposed_as_shares_outstanding_not_diluted(
     )
     with pytest.raises(ValueError, match="diluted_shares"):
         bundle.require_fact("diluted_shares")
+
+
+def test_dimension_member_is_not_mapped_as_shares_outstanding(apple_companyfacts):
+    us_gaap = apple_companyfacts["facts"]["us-gaap"]
+    entity_shares = us_gaap.pop("EntityCommonStockSharesOutstanding")
+    us_gaap["CommonStocksIncludingAdditionalPaidInCapitalMember"] = entity_shares
+
+    bundle = EvidenceNormalizer().normalize_company_facts(
+        company_name="Apple Inc.", ticker="AAPL", payload=apple_companyfacts
+    )
+
+    with pytest.raises(ValueError, match="shares_outstanding"):
+        bundle.require_fact("shares_outstanding")
 
 
 def test_weighted_average_diluted_share_concept_maps_to_diluted_shares(apple_companyfacts):

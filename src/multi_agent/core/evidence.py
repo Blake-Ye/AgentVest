@@ -133,15 +133,19 @@ class ResearchEvidenceBundle(BaseModel):
 
 
 def periods_are_compatible(left: FinancialFact, right: FinancialFact) -> bool:
-    """Compare SEC reporting periods without treating flow and instant facts as incompatible."""
+    """Compare SEC period identity while allowing an instant to relate to a flow's end date."""
     if not _has_complete_period(left) or not _has_complete_period(right):
         return False
-    if (
-        left.fiscal_year != right.fiscal_year
-    ):
+    if left.fiscal_year != right.fiscal_year:
+        return False
+    if left.fiscal_period != right.fiscal_period:
+        return False
+    if left.period_end != right.period_end:
         return False
     if (
-        left.period_end != right.period_end
+        left.period_start is not None
+        and right.period_start is not None
+        and left.period_start != right.period_start
     ):
         return False
     return True
@@ -177,7 +181,6 @@ _FIELD_CONCEPTS: dict[str, tuple[str, ...]] = {
     "shares_outstanding": (
         "EntityCommonStockSharesOutstanding",
         "CommonStockSharesOutstanding",
-        "CommonStocksIncludingAdditionalPaidInCapitalMember",
     ),
     "diluted_shares": (
         "WeightedAverageNumberOfDilutedSharesOutstanding",
@@ -231,8 +234,8 @@ class EvidenceNormalizer:
                         field_name=field_name,
                         candidate=candidate,
                         message=(
-                            "SEC Company Facts candidate is missing fiscal year or period end "
-                            "and cannot be matched confidently."
+                            "SEC Company Facts candidate is missing fiscal year, fiscal period, "
+                            "or period end and cannot be matched confidently."
                         ),
                     )
                 )
@@ -246,7 +249,7 @@ class EvidenceNormalizer:
                         field_name=field_name,
                         candidate=winner,
                         message=(
-                            "No SEC Company Facts candidate has both fiscal year and period end; "
+                            "No SEC Company Facts candidate has fiscal year, fiscal period, and period end; "
                             "the selected fact is period-ambiguous."
                         ),
                     )
@@ -334,7 +337,11 @@ def _select_newest_compatible_candidate(candidates: list[_CandidateFact]) -> _Ca
 
 
 def _has_complete_period(fact: FinancialFact) -> bool:
-    return fact.fiscal_year is not None and fact.period_end is not None
+    return (
+        fact.fiscal_year is not None
+        and bool(fact.fiscal_period)
+        and fact.period_end is not None
+    )
 
 
 def _period_gap(
@@ -352,14 +359,32 @@ def _period_gap(
     )
 
 
-def _period_sort_key(candidate: _CandidateFact) -> tuple[int, date, str, str]:
+def _period_sort_key(candidate: _CandidateFact) -> tuple[int, int, date, int, str]:
     fact = candidate.fact
     return (
         fact.fiscal_year or 0,
+        _fiscal_period_rank(fact.fiscal_period),
         fact.period_end or date.min,
-        fact.fiscal_period or "",
+        _flow_duration_days(fact),
         candidate.frame,
     )
+
+
+def _fiscal_period_rank(fiscal_period: str | None) -> int:
+    if fiscal_period == "FY":
+        return 5
+    if fiscal_period and len(fiscal_period) == 2 and fiscal_period[0] == "Q":
+        try:
+            return int(fiscal_period[1])
+        except ValueError:
+            return 0
+    return 0
+
+
+def _flow_duration_days(fact: FinancialFact) -> int:
+    if fact.period_start is None or fact.period_end is None:
+        return -1
+    return (fact.period_end - fact.period_start).days
 
 
 def _filing_sort_key(candidate: _CandidateFact) -> tuple[date, str, str]:
