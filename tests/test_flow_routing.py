@@ -2228,3 +2228,56 @@ def test_typed_flow_blocks_malformed_or_rejecting_logic_review() -> None:
 
     assert result["status"] == "blocked"
     assert "logic_reviewer_requested_block" in result["blocking_reasons"]
+
+
+def test_typed_report_rework_passes_strict_feedback_to_second_writer() -> None:
+    bundle = _typed_bundle()
+    writer_inputs: list[dict[str, object]] = []
+    reviewed_documents: list[object] = []
+
+    rerun_review = _typed_report_contract(outcome="rerun").model_dump(mode="json")
+    rerun_review["rerun_reasons"] = ["补充收入来源绑定。"]
+    rerun_review["repair_actions"] = [{
+        "target": "report_writing_analyst", "code": "bind_source",
+        "instruction": "将收入 claim 绑定 SEC 来源。",
+    }]
+    reviews = iter([rerun_review, _typed_report_contract().model_dump(mode="json")])
+
+    def writer(inputs: dict[str, object]) -> dict[str, object]:
+        writer_inputs.append(inputs)
+        payload = _typed_writer_payload()
+        payload["executive_summary"] = (
+            "已根据逻辑审查反馈重新绑定收入来源。"
+            if len(writer_inputs) == 2
+            else "基于已验证的财务证据维持持有观点。"
+        )
+        return payload
+
+    def reviewer(document: object) -> dict[str, object]:
+        reviewed_documents.append(document)
+        return next(reviews)
+
+    result = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": _typed_contract().model_dump(mode="json"),
+        },
+        report_writer=writer,
+        report_reviewer=reviewer,
+        initial_state=MarketReviewFlowState(
+            request_id="typed-rework", company_name="Apple Inc.", input_ticker="AAPL",
+            evidence_bundle=bundle, execution_mode="new",
+            rerun_budget={"report_writing_analyst": 1},
+        ),
+    ).kickoff()
+
+    assert result["status"] == "passed"
+    assert len(writer_inputs) == 2
+    first = json.loads(str(writer_inputs[0]["REPORT_CONTEXT_JSON"]))
+    second = json.loads(str(writer_inputs[1]["REPORT_CONTEXT_JSON"]))
+    assert first["revision_instructions"] == []
+    assert "补充收入来源绑定。" in second["revision_instructions"]
+    assert "将收入 claim 绑定 SEC 来源。" in second["revision_instructions"]
+    assert len(reviewed_documents) == 2
+    assert reviewed_documents[0].executive_summary != reviewed_documents[1].executive_summary
+    assert reviewed_documents[1].executive_summary == "已根据逻辑审查反馈重新绑定收入来源。"
