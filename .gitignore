@@ -1,5 +1,6 @@
 .env
 .crewai_home/
+.crewai-storage/
 .superpowers/
 .worktrees/
 __pycache__/
