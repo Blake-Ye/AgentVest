@@ -9,7 +9,7 @@ import pytest
 
 from multi_agent.core.artifact_paths import build_run_artifact_paths
 from multi_agent.core.evidence import FinancialFact, ResearchEvidenceBundle
-from multi_agent.core.report_document import ReportDocument, ReportGenerationContext
+from multi_agent.core.report_document import ReportDocument, ReportGenerationContext, SourceReference
 from multi_agent.core.review_contracts import (
     CoverageSummary,
     DeliveryEligibility,
@@ -56,6 +56,13 @@ def _formal_document() -> ReportDocument:
             ),
         ),
         allowed_claim_ids=["revenue"],
+        canonical_sources_json=(
+            SourceReference(
+                source_id="sec-10k", title="Apple 2025 Form 10-K",
+                url="https://www.sec.gov/Archives/edgar/data/320193/aapl-20250927.htm",
+                source_tag="sec_filing",
+            ).model_dump_json(),
+        ),
     )
     sections = {
         key: {

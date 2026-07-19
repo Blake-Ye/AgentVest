@@ -11,6 +11,7 @@ from multi_agent.core.evidence import FinancialFact, ResearchEvidenceBundle
 from multi_agent.core.report_document import (
     ReportDocument,
     ReportGenerationContext,
+    SourceReference,
     render_recommendation,
     render_structured_report,
 )
@@ -67,6 +68,13 @@ def _context(report_mode: str = "formal_report") -> ReportGenerationContext:
         evidence_bundle=evidence,
         analysis_review_contract=review,
         allowed_claim_ids=["revenue-claim"],
+        canonical_sources_json=(
+            SourceReference(
+                source_id="sec-10k", title="Apple 2025 Form 10-K",
+                url="https://www.sec.gov/Archives/edgar/data/320193/aapl-20250927.htm",
+                source_tag="sec_filing", field_name="revenue",
+            ).model_dump_json(),
+        ),
     )
 
 

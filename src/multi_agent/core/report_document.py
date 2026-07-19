@@ -169,10 +169,12 @@ class ReportDocument(BaseModel):
             }
         )
         canonical_sources = {source.source_id: source for source in context.canonical_sources()}
+        raw_sources = payload.get("sources", [])
+        if not isinstance(raw_sources, list):
+            raise ValueError("writer sources must be a list")
+        if not canonical_sources and raw_sources:
+            raise ValueError("writer sources are not allowed without canonical sources")
         if canonical_sources:
-            raw_sources = payload.get("sources", [])
-            if not isinstance(raw_sources, list):
-                raise ValueError("writer sources must be a list")
             requested_ids = []
             for raw_source in raw_sources:
                 if not isinstance(raw_source, dict):

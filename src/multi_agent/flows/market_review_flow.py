@@ -1522,6 +1522,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
 
     @listen(review_evidence_limited_report)
     def finalize_evidence_limited_delivery(self, report_gate: GateDecision) -> Any:
+        if self._typed_run():
+            return self.finalize_delivery(report_gate)
         self.state.report_gate_decision = report_gate
         if report_gate.final_decision == "blocked":
             return self._finalize(report_gate)
