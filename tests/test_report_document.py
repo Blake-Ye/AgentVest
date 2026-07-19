@@ -190,6 +190,25 @@ def test_writer_cannot_forge_or_invent_canonical_sources(field: str) -> None:
         )
 
 
+def test_canonical_event_source_is_accepted_and_forgery_is_rejected() -> None:
+    context = _formal_context().model_copy(update={
+        "allowed_claim_ids": ("event:launch",),
+        "canonical_sources_json": (SourceReference(
+            source_id="event:launch", title="Launch event", url="https://example.com/launch",
+            source_tag="news",
+        ).model_dump_json(),),
+    })
+    payload = _formal_payload()
+    payload["claims"] = [{"claim_id": "event:launch", "text": "Launch is confirmed.", "critical": True, "source_ids": ["event:launch"]}]
+    for key, section in payload["sections"].items():
+        section["claim_ids"] = ["event:launch"] if key != "source_index" else []
+    payload["sources"] = [{"source_id": "event:launch", "title": "Launch event", "url": "https://example.com/launch", "source_tag": "news"}]
+    assert ReportDocument.from_writer_payload(context=context, writer_payload=payload, trust_score=91).sources[0].source_id == "event:launch"
+    payload["sources"][0]["url"] = "https://evil.example/launch"
+    with pytest.raises(ValueError, match="forged canonical source"):
+        ReportDocument.from_writer_payload(context=context, writer_payload=payload, trust_score=91)
+
+
 
     payload = _formal_payload()
     payload["sources"][0]["source_id"] = "unknown"  # type: ignore[index]
