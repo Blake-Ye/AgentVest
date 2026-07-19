@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import date
 from pathlib import Path
 
@@ -109,6 +110,8 @@ def formal_document() -> ReportDocument:
 
 def _decision() -> FinalDecisionRecord:
     return FinalDecisionRecord(
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
         final_decision="passed",
         final_delivery_state="formal_report",
         trust_score=90,
@@ -134,7 +137,13 @@ def test_validator_rejects_empty_structured_sections(formal_document: ReportDocu
     sections = dict(structured["sections"])
     sections["financial_analysis"] = ""
     structured["sections"] = sections
-    package = package.model_copy(update={"structured_report": structured})
+    package = DeliveryPackage(
+        decision_json=package._decision_json,  # type: ignore[attr-defined]
+        document_json=package._document_json,  # type: ignore[attr-defined]
+        markdown=package.markdown,
+        recommendation_json=package._recommendation_json,  # type: ignore[attr-defined]
+        structured_report_json=json.dumps(structured),
+    )
 
     result = DeliveryValidator().validate_package(package)
 
@@ -155,3 +164,58 @@ def test_atomic_writer_writes_only_a_valid_single_truth_package(
     assert json.loads(paths.final_decision_path.read_text(encoding="utf-8"))["final_decision"] == "passed"
     assert json.loads(paths.structured_recommendation_path.read_text(encoding="utf-8"))["stance"] == "hold"
     assert "## 财务分析与估值" in paths.final_report_path.read_text(encoding="utf-8")
+
+
+def _terminal_bytes(paths) -> dict[Path, bytes]:
+    return {
+        path: path.read_bytes()
+        for path in (
+            paths.report_document_path,
+            paths.final_report_path,
+            paths.structured_recommendation_path,
+            paths.structured_report_path,
+            paths.final_decision_path,
+        )
+    }
+
+
+def test_delivery_commit_rolls_back_every_terminal_file_when_replacement_fails(
+    tmp_path: Path, formal_document: ReportDocument
+) -> None:
+    from multi_agent.core.delivery import DeliveryPackage, write_delivery_package
+
+    paths = build_run_artifact_paths(tmp_path / "run")
+    previous = DeliveryPackage.from_document(decision=_decision(), document=formal_document)
+    write_delivery_package(paths=paths, package=previous)
+    before = _terminal_bytes(paths)
+    next_document = formal_document.model_copy(update={"title": "Next generation"})
+    next_package = DeliveryPackage.from_document(decision=_decision(), document=next_document)
+
+    def fail_mid_commit(source: str | bytes | os.PathLike[str], target: str | bytes | os.PathLike[str]) -> None:
+        if Path(target) == paths.structured_report_path and ".delivery-stage-" in Path(source).name:
+            raise OSError("injected replacement failure")
+        os.replace(source, target)
+
+    with pytest.raises(OSError, match="injected replacement failure"):
+        write_delivery_package(paths=paths, package=next_package, replace_file=fail_mid_commit)
+
+    assert _terminal_bytes(paths) == before
+
+
+def test_delivery_package_snapshots_cannot_be_mutated_after_validation(
+    tmp_path: Path, formal_document: ReportDocument
+) -> None:
+    from multi_agent.core.delivery import DeliveryPackage, write_delivery_package
+
+    paths = build_run_artifact_paths(tmp_path / "run")
+    package = DeliveryPackage.from_document(decision=_decision(), document=formal_document)
+    package.recommendation["status"] = "blocked"
+    package.structured_report["sections"]["financial_analysis"] = "tampered"
+    formal_document.sections["financial_analysis"].content = "caller mutation"
+
+    write_delivery_package(paths=paths, package=package)
+
+    recommendation = json.loads(paths.structured_recommendation_path.read_text(encoding="utf-8"))
+    report = json.loads(paths.structured_report_path.read_text(encoding="utf-8"))
+    assert recommendation["status"] == "passed"
+    assert report["sections"]["financial_analysis"] == "financial_analysis content"

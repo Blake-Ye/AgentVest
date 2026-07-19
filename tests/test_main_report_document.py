@@ -131,6 +131,8 @@ def _workflow_result(report_mode: str = "formal_report") -> dict[str, object]:
         "trust_score": 91,
         "report_document": document.model_dump(mode="json"),
         "final_decision_record": {
+            "company_name": "Apple Inc.",
+            "company_ticker": "AAPL",
             "final_decision": final_status,
             "final_delivery_state": report_mode,
             "trust_score": 91,
@@ -204,6 +206,45 @@ def test_new_run_refuses_direct_document_or_missing_writer_payload(tmp_path: Pat
     with pytest.raises(ValueError, match="serialized report_document"):
         main._materialize_new_run_report_document(
             output_paths, result={"trust_score": 91}, final_status="passed"
+        )
+
+
+def test_new_run_rejects_report_document_for_a_different_requested_company(tmp_path: Path) -> None:
+    output_paths = _output_paths(tmp_path)
+    output_paths.run_dir.mkdir(parents=True)
+    result = _workflow_result()
+    result["report_document"] = {
+        **result["report_document"],
+        "company_name": "Microsoft Corporation",
+        "ticker": "MSFT",
+    }
+
+    with pytest.raises(ValueError, match="company_name"):
+        main._write_new_run_delivery_package(
+            output_paths,
+            company_name="Apple Inc.",
+            company_ticker="AAPL",
+            result=result,
+            final_status="passed",
+        )
+
+
+def test_new_run_rejects_final_decision_for_a_different_requested_ticker(tmp_path: Path) -> None:
+    output_paths = _output_paths(tmp_path)
+    output_paths.run_dir.mkdir(parents=True)
+    result = _workflow_result()
+    result["final_decision_record"] = {
+        **result["final_decision_record"],
+        "company_ticker": "MSFT",
+    }
+
+    with pytest.raises(ValueError, match="final decision ticker"):
+        main._write_new_run_delivery_package(
+            output_paths,
+            company_name="Apple Inc.",
+            company_ticker="AAPL",
+            result=result,
+            final_status="passed",
         )
 
 

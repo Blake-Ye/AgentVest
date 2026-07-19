@@ -191,6 +191,8 @@ class GateDecision(BaseModel):
 class FinalDecisionRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    company_name: str = Field(min_length=1)
+    company_ticker: str = Field(min_length=1)
     final_decision: GateControlDecision
     final_delivery_state: FinalDeliveryState
     trust_score: int

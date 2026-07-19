@@ -22,7 +22,11 @@ from multi_agent.core.report_document import (
     render_recommendation,
     render_structured_report,
 )
-from multi_agent.core.delivery import DeliveryPackage, write_delivery_package
+from multi_agent.core.delivery import (
+    DeliveryPackage,
+    invalidate_delivery_package,
+    write_delivery_package,
+)
 from multi_agent.core.review_contracts import FinalDecisionRecord
 from multi_agent.recommendation import build_structured_recommendation, build_structured_report
 from multi_agent.resolver import CompanyResolver
@@ -446,6 +450,30 @@ def _write_failure_recommendation_output(
     )
 
 
+def _record_post_delivery_failure(output_paths: RunOutputPaths, *, error_message: str) -> None:
+    """Record ancillary failure without changing an already committed delivery."""
+    output_paths.runtime_log_path.write_text(
+        f"post_delivery_failure: {error_message}\n", encoding="utf-8"
+    )
+
+
+def _write_pre_delivery_failure(
+    output_paths: RunOutputPaths,
+    *,
+    company_name: str,
+    company_ticker: str,
+    error_message: str,
+) -> None:
+    invalidate_delivery_package(output_paths)  # type: ignore[arg-type]
+    _write_failure_outputs(output_paths, error_message=error_message)
+    _write_failure_recommendation_output(
+        output_paths,
+        company_name=company_name,
+        company_ticker=company_ticker,
+        error_message=error_message,
+    )
+
+
 def _validate_successful_outputs(
     output_paths: RunOutputPaths,
     *,
@@ -595,8 +623,20 @@ def _write_new_run_delivery_package(
     document = _materialize_new_run_report_document(
         output_paths, result=result, final_status=final_status
     )
-    del company_name, company_ticker
+    if document.company_name.strip() != company_name.strip():
+        raise ValueError("report document company_name does not match requested company")
+    if document.ticker.strip().upper() != company_ticker.strip().upper():
+        raise ValueError("report document ticker does not match requested ticker")
     decision = _materialize_new_run_final_decision(result, final_status=final_status)
+    if decision.company_name.strip() != company_name.strip():
+        raise ValueError("final decision company_name does not match requested company")
+    if decision.company_ticker.strip().upper() != company_ticker.strip().upper():
+        raise ValueError("final decision ticker does not match requested ticker")
+    if (
+        decision.company_name.strip() != document.company_name.strip()
+        or decision.company_ticker.strip().upper() != document.ticker.strip().upper()
+    ):
+        raise ValueError("final decision identity does not match report document")
     package = DeliveryPackage.from_document(decision=decision, document=document)
     write_delivery_package(paths=output_paths, package=package)  # type: ignore[arg-type]
     return package
@@ -824,6 +864,7 @@ def run():
     args = _build_parser().parse_args()
     evaluation = None
     token = None
+    delivery_committed = False
 
     try:
         settings = InvestmentResearchSettings.from_env()
@@ -884,6 +925,7 @@ def run():
             result=result,
             final_status=final_status,
         )
+        delivery_committed = True
         final_decision = delivery_package.decision.model_dump(mode="json")
         latest_metrics = evaluation.finalize(success=True)
         latest_metrics = _annotate_latest_metrics(
@@ -899,40 +941,44 @@ def run():
         print(f"运行完成，文件已写入：{output_paths.run_dir}")
     except (FatalAPIError, ValueError) as error:
         if evaluation is not None:
-            _write_failure_outputs(output_paths, error_message=f"程序已终止：{error}")
-            _write_failure_recommendation_output(
-                output_paths,
-                company_name=inputs["company_name"],
-                company_ticker=inputs["company_ticker"],
-                error_message=f"程序已终止：{error}",
-            )
+            if delivery_committed:
+                _record_post_delivery_failure(output_paths, error_message=f"程序已终止：{error}")
+            else:
+                _write_pre_delivery_failure(
+                    output_paths,
+                    company_name=inputs["company_name"],
+                    company_ticker=inputs["company_ticker"],
+                    error_message=f"程序已终止：{error}",
+                )
         if evaluation is not None:
             evaluation.finalize(success=False, error_message=str(error))
         _raise_user_facing_runtime_error(error)
     except KeyboardInterrupt:
         if evaluation is not None:
-            _write_failure_outputs(output_paths, error_message="运行被中断。")
-            _write_failure_recommendation_output(
-                output_paths,
-                company_name=inputs["company_name"],
-                company_ticker=inputs["company_ticker"],
-                error_message="运行被中断。",
-            )
+            if delivery_committed:
+                _record_post_delivery_failure(output_paths, error_message="运行被中断。")
+            else:
+                _write_pre_delivery_failure(
+                    output_paths,
+                    company_name=inputs["company_name"],
+                    company_ticker=inputs["company_ticker"],
+                    error_message="运行被中断。",
+                )
         if evaluation is not None:
             evaluation.finalize(success=False, error_message="运行被中断。")
         _raise_user_facing_runtime_error(RuntimeError("运行被中断。"))
     except Exception as error:
         if evaluation is not None:
-            _write_failure_outputs(
-                output_paths,
-                error_message=f"运行投研工作流时发生未预期错误：{error}",
-            )
-            _write_failure_recommendation_output(
-                output_paths,
-                company_name=inputs["company_name"],
-                company_ticker=inputs["company_ticker"],
-                error_message=f"运行投研工作流时发生未预期错误：{error}",
-            )
+            error_message = f"运行投研工作流时发生未预期错误：{error}"
+            if delivery_committed:
+                _record_post_delivery_failure(output_paths, error_message=error_message)
+            else:
+                _write_pre_delivery_failure(
+                    output_paths,
+                    company_name=inputs["company_name"],
+                    company_ticker=inputs["company_ticker"],
+                    error_message=error_message,
+                )
         if evaluation is not None:
             evaluation.finalize(success=False, error_message=str(error))
         _raise_user_facing_runtime_error(
@@ -978,6 +1024,7 @@ def run_trigger_payload(trigger_payload: dict[str, object]):
     """使用结构化触发器参数运行工作流。"""
     evaluation = None
     token = None
+    delivery_committed = False
     try:
         settings = InvestmentResearchSettings.from_env()
         workflow_inputs = _ensure_run_id(
@@ -1045,6 +1092,7 @@ def run_trigger_payload(trigger_payload: dict[str, object]):
             result=result,
             final_status=final_status,
         )
+        delivery_committed = True
         final_decision = delivery_package.decision.model_dump(mode="json")
         latest_metrics = evaluation.finalize(success=True)
         latest_metrics = _annotate_latest_metrics(
@@ -1061,40 +1109,44 @@ def run_trigger_payload(trigger_payload: dict[str, object]):
         return result
     except (FatalAPIError, ValueError) as error:
         if evaluation is not None:
-            _write_failure_outputs(output_paths, error_message=f"程序已终止：{error}")
-            _write_failure_recommendation_output(
-                output_paths,
-                company_name=workflow_inputs["company_name"],
-                company_ticker=workflow_inputs["company_ticker"],
-                error_message=f"程序已终止：{error}",
-            )
+            if delivery_committed:
+                _record_post_delivery_failure(output_paths, error_message=f"程序已终止：{error}")
+            else:
+                _write_pre_delivery_failure(
+                    output_paths,
+                    company_name=workflow_inputs["company_name"],
+                    company_ticker=workflow_inputs["company_ticker"],
+                    error_message=f"程序已终止：{error}",
+                )
         if evaluation is not None:
             evaluation.finalize(success=False, error_message=str(error))
         _raise_user_facing_runtime_error(error)
     except KeyboardInterrupt:
         if evaluation is not None:
-            _write_failure_outputs(output_paths, error_message="运行被中断。")
-            _write_failure_recommendation_output(
-                output_paths,
-                company_name=workflow_inputs["company_name"],
-                company_ticker=workflow_inputs["company_ticker"],
-                error_message="运行被中断。",
-            )
+            if delivery_committed:
+                _record_post_delivery_failure(output_paths, error_message="运行被中断。")
+            else:
+                _write_pre_delivery_failure(
+                    output_paths,
+                    company_name=workflow_inputs["company_name"],
+                    company_ticker=workflow_inputs["company_ticker"],
+                    error_message="运行被中断。",
+                )
         if evaluation is not None:
             evaluation.finalize(success=False, error_message="运行被中断。")
         _raise_user_facing_runtime_error(RuntimeError("运行被中断。"))
     except Exception as error:
         if evaluation is not None:
-            _write_failure_outputs(
-                output_paths,
-                error_message=f"触发器运行时发生未预期错误：{error}",
-            )
-            _write_failure_recommendation_output(
-                output_paths,
-                company_name=workflow_inputs["company_name"],
-                company_ticker=workflow_inputs["company_ticker"],
-                error_message=f"触发器运行时发生未预期错误：{error}",
-            )
+            error_message = f"触发器运行时发生未预期错误：{error}"
+            if delivery_committed:
+                _record_post_delivery_failure(output_paths, error_message=error_message)
+            else:
+                _write_pre_delivery_failure(
+                    output_paths,
+                    company_name=workflow_inputs["company_name"],
+                    company_ticker=workflow_inputs["company_ticker"],
+                    error_message=error_message,
+                )
         if evaluation is not None:
             evaluation.finalize(success=False, error_message=str(error))
         _raise_user_facing_runtime_error(

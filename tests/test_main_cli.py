@@ -79,6 +79,8 @@ def _typed_workflow_result(
         "trust_score": trust_score,
         "report_document": document.model_dump(mode="json"),
         "final_decision_record": {
+            "company_name": company_name,
+            "company_ticker": company_ticker,
             "final_decision": status,
             "final_delivery_state": mode,
             "trust_score": trust_score,
@@ -1459,6 +1461,99 @@ def test_run_trigger_payload_treats_sigterm_like_keyboard_interrupt(
     assert '"status": "failed"' in latest_metrics
     assert "运行被中断" in latest_metrics
     assert "运行被中断" in (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
+
+
+def test_failed_rerun_invalidates_stale_terminal_delivery_truth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus", company_resolver_model="qwen-plus", openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", search_provider="auto",
+        serper_api_key="serper-key", serpapi_api_key="", sec_api_key="sec-key",
+        sec_api_email="analyst@example.com", artifacts_dir="artifacts", final_report_path="report.md",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
+
+    output_paths = _build_run_output_paths(
+        base_artifacts_dir=tmp_path / "artifacts", company_name="Apple Inc.",
+        company_ticker="AAPL", run_time=datetime(2026, 6, 15, 10, 30, 45),
+    )
+    output_paths.run_dir.mkdir(parents=True)
+    main._write_new_run_delivery_package(
+        output_paths, company_name="Apple Inc.", company_ticker="AAPL",
+        result=_typed_workflow_result(), final_status="passed",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+    monkeypatch.setattr(main, "_kickoff_workflow", lambda _inputs: (_ for _ in ()).throw(RuntimeError("rerun failed")))
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+
+    with pytest.raises(SystemExit):
+        main.run()
+
+    assert not output_paths.report_document_path.exists()
+    assert not output_paths.final_decision_path.exists()
+    assert json.loads(output_paths.structured_recommendation_path.read_text(encoding="utf-8"))["status"] == "failed"
+    assert json.loads(output_paths.structured_report_path.read_text(encoding="utf-8"))["status"] == "failed"
+
+
+def test_post_delivery_failure_preserves_committed_terminal_package(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus", company_resolver_model="qwen-plus", openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", search_provider="auto",
+        serper_api_key="serper-key", serpapi_api_key="", sec_api_key="sec-key",
+        sec_api_email="analyst@example.com", artifacts_dir="artifacts", final_report_path="report.md",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
+
+    def _stub_kickoff(inputs):
+        artifacts_dir = Path(inputs["artifacts_dir"])
+        for name in (
+            "00_market_validation.md", "01_market_intelligence.md", "02_filing_review.md",
+            "03_financial_analysis.md", "08_data_quality_review.md", "09_logic_compliance_review.md",
+        ):
+            (artifacts_dir / name).write_text("# artifact\n", encoding="utf-8")
+        return _typed_workflow_result()
+
+    original_finalize = main.WorkflowEvaluation.finalize
+
+    def _fail_only_success_finalize(self, *, success: bool, error_message: str = ""):
+        if success:
+            raise RuntimeError("post-delivery metrics failure")
+        return original_finalize(self, success=success, error_message=error_message)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+    monkeypatch.setattr(main, "_kickoff_workflow", _stub_kickoff)
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+    monkeypatch.setattr(main.WorkflowEvaluation, "finalize", _fail_only_success_finalize)
+
+    with pytest.raises(SystemExit):
+        main.run()
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    assert json.loads((run_dir / "final_decision.json").read_text(encoding="utf-8"))["final_decision"] == "passed"
+    assert json.loads((run_dir / "06_structured_recommendation.json").read_text(encoding="utf-8"))["status"] == "passed"
+    assert "# Apple Inc. Investment Research" in (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
 
 
 def test_build_run_output_paths_groups_all_outputs_in_company_folder(tmp_path: Path) -> None:
