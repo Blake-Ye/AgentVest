@@ -38,6 +38,11 @@ _STANCE_LABELS = {
     "watch": "观察",
     "blocked": "阻断",
 }
+_MODE_TO_STATUS = {
+    "formal_report": "passed",
+    "evidence_limited_report": "evidence_limited",
+    "blocked_notice": "blocked",
+}
 
 _FORMAL_CORE_SECTION_KEYS = (
     "executive_summary",
@@ -303,7 +308,9 @@ def render_recommendation(document: ReportDocument) -> dict[str, object]:
         "company_ticker": document.ticker,
         "report_mode": document.report_mode,
         "stance": document.stance,
-        "stance_label": _STANCE_LABELS[document.stance],
+        "stance_label": _stance_label_for_document(document),
+        "status": _MODE_TO_STATUS[document.report_mode],
+        "final_delivery_state": document.report_mode,
         "trust_score": document.trust_score,
         "summary": document.executive_summary,
         "catalysts": list(document.catalysts),
@@ -320,6 +327,10 @@ def render_structured_report(document: ReportDocument) -> dict[str, object]:
         "title": document.title,
         "report_mode": document.report_mode,
         "stance": document.stance,
+        "stance_label": _stance_label_for_document(document),
+        "status": _MODE_TO_STATUS[document.report_mode],
+        "final_decision": _MODE_TO_STATUS[document.report_mode],
+        "final_delivery_state": document.report_mode,
         "trust_score": document.trust_score,
         "summary": document.executive_summary,
         "catalysts": list(document.catalysts),
@@ -336,3 +347,9 @@ def render_structured_report(document: ReportDocument) -> dict[str, object]:
             for source in sorted(document.sources, key=lambda item: item.source_id)
         ],
     }
+
+
+def _stance_label_for_document(document: ReportDocument) -> str:
+    if document.report_mode == "evidence_limited_report":
+        return "证据受限"
+    return _STANCE_LABELS[document.stance]

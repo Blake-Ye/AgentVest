@@ -8,7 +8,11 @@ import pytest
 
 from multi_agent import main
 from multi_agent.core.evidence import FinancialFact, ResearchEvidenceBundle
-from multi_agent.core.report_document import ReportGenerationContext
+from multi_agent.core.report_document import (
+    ReportGenerationContext,
+    render_recommendation,
+    render_structured_report,
+)
 from multi_agent.core.review_contracts import (
     CoverageSummary,
     DeliveryEligibility,
@@ -17,7 +21,7 @@ from multi_agent.core.review_contracts import (
 )
 
 
-def _context() -> ReportGenerationContext:
+def _context(report_mode: str = "formal_report") -> ReportGenerationContext:
     evidence = ResearchEvidenceBundle(
         company_name="Apple Inc.",
         ticker="AAPL",
@@ -38,9 +42,16 @@ def _context() -> ReportGenerationContext:
             )
         ],
     )
+    eligibility = {
+        "formal_report": DeliveryEligibility(formal_report_allowed=True),
+        "evidence_limited_report": DeliveryEligibility(
+            evidence_limited_report_allowed=True
+        ),
+        "blocked_notice": DeliveryEligibility(blocked_notice_required=True),
+    }[report_mode]
     review = ReviewContract(
         stage="report",
-        delivery_eligibility=DeliveryEligibility(formal_report_allowed=True),
+        delivery_eligibility=eligibility,
         failure_taxonomy=FailureTaxonomy(primary_class="none"),
         coverage_summary=CoverageSummary(
             evidence_coverage_ratio=1.0,
@@ -51,18 +62,35 @@ def _context() -> ReportGenerationContext:
     return ReportGenerationContext(
         company_name="Apple Inc.",
         ticker="AAPL",
-        report_mode="formal_report",
+        report_mode=report_mode,
         evidence_bundle=evidence,
         analysis_review_contract=review,
         allowed_claim_ids=["revenue-claim"],
     )
 
 
-def _writer_payload() -> dict[str, object]:
+def _writer_payload(report_mode: str = "formal_report") -> dict[str, object]:
+    stance, summary, conclusion = {
+        "formal_report": (
+            "hold",
+            "正式证据支持继续跟踪 Apple 的服务业务。",
+            "维持持有。",
+        ),
+        "evidence_limited_report": (
+            "watch",
+            "证据受限，继续观察。",
+            "证据受限，待补证后复核。",
+        ),
+        "blocked_notice": (
+            "blocked",
+            "报告已阻断，不能形成投资结论。",
+            "报告已阻断，不提供可执行投资建议。",
+        ),
+    }[report_mode]
     return {
         "title": "Apple Inc. 投资研究报告",
-        "stance": "hold",
-        "executive_summary": "正式证据支持继续跟踪 Apple 的服务业务。",
+        "stance": stance,
+        "executive_summary": summary,
         "catalysts": ["服务业务增长"],
         "risks": ["需求波动"],
         "sections": {
@@ -71,7 +99,7 @@ def _writer_payload() -> dict[str, object]:
             "recent_events": {"heading": "近期事件与催化剂", "content": "服务增长。", "claim_ids": []},
             "financial_analysis": {"heading": "财务分析与估值", "content": "收入保持增长。", "claim_ids": ["revenue-claim"]},
             "key_risks": {"heading": "关键风险", "content": "需求存在波动。", "claim_ids": []},
-            "investment_conclusion": {"heading": "投资结论", "content": "维持持有。", "claim_ids": ["revenue-claim"]},
+            "investment_conclusion": {"heading": "投资结论", "content": conclusion, "claim_ids": ["revenue-claim"]},
             "source_index": {"heading": "来源索引", "content": "SEC 年报。", "claim_ids": []},
         },
         "claims": [{"claim_id": "revenue-claim", "text": "FY2025 收入为 416.2 十亿美元。", "critical": True, "source_ids": ["sec-10k"]}],
@@ -107,17 +135,30 @@ def test_new_run_materializes_canonical_document_before_any_projection(tmp_path:
     assert json.loads(output_paths.report_document_path.read_text(encoding="utf-8"))["stance"] == "hold"
 
 
-def test_new_run_structured_outputs_deserialize_the_canonical_document_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("report_mode", "final_status"),
+    (
+        ("formal_report", "passed"),
+        ("evidence_limited_report", "evidence_limited"),
+        ("blocked_notice", "blocked"),
+    ),
+)
+def test_new_run_structured_outputs_equal_direct_typed_renderers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    report_mode: str,
+    final_status: str,
 ) -> None:
     output_paths = _output_paths(tmp_path)
     output_paths.run_dir.mkdir(parents=True)
     result = {
-        "report_context": _context().model_dump(mode="json"),
-        "report_writer_payload": _writer_payload(),
+        "report_context": _context(report_mode).model_dump(mode="json"),
+        "report_writer_payload": _writer_payload(report_mode),
         "trust_score": 91,
     }
-    main._materialize_new_run_report_document(output_paths, result=result, final_status="passed")
+    document = main._materialize_new_run_report_document(
+        output_paths, result=result, final_status=final_status
+    )
     monkeypatch.setattr(
         main,
         "build_structured_recommendation",
@@ -131,7 +172,10 @@ def test_new_run_structured_outputs_deserialize_the_canonical_document_only(
 
     recommendation = main._write_structured_outputs(
         output_paths,
-        final_decision={"final_decision": "passed", "final_delivery_state": "formal_report"},
+        final_decision={
+            "final_decision": final_status,
+            "final_delivery_state": report_mode,
+        },
         latest_metrics={},
         company_name="Apple Inc.",
         company_ticker="AAPL",
@@ -140,8 +184,8 @@ def test_new_run_structured_outputs_deserialize_the_canonical_document_only(
     )
 
     structured_report = json.loads(output_paths.structured_report_path.read_text(encoding="utf-8"))
-    assert recommendation["summary"] == "正式证据支持继续跟踪 Apple 的服务业务。"
-    assert structured_report["sections"]["financial_analysis"] == "收入保持增长。"
+    assert recommendation == render_recommendation(document)
+    assert structured_report == render_structured_report(document)
 
 
 def test_new_run_refuses_direct_document_or_missing_writer_payload(tmp_path: Path) -> None:

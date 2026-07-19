@@ -563,11 +563,6 @@ def _write_structured_outputs(
         )
     recommendation = render_recommendation(document)
     structured_report = render_structured_report(document)
-    _apply_final_decision_projection(
-        recommendation,
-        structured_report,
-        final_decision=final_decision,
-    )
     _write_json_file(output_paths.structured_recommendation_path, recommendation)
     _write_json_file(output_paths.structured_report_path, structured_report)
     if save_to_watchlist:
@@ -724,7 +719,8 @@ def _rebuild_watchlist_from_artifacts(
             continue
 
         report_document_path = run_dir / "11_report_document.json"
-        if report_document_path.exists():
+        uses_legacy_rebuild = not report_document_path.exists()
+        if not uses_legacy_rebuild:
             document = _load_report_document(report_document_path)
             recommendation = render_recommendation(document)
             structured_report = render_structured_report(document)
@@ -743,7 +739,7 @@ def _rebuild_watchlist_from_artifacts(
                 metrics=latest_metrics,
             )
         final_decision = _load_json_file(run_dir / "final_decision.json")
-        if final_decision:
+        if final_decision and uses_legacy_rebuild:
             _apply_final_decision_projection(
                 recommendation,
                 structured_report,
