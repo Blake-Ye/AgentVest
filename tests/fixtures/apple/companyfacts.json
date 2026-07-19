@@ -1,0 +1,62 @@
+{
+  "cik": 320193,
+  "facts": {
+    "us-gaap": {
+      "RevenueFromContractWithCustomerExcludingAssessedTax": {
+        "units": {
+          "USD": [
+            {
+              "start": "2023-10-01",
+              "end": "2024-09-28",
+              "val": 391035000000,
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2024-11-01",
+              "accn": "0000320193-24-000123",
+              "frame": "CY2024"
+            },
+            {
+              "start": "2024-09-29",
+              "end": "2025-09-27",
+              "val": 416161000000,
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-10-30",
+              "accn": "0000320193-25-000079",
+              "frame": "CY2025"
+            },
+            {
+              "start": "2024-09-29",
+              "end": "2025-09-27",
+              "val": 416161000000,
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-10-31",
+              "accn": "0000320193-25-000079",
+              "frame": "CY2025"
+            }
+          ]
+        }
+      },
+      "EntityCommonStockSharesOutstanding": {
+        "units": {
+          "shares": [
+            {
+              "end": "2025-09-27",
+              "val": 14900000000,
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-10-31",
+              "accn": "0000320193-25-000079",
+              "frame": "CY2025Q4I"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

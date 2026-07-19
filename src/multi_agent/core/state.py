@@ -4,6 +4,7 @@ from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, Field
 
+from multi_agent.core.evidence import ResearchEvidenceBundle
 from multi_agent.core.market import MarketValidationResult
 from multi_agent.core.review_contracts import GateDecision
 
@@ -42,3 +43,4 @@ class ResearchRunState(BaseModel):
     model_tier_overrides: dict[RoutedAgentName, ModelTier] = Field(default_factory=dict)
     gate_decision: GateDecision | None = None
     final_decision: FinalDecision | None = None
+    evidence_bundle: ResearchEvidenceBundle | None = None
