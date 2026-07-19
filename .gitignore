@@ -1,5 +1,6 @@
 .env
 .crewai_home/
+.worktrees/
 __pycache__/
 .DS_Store
 artifacts/
