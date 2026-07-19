@@ -8,7 +8,7 @@ from multi_agent.core.market import MarketValidationResult
 from multi_agent.core.review_contracts import GateDecision
 
 ModelTier: TypeAlias = Literal["fast", "deep", "review"]
-FinalDecision: TypeAlias = Literal["passed", "blocked"]
+FinalDecision: TypeAlias = Literal["passed", "blocked", "evidence_limited"]
 RoutedAgentName: TypeAlias = Literal[
     "market_validation_analyst",
     "event_guidance_analyst",

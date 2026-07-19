@@ -21,13 +21,27 @@ def test_kickoff_workflow_uses_flow_when_enabled(monkeypatch) -> None:
     assert result == "flow"
 
 
-def test_kickoff_workflow_uses_crew_by_default(monkeypatch) -> None:
+def test_kickoff_workflow_uses_flow_by_default(monkeypatch) -> None:
+    class StubFlow:
+        def kickoff(self):
+            return "flow"
+
+    monkeypatch.delenv("USE_FLOW_EXECUTION", raising=False)
+    monkeypatch.setattr(runtime, "build_flow", lambda inputs: StubFlow())
+    monkeypatch.setattr(runtime, "build_crew", lambda: (_ for _ in ()).throw(AssertionError("crew should not run")))
+
+    result = runtime.kickoff_workflow({"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+
+    assert result == "flow"
+
+
+def test_kickoff_workflow_uses_crew_when_flow_explicitly_disabled(monkeypatch) -> None:
     class StubCrew:
         def kickoff(self, *, inputs):
             assert inputs["company_name"] == "Apple Inc."
             return "crew"
 
-    monkeypatch.delenv("USE_FLOW_EXECUTION", raising=False)
+    monkeypatch.setenv("USE_FLOW_EXECUTION", "0")
     monkeypatch.setattr(runtime, "build_flow", lambda inputs: (_ for _ in ()).throw(AssertionError("flow should not run")))
     monkeypatch.setattr(runtime, "build_crew", lambda: StubCrew())
 

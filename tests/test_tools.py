@@ -1,4 +1,5 @@
 import sys
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -10,6 +11,7 @@ from multi_agent.tools.investment_tools import (
     FinancialMetricsTool,
     SecCompanyFactsTool,
     SecFilingSearchTool,
+    _extract_services_revenue_from_filing_html,
 )
 from multi_agent.tools.tavily_search import TavilySearchTool
 
@@ -130,6 +132,287 @@ def test_sec_company_facts_tool_records_financial_field_extraction_status(tmp_pa
     assert latest_metrics["financial_fields"]["revenue"]["extracted"] is True
     assert latest_metrics["financial_fields"]["gross_profit"]["extracted"] is False
     assert latest_metrics["financial_fields"]["current_assets"]["normalized_value"] == 80.0
+
+
+class StubFormalFieldCompanyFactsService:
+    def fetch_company_facts(self, _ticker: str) -> dict:
+        return {
+            "facts": {
+                "us-gaap": {
+                    "Revenues": {
+                        "units": {
+                            "USD": [
+                                {"val": 391.0, "end": "2025-09-27", "filed": "2025-10-31", "fy": 2025}
+                            ]
+                        }
+                    },
+                    "CashAndCashEquivalentsAtCarryingValue": {
+                        "units": {
+                            "USD": [
+                                {"val": 53.7, "end": "2025-09-27", "filed": "2025-10-31", "fy": 2025}
+                            ]
+                        }
+                    },
+                    "LongTermDebtCurrent": {
+                        "units": {
+                            "USD": [
+                                {"val": 11.0, "end": "2025-09-27", "filed": "2025-10-31", "fy": 2025}
+                            ]
+                        }
+                    },
+                    "LongTermDebtNoncurrent": {
+                        "units": {
+                            "USD": [
+                                {"val": 87.0, "end": "2025-09-27", "filed": "2025-10-31", "fy": 2025}
+                            ]
+                        }
+                    },
+                    "EntityCommonStockSharesOutstanding": {
+                        "units": {
+                            "shares": [
+                                {
+                                    "val": 14900000000,
+                                    "end": "2025-09-27",
+                                    "filed": "2025-10-31",
+                                    "fy": 2025,
+                                }
+                            ]
+                        }
+                    },
+                    "EarningsPerShareDiluted": {
+                        "units": {
+                            "USD/shares": [
+                                {"val": 7.25, "end": "2025-09-27", "filed": "2025-10-31", "fy": 2025}
+                            ]
+                        }
+                    },
+                }
+            }
+        }
+
+
+def test_sec_company_facts_tool_records_formal_gate_fields_from_company_facts(
+    tmp_path: Path,
+) -> None:
+    settings = InvestmentResearchSettings(
+        fast_model="qwen-plus",
+        deep_model="qwen-plus",
+        review_model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        tavily_api_key="tvly-key",
+        sec_api_email="analyst@example.com",
+        runs_dir=str(tmp_path / "artifacts"),
+        final_report_path=str(tmp_path / "report.md"),
+    )
+    tool = SecCompanyFactsTool(settings=settings, service=StubFormalFieldCompanyFactsService())
+    evaluation = WorkflowEvaluation(
+        artifacts_dir=tmp_path / "artifacts",
+        final_report_path=tmp_path / "report.md",
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+    )
+    evaluation.start()
+    token = activate_evaluation(evaluation)
+
+    try:
+        tool._run("AAPL")
+        latest_metrics = evaluation.finalize(success=True)
+    finally:
+        clear_evaluation(token)
+
+    assert latest_metrics["financial_fields"]["cash_and_equivalents"]["extracted"] is True
+    assert latest_metrics["financial_fields"]["cash_and_equivalents"]["normalized_value"] == 53.7
+    assert latest_metrics["financial_fields"]["total_debt"]["extracted"] is True
+    assert latest_metrics["financial_fields"]["total_debt"]["normalized_value"] == 98.0
+    assert latest_metrics["financial_fields"]["diluted_shares"]["extracted"] is True
+    assert latest_metrics["financial_fields"]["diluted_shares"]["normalized_value"] == 14900000000
+    assert latest_metrics["financial_fields"]["eps"]["extracted"] is True
+    assert latest_metrics["financial_fields"]["eps"]["normalized_value"] == 7.25
+
+
+class StubFormalReportInputsService(StubFormalFieldCompanyFactsService):
+    def fetch_latest_annual_report_html(self, _ticker: str) -> str:
+        return """
+        <html>
+          <body>
+            <h2>Products and Services Performance</h2>
+            <table>
+              <tr><th>Category</th><th>Net sales</th></tr>
+              <tr><td>Products</td><td>281,788</td></tr>
+              <tr><td>Services</td><td>109,158</td></tr>
+            </table>
+          </body>
+        </html>
+        """
+
+    def fetch_market_quote(self, _ticker: str) -> dict:
+        return {
+            "data": {
+                "primaryData": {
+                    "lastSalePrice": "$333.74",
+                    "lastTradeTimestamp": "Jul 19, 2026",
+                }
+            }
+        }
+
+
+class StubFallbackMarketQuoteService(StubFormalReportInputsService):
+    def fetch_market_quote(self, _ticker: str) -> dict:
+        return {
+            "source": "stockanalysis_quote_page",
+            "data": {
+                "primaryData": {
+                    "lastSalePrice": "$333.74",
+                    "lastTradeTimestamp": "Jul 17, 2026, 4:00 PM EDT",
+                }
+            },
+        }
+
+
+def test_financial_metrics_tool_builds_market_and_segment_snapshots_for_formal_gate(
+    tmp_path: Path,
+) -> None:
+    settings = InvestmentResearchSettings(
+        fast_model="qwen-plus",
+        deep_model="qwen-plus",
+        review_model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        tavily_api_key="tvly-key",
+        sec_api_email="analyst@example.com",
+        runs_dir=str(tmp_path / "artifacts"),
+        final_report_path=str(tmp_path / "report.md"),
+    )
+    tool = FinancialMetricsTool(settings=settings, service=StubFormalReportInputsService())
+    evaluation = WorkflowEvaluation(
+        artifacts_dir=tmp_path / "artifacts",
+        final_report_path=tmp_path / "report.md",
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+    )
+    evaluation.start()
+    token = activate_evaluation(evaluation)
+
+    try:
+        payload = json.loads(tool._run("AAPL"))
+        latest_metrics = evaluation.finalize(success=True)
+    finally:
+        clear_evaluation(token)
+
+    assert payload["market_snapshot"]["stock_price"] == 333.74
+    assert payload["market_snapshot"]["diluted_shares"] == 14900000000
+    assert payload["market_snapshot"]["ready_for_formal_report"] is True
+    assert payload["segment_snapshot"]["services_revenue"] == 109158000000.0
+    assert latest_metrics["financial_fields"]["stock_price"]["extracted"] is True
+    assert latest_metrics["financial_fields"]["stock_price"]["normalized_value"] == 333.74
+    assert latest_metrics["financial_fields"]["segment_revenue_services"]["extracted"] is True
+    assert latest_metrics["financial_fields"]["segment_revenue_services"]["normalized_value"] == 109158000000.0
+
+
+def test_financial_metrics_tool_exposes_formal_gate_fields_to_llm_output(
+    tmp_path: Path,
+) -> None:
+    settings = InvestmentResearchSettings(
+        fast_model="qwen-plus",
+        deep_model="qwen-plus",
+        review_model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        tavily_api_key="tvly-key",
+        sec_api_email="analyst@example.com",
+        runs_dir=str(tmp_path / "artifacts"),
+        final_report_path=str(tmp_path / "report.md"),
+    )
+    tool = FinancialMetricsTool(settings=settings, service=StubFormalReportInputsService())
+
+    payload = json.loads(tool._run("AAPL"))
+
+    assert payload["financial_fields"]["revenue"]["extracted"] is True
+    assert payload["financial_fields"]["cash_and_equivalents"]["extracted"] is True
+    assert payload["financial_fields"]["total_debt"]["extracted"] is True
+    assert payload["financial_fields"]["diluted_shares"]["extracted"] is True
+    assert payload["financial_fields"]["stock_price"]["extracted"] is True
+    assert payload["financial_fields"]["segment_revenue_services"]["extracted"] is True
+    assert payload["formal_gate_snapshot"]["missing_fields"] == []
+    assert payload["formal_gate_snapshot"]["ready_for_formal_report"] is True
+
+
+def test_financial_metrics_tool_preserves_market_quote_source_provenance(
+    tmp_path: Path,
+) -> None:
+    settings = InvestmentResearchSettings(
+        fast_model="qwen-plus",
+        deep_model="qwen-plus",
+        review_model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        tavily_api_key="tvly-key",
+        sec_api_email="analyst@example.com",
+        runs_dir=str(tmp_path / "artifacts"),
+        final_report_path=str(tmp_path / "report.md"),
+    )
+    tool = FinancialMetricsTool(settings=settings, service=StubFallbackMarketQuoteService())
+    evaluation = WorkflowEvaluation(
+        artifacts_dir=tmp_path / "artifacts",
+        final_report_path=tmp_path / "report.md",
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+    )
+    evaluation.start()
+    token = activate_evaluation(evaluation)
+
+    try:
+        payload = json.loads(tool._run("AAPL"))
+        latest_metrics = evaluation.finalize(success=True)
+    finally:
+        clear_evaluation(token)
+
+    assert payload["market_snapshot"]["source_refs"] == ["stockanalysis_quote_page"]
+    assert latest_metrics["financial_fields"]["stock_price"]["source_tag"] == "stockanalysis_last_close_price"
+
+
+def test_extract_services_revenue_from_inline_xbrl_products_services_table() -> None:
+    filing_html = """
+    <html>
+      <body>
+        <div>Products and Services Performance</div>
+        <table>
+          <tr>
+            <td>Category</td>
+            <td>2025</td>
+            <td>Change</td>
+            <td>2024</td>
+          </tr>
+          <tr>
+            <td>
+              <div>
+                <span>Services </span>
+                <span>(1)</span>
+              </div>
+            </td>
+            <td><span>109,158&#160;</span></td>
+            <td><span>14&#160;</span><span>%</span></td>
+            <td><span>96,169&#160;</span></td>
+          </tr>
+        </table>
+        <div>Geographic Segments Performance</div>
+      </body>
+    </html>
+    """
+
+    extracted = _extract_services_revenue_from_filing_html(filing_html)
+
+    assert extracted.extracted is True
+    assert extracted.normalized_value == 109158000000.0
+    assert extracted.source_tag == "10k_products_services_table"
 
 
 class FailIfCalledSecService:

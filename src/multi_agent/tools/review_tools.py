@@ -152,6 +152,10 @@ class FinancialFieldCompletenessInput(BaseModel):
         default_factory=dict,
         description="Extracted field map keyed by financial field name.",
     )
+    gate_required_fields: list[str] = Field(
+        default_factory=list,
+        description="Minimum required fields for a formal report gate decision.",
+    )
 
 
 class FinancialFieldCompletenessTool(BaseTool):
@@ -159,12 +163,19 @@ class FinancialFieldCompletenessTool(BaseTool):
     description: str = "根据必需字段与已提取字段计算财务字段完整度。"
     args_schema: Type[BaseModel] = FinancialFieldCompletenessInput
 
-    def _run(self, required_fields: list[str], extracted_fields: dict[str, Any]) -> dict[str, object]:
+    def _run(
+        self,
+        required_fields: list[str],
+        extracted_fields: dict[str, Any],
+        gate_required_fields: list[str] | None = None,
+    ) -> dict[str, object]:
         if not required_fields:
             return {
                 "financial_coverage_score": 1.0,
                 "missing_fields": [],
                 "required_field_count": 0,
+                "gate_financial_coverage_score": 1.0,
+                "gate_missing_fields": [],
             }
 
         missing_fields = [
@@ -173,8 +184,21 @@ class FinancialFieldCompletenessTool(BaseTool):
             if field_name not in extracted_fields or extracted_fields[field_name] in (None, "")
         ]
         coverage_score = (len(required_fields) - len(missing_fields)) / len(required_fields)
+        gate_required_fields = gate_required_fields or required_fields
+        gate_missing_fields = [
+            field_name
+            for field_name in gate_required_fields
+            if field_name not in extracted_fields or extracted_fields[field_name] in (None, "")
+        ]
+        gate_coverage_score = (
+            1.0
+            if not gate_required_fields
+            else (len(gate_required_fields) - len(gate_missing_fields)) / len(gate_required_fields)
+        )
         return {
             "financial_coverage_score": coverage_score,
             "missing_fields": missing_fields,
             "required_field_count": len(required_fields),
+            "gate_financial_coverage_score": gate_coverage_score,
+            "gate_missing_fields": gate_missing_fields,
         }

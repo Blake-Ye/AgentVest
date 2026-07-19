@@ -95,6 +95,54 @@ def test_workflow_inputs_auto_resolve_company_name_when_ticker_missing(
     assert inputs["market_resolution_status"] == "confirmed"
 
 
+def test_workflow_inputs_includes_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    class StubResolver:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def resolve(self, company_name: str, ticker: str = "") -> CompanyResolution:
+            return CompanyResolution(
+                user_input=company_name,
+                normalized_name="Apple Inc.",
+                ticker="AAPL",
+                entity_type="public_company",
+                parent_company="Apple Inc.",
+                exchange="NASDAQ",
+                confidence=0.99,
+            )
+
+    class StubMarketValidationService:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def validate(self, *, company_name: str, ticker: str = "", exchange: str = "") -> MarketValidationResult:
+            assert company_name == "Apple Inc."
+            assert ticker == "AAPL"
+            assert exchange == "NASDAQ"
+            return MarketValidationResult(
+                market_label="US",
+                confidence=0.99,
+                resolution_status="confirmed",
+                evidence=["exchange=NASDAQ"],
+                requires_human_confirmation=False,
+                tool_policy=build_tool_policy("US"),
+            )
+
+    monkeypatch.setenv("MODEL", "qwen-plus")
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
+    monkeypatch.setenv("SEC_API_KEY", "sec-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+    monkeypatch.setattr("multi_agent.main.CompanyResolver", StubResolver)
+    monkeypatch.setattr("multi_agent.main.MarketValidationService", StubMarketValidationService)
+    monkeypatch.setattr("multi_agent.main._now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+
+    inputs = _workflow_inputs("Apple Inc.", "AAPL")
+
+    assert inputs["run_id"] == "20260615_103045"
+
+
 def test_run_writes_evaluation_artifacts_on_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -448,6 +496,113 @@ def test_run_rebuilds_watchlist_from_existing_artifacts(
     assert watchlist["items"][0]["catalysts"] == ["TokenHub放量"]
 
 
+def test_run_rebuilds_watchlist_using_final_decision_projection_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="auto",
+        serper_api_key="serper-key",
+        serpapi_api_key="",
+        sec_api_key="sec-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+        watchlist_path="artifacts/watchlist.json",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(
+                company_name="",
+                company_ticker="",
+                save_to_watchlist=False,
+                watchlist_list=False,
+                watchlist_rebuild=True,
+            )
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_202646"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "04_investment_report.md").write_text(
+        "\n".join(
+            [
+                "# 投资备忘录",
+                "",
+                "## 执行摘要",
+                "",
+                "苹果现金流稳健，估值看起来具备上行空间。",
+                "",
+                "## 催化剂",
+                "",
+                "- 服务业务扩张",
+                "",
+                "## 风险",
+                "",
+                "- 宏观需求承压",
+                "",
+                "## 投资建议",
+                "",
+                "建议增持。",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "latest_run_metrics.json").write_text(
+        json.dumps(
+            {
+                "company_name": "Apple Inc.",
+                "company_ticker": "AAPL",
+                "trust_score": {"score": 74, "level": "medium", "summary": "evidence limited"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "final_decision.json").write_text(
+        json.dumps(
+            {
+                "company_name": "Apple Inc.",
+                "company_ticker": "AAPL",
+                "final_decision": "evidence_limited",
+                "final_delivery_state": "evidence_limited_report",
+                "trust_score": 74,
+                "blocking_reasons": ["gate_financial_coverage_incomplete"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "artifacts" / "watchlist.json").write_text(
+        json.dumps({"items": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+
+    main.run()
+
+    recommendation = json.loads((run_dir / "06_structured_recommendation.json").read_text(encoding="utf-8"))
+    structured_report = json.loads((run_dir / "07_structured_report.json").read_text(encoding="utf-8"))
+    watchlist = json.loads((tmp_path / "artifacts" / "watchlist.json").read_text(encoding="utf-8"))
+
+    assert recommendation["status"] == "evidence_limited"
+    assert recommendation["stance"] == "watch"
+    assert recommendation["stance_label"] == "证据受限"
+    assert structured_report["status"] == "evidence_limited"
+    assert structured_report["final_decision"] == "evidence_limited"
+    assert watchlist["items"][0]["status"] == "evidence_limited"
+
+
 def test_run_backfills_standard_output_files_when_crew_does_not_write_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -753,9 +908,154 @@ def test_run_allows_formal_report_after_rerun_passes(
     assert latest_metrics["trust_score"]["score"] == 88
 
 
+def test_run_preserves_evidence_limited_report_body_when_workflow_already_generated_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="auto",
+        serper_api_key="serper-key",
+        serpapi_api_key="",
+        sec_api_key="sec-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
+
+    detailed_report = "\n".join(
+        [
+            "# 受限版投资备忘录",
+            "",
+            "**状态**：⚠️ 受限版备忘录 — Analysis Gate 未完全通过",
+            "",
+            "## 执行摘要",
+            "",
+            "这是一份保留正文的 evidence-limited 报告。",
+        ]
+    )
+    final_result = {
+        "status": "evidence_limited",
+        "trust_score": 74,
+        "blocking_reasons": ["gate_financial_coverage_incomplete"],
+        "report_result": detailed_report,
+    }
+
+    def _stub_kickoff_workflow(inputs):
+        artifacts_dir = Path(inputs["artifacts_dir"])
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in (
+            ("00_market_validation.md", "# 市场验证结果\n\n市场已确认。"),
+            ("01_market_intelligence.md", "# 市场情报简报\n\n已完成情报汇总。"),
+            ("02_filing_review.md", "# 监管文件复核\n\n已完成文件复核。"),
+            ("03_financial_analysis.md", "# 财务分析结果\n\n已完成财务分析。"),
+            ("08_data_quality_review.md", "# 数据质量审查结果\n\nformal 证据未闭合。"),
+            ("09_logic_compliance_review.md", "# 逻辑与合规审查结果\n\n只允许受限交付。"),
+        ):
+            (artifacts_dir / name).write_text(content, encoding="utf-8")
+        return final_result
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+    monkeypatch.setattr(main, "_kickoff_workflow", _stub_kickoff_workflow)
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+
+    main.run()
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    report_content = (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
+
+    assert "这是一份保留正文的 evidence-limited 报告。" in report_content
+    assert "状态：已生成证据受限版备忘录" not in report_content
+
+
+def test_run_writes_final_decision_and_projects_outputs_from_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    settings = InvestmentResearchSettings(
+        model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        search_provider="auto",
+        serper_api_key="serper-key",
+        serpapi_api_key="",
+        sec_api_key="sec-key",
+        sec_api_email="analyst@example.com",
+        artifacts_dir="artifacts",
+        final_report_path="report.md",
+    )
+
+    class StubParser:
+        def parse_args(self):
+            return Namespace(company_name="Apple Inc.", company_ticker="AAPL")
+
+    final_result = {
+        "status": "evidence_limited",
+        "trust_score": 74,
+        "blocking_reasons": ["gate_financial_coverage_incomplete"],
+        "report_result": "# 投资备忘录\n\n**状态**：⚠️ 受限版备忘录 — Analysis Gate 未完全通过\n",
+    }
+
+    def _stub_kickoff_workflow(inputs):
+        artifacts_dir = Path(inputs["artifacts_dir"])
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in (
+            ("00_market_validation.md", "# 市场验证结果\n\n市场已确认。"),
+            ("01_market_intelligence.md", "# 市场情报简报\n\n已完成情报汇总。"),
+            ("02_filing_review.md", "# 监管文件复核\n\n已完成文件复核。"),
+            ("03_financial_analysis.md", "# 财务分析结果\n\n已完成财务分析。"),
+            ("08_data_quality_review.md", "# 数据质量审查结果\n\nformal 证据未闭合。"),
+            ("09_logic_compliance_review.md", "# 逻辑与合规审查结果\n\n只允许受限交付。"),
+        ):
+            (artifacts_dir / name).write_text(content, encoding="utf-8")
+        return final_result
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "_project_root", lambda: tmp_path)
+    monkeypatch.setattr(main, "_build_parser", lambda: StubParser())
+    monkeypatch.setattr(main, "_workflow_inputs", lambda *_: {"company_name": "Apple Inc.", "company_ticker": "AAPL"})
+    monkeypatch.setattr(main, "_kickoff_workflow", _stub_kickoff_workflow)
+    monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", classmethod(lambda cls: settings))
+    monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
+
+    main.run()
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    final_decision = json.loads((run_dir / "final_decision.json").read_text(encoding="utf-8"))
+    recommendation = json.loads((run_dir / "06_structured_recommendation.json").read_text(encoding="utf-8"))
+    structured_report = json.loads((run_dir / "07_structured_report.json").read_text(encoding="utf-8"))
+    latest_metrics = json.loads((run_dir / "latest_run_metrics.json").read_text(encoding="utf-8"))
+
+    assert final_decision["final_decision"] == "evidence_limited"
+    assert final_decision["final_delivery_state"] == "evidence_limited_report"
+    assert recommendation["status"] == final_decision["final_decision"]
+    assert structured_report["status"] == final_decision["final_decision"]
+    assert latest_metrics["final_status"] == final_decision["final_decision"]
+
+
 def test_final_status_from_result_rejects_unknown_status() -> None:
     with pytest.raises(ValueError, match="未知"):
         _final_status_from_result({"status": "pending_review"})
+
+
+def test_final_status_from_result_accepts_evidence_limited() -> None:
+    assert _final_status_from_result({"status": "evidence_limited"}) == "evidence_limited"
 
 
 def test_run_writes_failed_evaluation_artifacts_on_error(

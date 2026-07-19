@@ -11,6 +11,9 @@ from multi_agent.tools.tavily_search import TavilySearchOutput, TavilySearchServ
 
 
 class StubTavilySearchService:
+    def __init__(self) -> None:
+        self.call_count = 0
+
     def search_company_news(
         self,
         query: str,
@@ -18,6 +21,7 @@ class StubTavilySearchService:
         market_label: str = "",
         company_name: str = "",
     ) -> dict:
+        self.call_count += 1
         return {
             "query": query,
             "topic": topic,
@@ -56,10 +60,7 @@ def normalize_tool_output(payload: dict | str) -> dict:
 
 
 def test_tavily_search_tool_returns_structured_output() -> None:
-    tool = TavilySearchTool(
-        settings=build_settings(),
-        service=StubTavilySearchService(),
-    )
+    tool = TavilySearchTool(settings=build_settings(), service=StubTavilySearchService())
 
     result = normalize_tool_output(
         tool._run(
@@ -80,6 +81,37 @@ def test_tavily_search_tool_returns_structured_output() -> None:
     assert result["results"][0]["source_type"] == "news"
     assert result["results"][0]["published_at"] == "2026-06-20T08:30:00Z"
     assert result["results"][0]["snippet"] == "NVIDIA posted faster revenue growth."
+
+
+def test_tavily_search_tool_limits_query_budget_per_run() -> None:
+    service = StubTavilySearchService()
+    tool = TavilySearchTool(settings=build_settings(), service=service)
+
+    for index in range(8):
+        result = normalize_tool_output(
+            tool._run(
+                query=f"query-{index}",
+                topic="news",
+                market_label="us_equity",
+                company_name="Apple",
+            )
+        )
+        assert result.get("status", "ok") == "ok"
+
+    over_budget = normalize_tool_output(
+        tool._run(
+            query="query-over-budget",
+            topic="news",
+            market_label="us_equity",
+            company_name="Apple",
+        )
+    )
+
+    assert service.call_count == 8
+    assert over_budget["status"] == "degraded"
+    assert over_budget["result_count"] == 0
+    assert over_budget["results"] == []
+    assert "搜索预算已用尽" in over_budget["degraded_reason"]
 
 
 class FakeResponse:
@@ -107,6 +139,34 @@ class RecordingSession:
                         "url": "https://example.com/apple-earnings",
                         "content": "Apple reported stronger-than-expected earnings.",
                         "published_date": "2026-06-20T12:00:00Z",
+                        "type": "news",
+                    }
+                ]
+            },
+        )
+
+
+class NoisyRecordingSession:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def post(self, url: str, **kwargs):
+        self.calls.append(("POST", url, kwargs))
+        return FakeResponse(
+            status_code=200,
+            payload={
+                "results": [
+                    {
+                        "title": "Reuters Apple China AI",
+                        "url": "https://example.com/reuters-apple",
+                        "content": (
+                            "Cookies, opens new tab Terms & Conditions Privacy, opens new tab "
+                            "Copyright, opens new tab Manage Preferences Apple Intelligence "
+                            "approved in China with Alibaba Qwen integration, creating a new "
+                            "device-upgrade catalyst for Apple according to Reuters. "
+                            + "More analysis. " * 80
+                        ),
+                        "published_date": "2026-07-15T12:00:00Z",
                         "type": "news",
                     }
                 ]
@@ -167,6 +227,25 @@ def test_tavily_search_service_calls_api_and_normalizes_results() -> None:
             },
         )
     ]
+
+
+def test_tavily_search_service_trims_noisy_snippets_for_llm_context() -> None:
+    settings = build_settings()
+    session = NoisyRecordingSession()
+    service = TavilySearchService(settings=settings, session=session)
+
+    results = service.search_company_news(
+        query="china ai",
+        topic="news",
+        market_label="us_equity",
+        company_name="Apple Inc.",
+    )
+
+    snippet = results["results"][0]["snippet"]
+    assert "Cookies" not in snippet
+    assert "Terms & Conditions" not in snippet
+    assert "Apple Intelligence approved in China" in snippet
+    assert len(snippet) <= 360
 
 
 def test_tavily_search_tool_returns_degraded_output_on_nonfatal_exception() -> None:

@@ -13,6 +13,7 @@ def _review_summary(**overrides: object) -> ReviewToolSummary:
     defaults = {
         "evidence_coverage_ratio": 0.95,
         "financial_coverage_score": 0.9,
+        "gate_financial_coverage_score": 1.0,
         "critical_conflict_count": 0,
         "market_policy_violations": [],
         "unsupported_critical_claims": [],
@@ -22,14 +23,14 @@ def _review_summary(**overrides: object) -> ReviewToolSummary:
     return ReviewToolSummary(**defaults)
 
 
-def test_confidence_gate_blocks_when_evidence_coverage_below_threshold() -> None:
-    summary = _review_summary(evidence_coverage_ratio=0.6)
+def test_confidence_gate_reruns_when_evidence_coverage_below_minimum_delivery_threshold() -> None:
+    summary = _review_summary(evidence_coverage_ratio=0.59)
 
     decision = ConfidenceGatePolicy.default().evaluate(summary)
 
     assert decision.passed is False
     assert decision.final_decision == "rerun"
-    assert "evidence_coverage_ratio<0.80" in decision.blocking_reasons
+    assert "evidence_coverage_ratio<0.60" in decision.blocking_reasons
 
 
 def test_confidence_gate_preserves_high_scores_on_a_full_0_to_100_scale() -> None:
@@ -72,18 +73,33 @@ def test_confidence_gate_blocks_when_explicit_list_based_violations_exist(
     assert expected_reason in decision.blocking_reasons
 
 
-def test_confidence_gate_passes_when_all_thresholds_are_met() -> None:
+def test_confidence_gate_passes_when_minimum_delivery_thresholds_are_met() -> None:
     summary = _review_summary(
-        evidence_coverage_ratio=1.0,
-        financial_coverage_score=1.0,
+        evidence_coverage_ratio=0.60,
+        financial_coverage_score=0.60,
+        gate_financial_coverage_score=1.0,
     )
 
     decision = ConfidenceGatePolicy.default().evaluate(summary)
 
     assert decision.passed is True
     assert decision.final_decision == "passed"
-    assert decision.trust_score == 100
+    assert decision.trust_score == 60
     assert decision.blocking_reasons == []
+
+
+def test_confidence_gate_reruns_when_gate_required_fields_are_incomplete() -> None:
+    summary = _review_summary(
+        evidence_coverage_ratio=1.0,
+        financial_coverage_score=0.8,
+        gate_financial_coverage_score=0.5,
+    )
+
+    decision = ConfidenceGatePolicy.default().evaluate(summary)
+
+    assert decision.passed is False
+    assert decision.final_decision == "rerun"
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
 
 
 def test_confidence_gate_blocks_when_critical_conflicts_exist() -> None:

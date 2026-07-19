@@ -1,10 +1,12 @@
 import sys
 from pathlib import Path
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from multi_agent.settings import InvestmentResearchSettings
-from multi_agent.tools.official_sec import OfficialSecService
+from multi_agent.tools.official_sec import OfficialSecService, _build_retry_session
 
 
 def build_settings() -> InvestmentResearchSettings:
@@ -40,6 +42,8 @@ class RecordingSession:
         response = self.responses.get(url)
         if response is None:
             return FakeResponse(404, {"message": "not found"})
+        if isinstance(response, Exception):
+            raise response
         return FakeResponse(200, response)
 
 
@@ -139,3 +143,97 @@ def test_official_sec_service_fetches_company_facts_from_official_endpoint() -> 
     assert session.requests[1][1]["headers"] == {
         "User-Agent": "multi-agent-investment-research analyst@example.com"
     }
+
+
+def test_official_sec_service_falls_back_to_cached_ticker_directory_when_request_fails(
+    tmp_path: Path,
+) -> None:
+    ticker_url = "https://www.sec.gov/files/company_tickers.json"
+    cached_payload = {
+        "0": {"title": "Apple Inc.", "ticker": "AAPL", "cik_str": 320193},
+    }
+    settings = InvestmentResearchSettings(
+        fast_model="qwen-plus",
+        deep_model="qwen-plus",
+        review_model="qwen-plus",
+        company_resolver_model="qwen-plus",
+        openai_api_key="llm-key",
+        openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        tavily_api_key="tvly-key",
+        sec_api_email="analyst@example.com",
+        artifact_root=str(tmp_path / "artifacts"),
+    )
+    primed_service = OfficialSecService(
+        settings=settings,
+        session=RecordingSession({ticker_url: cached_payload}),
+    )
+
+    assert primed_service.lookup_company_by_ticker("AAPL") == {
+        "title": "Apple Inc.",
+        "name": "Apple Inc.",
+        "ticker": "AAPL",
+        "cik_str": 320193,
+        "exchange": "",
+    }
+
+    fallback_service = OfficialSecService(
+        settings=settings,
+        session=RecordingSession(
+            {
+                ticker_url: requests.exceptions.SSLError("unexpected eof"),
+            }
+        ),
+    )
+
+    assert fallback_service.lookup_company_by_ticker("AAPL") == {
+        "title": "Apple Inc.",
+        "name": "Apple Inc.",
+        "ticker": "AAPL",
+        "cik_str": 320193,
+        "exchange": "",
+    }
+
+
+def test_retry_session_fails_fast_on_connection_and_read_errors() -> None:
+    session = _build_retry_session(3)
+
+    adapter = session.get_adapter("https://")
+    retry = adapter.max_retries
+
+    assert retry.total == 3
+    assert retry.connect == 0
+    assert retry.read == 0
+
+
+def test_official_sec_service_falls_back_to_stockanalysis_quote_when_nasdaq_times_out() -> None:
+    session = RecordingSession(
+        {
+            "https://api.nasdaq.com/api/quote/AAPL/info?assetclass=stocks": requests.exceptions.ReadTimeout(
+                "nasdaq timeout"
+            ),
+            "https://stockanalysis.com/stocks/aapl/": """
+            <html>
+              <body>
+                <div class="mb-5 flex flex-row items-end space-x-2 xs:space-x-3 bp:space-x-5">
+                  <div class="max-w-[50%]">
+                    <div class="text-4xl font-bold transition-colors duration-300 block sm:inline">333.74</div>
+                    <div class="font-semibold block text-lg xs:text-xl sm:inline sm:text-2xl text-green-vivid">+0.48 (0.14%)</div>
+                    <div class="mt-0.5 text-xxs text-faded xs:text-tiny bp:text-sm">
+                      <span class="block font-semibold sm:inline">At close:</span> Jul 17, 2026, 4:00 PM EDT
+                    </div>
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+        }
+    )
+    service = OfficialSecService(settings=build_settings(), session=session)
+
+    payload = service.fetch_market_quote("AAPL")
+
+    assert payload["source"] == "stockanalysis_quote_page"
+    assert payload["data"]["primaryData"]["lastSalePrice"] == "$333.74"
+    assert payload["data"]["primaryData"]["lastTradeTimestamp"] == "Jul 17, 2026, 4:00 PM EDT"
+    assert session.requests[0][0] == "https://api.nasdaq.com/api/quote/AAPL/info?assetclass=stocks"
+    assert session.requests[1][0] == "https://stockanalysis.com/stocks/aapl/"

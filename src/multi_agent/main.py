@@ -39,6 +39,7 @@ class RunOutputPaths:
     runtime_log_path: Path
     data_quality_review_path: Path
     logic_compliance_review_path: Path
+    final_decision_path: Path
     latest_metrics_path: Path
     evaluation_summary_path: Path
     readme_path: Path
@@ -76,6 +77,14 @@ def _now_for_output_paths() -> datetime:
     return datetime.now()
 
 
+def _run_id_from_time(run_time: datetime) -> str:
+    return run_time.strftime("%Y%m%d_%H%M%S")
+
+
+def _run_time_from_run_id(run_id: str) -> datetime:
+    return datetime.strptime(run_id, "%Y%m%d_%H%M%S")
+
+
 def _slugify_for_path(value: str, *, fallback: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9]+", "_", value.lower()).strip("_")
     return normalized or fallback
@@ -106,6 +115,7 @@ def _build_run_output_paths(
         runtime_log_path=run_dir / "05_runtime.txt",
         data_quality_review_path=run_dir / "08_data_quality_review.md",
         logic_compliance_review_path=run_dir / "09_logic_compliance_review.md",
+        final_decision_path=run_dir / "final_decision.json",
         latest_metrics_path=run_dir / "latest_run_metrics.json",
         evaluation_summary_path=run_dir / "evaluation_summary.json",
         readme_path=run_dir / "README.md",
@@ -139,6 +149,7 @@ def _write_run_readme(
             "- `07_structured_report.json`：结构化完整报告快照",
             "- `08_data_quality_review.md`：数据质量审查结果",
             "- `09_logic_compliance_review.md`：逻辑与合规审查结果",
+            "- `final_decision.json`：最终状态单一真值源",
             "- `latest_run_metrics.json`：单次运行评估指标",
             "- `evaluation_summary.json`：当前目录下的评估汇总",
         ]
@@ -267,7 +278,7 @@ def _final_status_from_result(result: object) -> str:
             _workflow_result_value(result, "final_decision", "passed"),
         )
     ).strip().lower()
-    if status in {"passed", "blocked"}:
+    if status in {"passed", "blocked", "evidence_limited"}:
         return status
     raise ValueError(f"未知终态：{status}")
 
@@ -299,6 +310,82 @@ def _describe_trust_score(score: int) -> tuple[str, str]:
     return "low", "证据不足，当前结果更适合作为线索而非结论。"
 
 
+def _final_delivery_state_from_status(final_status: str) -> str:
+    if final_status == "passed":
+        return "formal_report"
+    if final_status == "evidence_limited":
+        return "evidence_limited_report"
+    return "blocked_notice"
+
+
+def _build_final_decision_record(
+    *,
+    company_name: str,
+    company_ticker: str,
+    result: object,
+    final_status: str,
+) -> dict[str, object]:
+    return {
+        "company_name": company_name,
+        "company_ticker": company_ticker,
+        "final_decision": final_status,
+        "final_delivery_state": _final_delivery_state_from_status(final_status),
+        "trust_score": _trust_score_from_result(result),
+        "blocking_reasons": _blocking_reasons_from_result(result),
+    }
+
+
+def _write_final_decision(
+    output_paths: RunOutputPaths,
+    *,
+    company_name: str,
+    company_ticker: str,
+    result: object,
+    final_status: str,
+) -> dict[str, object]:
+    final_decision = _build_final_decision_record(
+        company_name=company_name,
+        company_ticker=company_ticker,
+        result=result,
+        final_status=final_status,
+    )
+    _write_json_file(output_paths.final_decision_path, final_decision)
+    return final_decision
+
+
+def _apply_final_decision_projection(
+    recommendation: dict[str, object],
+    structured_report: dict[str, object],
+    *,
+    final_decision: dict[str, object],
+) -> None:
+    final_status = str(final_decision.get("final_decision", "passed")).strip()
+    final_delivery_state = str(final_decision.get("final_delivery_state", "")).strip()
+    blocking_reasons = [
+        str(item).strip()
+        for item in final_decision.get("blocking_reasons", [])
+        if str(item).strip()
+    ]
+    recommendation["status"] = final_status
+    recommendation["final_delivery_state"] = final_delivery_state
+    structured_report["status"] = final_status
+    structured_report["final_decision"] = final_status
+    structured_report["final_delivery_state"] = final_delivery_state
+    if final_status == "blocked":
+        recommendation["stance"] = "blocked"
+        recommendation["stance_label"] = "阻断"
+        structured_report["stance"] = "blocked"
+        structured_report["stance_label"] = "阻断"
+    elif final_status == "evidence_limited":
+        recommendation["stance"] = "watch"
+        recommendation["stance_label"] = "证据受限"
+        structured_report["stance"] = "watch"
+        structured_report["stance_label"] = "证据受限"
+    if blocking_reasons:
+        recommendation["blocking_reasons"] = blocking_reasons
+        structured_report["blocking_reasons"] = blocking_reasons
+
+
 def _write_blocked_report(output_paths: RunOutputPaths, result: object) -> None:
     body_lines = [
         "状态：硬门控未通过，正式投资备忘录未放行。",
@@ -317,6 +404,29 @@ def _write_blocked_report(output_paths: RunOutputPaths, result: object) -> None:
     _write_markdown_file(
         output_paths.final_report_path,
         "投资备忘录（已阻断）",
+        "\n".join(body_lines),
+        placeholder=False,
+    )
+
+
+def _write_evidence_limited_report(output_paths: RunOutputPaths, result: object) -> None:
+    body_lines = [
+        "状态：已生成证据受限版备忘录，正式投资备忘录暂未放行。",
+        "",
+    ]
+    trust_score = _trust_score_from_result(result)
+    if trust_score is not None:
+        body_lines.append(f"trust_score：{trust_score}")
+        body_lines.append("")
+    blocking_reasons = _blocking_reasons_from_result(result)
+    body_lines.append("限制说明：")
+    if blocking_reasons:
+        body_lines.extend(f"- {item}" for item in blocking_reasons)
+    else:
+        body_lines.append("- 关键 formal report 字段未完全闭合，已按 evidence-limited 交付。")
+    _write_markdown_file(
+        output_paths.final_report_path,
+        "受限版投资备忘录",
         "\n".join(body_lines),
         placeholder=False,
     )
@@ -356,7 +466,7 @@ def _write_failure_recommendation_output(
 
 
 def _validate_successful_outputs(output_paths: RunOutputPaths, *, final_status: str) -> None:
-    if final_status not in {"passed", "blocked"}:
+    if final_status not in {"passed", "blocked", "evidence_limited"}:
         raise RuntimeError(f"不支持的工作流结束状态：{final_status}")
     for path, _ in _standard_markdown_outputs(output_paths):
         if not path.exists() or not path.read_text(encoding="utf-8").strip() or _is_placeholder_file(path):
@@ -423,14 +533,20 @@ def _resolve_watchlist_path(settings: InvestmentResearchSettings) -> Path:
 def _write_structured_outputs(
     output_paths: RunOutputPaths,
     *,
+    final_decision: dict[str, object],
     latest_metrics: dict[str, object],
     company_name: str,
     company_ticker: str,
     watchlist_path: Path,
     save_to_watchlist: bool,
-    final_status: str,
-    blocking_reasons: list[str],
 ) -> dict[str, object]:
+    final_status = str(final_decision.get("final_decision", "passed")).strip()
+    final_delivery_state = str(final_decision.get("final_delivery_state", "")).strip()
+    blocking_reasons = [
+        str(item).strip()
+        for item in final_decision.get("blocking_reasons", [])
+        if str(item).strip()
+    ]
     recommendation = build_structured_recommendation(
         company_name=company_name,
         company_ticker=company_ticker,
@@ -443,17 +559,11 @@ def _write_structured_outputs(
         report_path=output_paths.final_report_path,
         metrics=latest_metrics,
     )
-    recommendation["status"] = final_status
-    structured_report["status"] = final_status
-    structured_report["final_decision"] = final_status
-    if final_status == "blocked":
-        recommendation["stance"] = "blocked"
-        recommendation["stance_label"] = "阻断"
-        structured_report["stance"] = "blocked"
-        structured_report["stance_label"] = "阻断"
-    if blocking_reasons:
-        recommendation["blocking_reasons"] = blocking_reasons
-        structured_report["blocking_reasons"] = blocking_reasons
+    _apply_final_decision_projection(
+        recommendation,
+        structured_report,
+        final_decision=final_decision,
+    )
     _write_json_file(output_paths.structured_recommendation_path, recommendation)
     _write_json_file(output_paths.structured_report_path, structured_report)
     if save_to_watchlist:
@@ -466,6 +576,15 @@ def _finalize_successful_result(output_paths: RunOutputPaths, result: object) ->
     _materialize_standard_outputs(output_paths, result)
     if final_status == "blocked":
         _write_blocked_report(output_paths, result)
+    if (
+        final_status == "evidence_limited"
+        and (
+            not output_paths.final_report_path.exists()
+            or _is_placeholder_file(output_paths.final_report_path)
+            or not output_paths.final_report_path.read_text(encoding="utf-8").strip()
+        )
+    ):
+        _write_evidence_limited_report(output_paths, result)
     _validate_successful_outputs(output_paths, final_status=final_status)
     return final_status
 
@@ -475,10 +594,13 @@ def _annotate_latest_metrics(
     latest_metrics: dict[str, object],
     *,
     result: object,
-    final_status: str,
+    final_decision: dict[str, object],
 ) -> dict[str, object]:
     annotated_metrics = dict(latest_metrics)
+    final_status = str(final_decision.get("final_decision", "passed")).strip()
     annotated_metrics["final_status"] = final_status
+    annotated_metrics["final_delivery_state"] = final_decision.get("final_delivery_state", "")
+    annotated_metrics["final_decision"] = final_decision
 
     blocking_reasons = _blocking_reasons_from_result(result)
     if blocking_reasons:
@@ -577,6 +699,13 @@ def _rebuild_watchlist_from_artifacts(
             report_path=report_path,
             metrics=latest_metrics,
         )
+        final_decision = _load_json_file(run_dir / "final_decision.json")
+        if final_decision:
+            _apply_final_decision_projection(
+                recommendation,
+                structured_report,
+                final_decision=final_decision,
+            )
         _write_json_file(run_dir / "06_structured_recommendation.json", recommendation)
         _write_json_file(run_dir / "07_structured_report.json", structured_report)
         store.upsert(recommendation)
@@ -631,10 +760,12 @@ def _workflow_inputs(company_name: str, company_ticker: str) -> dict[str, str]:
     if resolved_local_pdf_path and not resolved_local_pdf_path.is_absolute():
         resolved_local_pdf_path = _project_root() / resolved_local_pdf_path
     local_pdf_available = "yes" if resolved_local_pdf_path and resolved_local_pdf_path.exists() else "no"
+    run_id = _run_id_from_time(_now_for_output_paths())
 
     return {
         "company_name": resolved_company.normalized_name,
         "company_ticker": resolved_company.ticker,
+        "run_id": run_id,
         "company_market_label": market_validation.market_label,
         "market_resolution_status": market_validation.resolution_status,
         "current_year": str(datetime.now().year),
@@ -643,6 +774,14 @@ def _workflow_inputs(company_name: str, company_ticker: str) -> dict[str, str]:
         "local_filing_pdf_path": str(resolved_local_pdf_path) if resolved_local_pdf_path else "未提供本地 PDF 文件",
         "local_filing_pdf_available": local_pdf_available,
     }
+
+
+def _ensure_run_id(inputs: dict[str, str]) -> dict[str, str]:
+    normalized_inputs = dict(inputs)
+    run_id = str(normalized_inputs.get("run_id", "")).strip()
+    if not run_id:
+        normalized_inputs["run_id"] = _run_id_from_time(_now_for_output_paths())
+    return normalized_inputs
 
 
 def _raise_user_facing_runtime_error(error: Exception) -> None:
@@ -668,12 +807,12 @@ def run():
             )
             print(f"watchlist 重建完成，共处理 {rebuilt_count} 个运行目录。")
             return
-        inputs = _workflow_inputs(args.company_name, args.company_ticker)
+        inputs = _ensure_run_id(_workflow_inputs(args.company_name, args.company_ticker))
         output_paths = _build_run_output_paths(
             base_artifacts_dir=_resolve_output_path(settings.artifacts_dir),
             company_name=inputs["company_name"],
             company_ticker=inputs["company_ticker"],
-            run_time=_now_for_output_paths(),
+            run_time=_run_time_from_run_id(inputs["run_id"]),
         )
         output_paths.run_dir.mkdir(parents=True, exist_ok=True)
         _write_run_readme(
@@ -702,27 +841,34 @@ def run():
                 "ARTIFACTS_DIR": str(output_paths.run_dir),
                 "FINAL_REPORT_PATH": str(output_paths.final_report_path),
                 "COMPANY_MARKET_LABEL": inputs.get("company_market_label", ""),
+                "RUN_ID": inputs.get("run_id", ""),
             }
         ):
             with _graceful_termination_signals():
                 result = _kickoff_workflow(inputs)
         final_status = _finalize_successful_result(output_paths, result)
+        final_decision = _write_final_decision(
+            output_paths,
+            company_name=inputs["company_name"],
+            company_ticker=inputs["company_ticker"],
+            result=result,
+            final_status=final_status,
+        )
         latest_metrics = evaluation.finalize(success=True)
         latest_metrics = _annotate_latest_metrics(
             output_paths,
             latest_metrics,
             result=result,
-            final_status=final_status,
+            final_decision=final_decision,
         )
         _write_structured_outputs(
             output_paths,
+            final_decision=final_decision,
             latest_metrics=latest_metrics,
             company_name=inputs["company_name"],
             company_ticker=inputs["company_ticker"],
             watchlist_path=_resolve_watchlist_path(settings),
             save_to_watchlist=getattr(args, "save_to_watchlist", False),
-            final_status=final_status,
-            blocking_reasons=_blocking_reasons_from_result(result),
         )
         print(f"运行完成，文件已写入：{output_paths.run_dir}")
     except (FatalAPIError, ValueError) as error:
@@ -808,15 +954,17 @@ def run_trigger_payload(trigger_payload: dict[str, object]):
     token = None
     try:
         settings = InvestmentResearchSettings.from_env()
-        workflow_inputs = _workflow_inputs(
-            trigger_payload.get("company_name", settings.company_name),
-            trigger_payload.get("company_ticker", settings.company_ticker),
+        workflow_inputs = _ensure_run_id(
+            _workflow_inputs(
+                trigger_payload.get("company_name", settings.company_name),
+                trigger_payload.get("company_ticker", settings.company_ticker),
+            )
         )
         output_paths = _build_run_output_paths(
             base_artifacts_dir=_resolve_output_path(settings.artifacts_dir),
             company_name=workflow_inputs["company_name"],
             company_ticker=workflow_inputs["company_ticker"],
-            run_time=_now_for_output_paths(),
+            run_time=_run_time_from_run_id(workflow_inputs["run_id"]),
         )
         output_paths.run_dir.mkdir(parents=True, exist_ok=True)
         _write_run_readme(
@@ -844,6 +992,7 @@ def run_trigger_payload(trigger_payload: dict[str, object]):
             "crewai_trigger_payload": trigger_payload,
             "company_name": workflow_inputs["company_name"],
             "company_ticker": workflow_inputs["company_ticker"],
+            "run_id": workflow_inputs["run_id"],
             "company_market_label": workflow_inputs.get("company_market_label", ""),
             "market_resolution_status": workflow_inputs.get("market_resolution_status", ""),
             "current_year": str(datetime.now().year),
@@ -857,27 +1006,34 @@ def run_trigger_payload(trigger_payload: dict[str, object]):
                 "ARTIFACTS_DIR": str(output_paths.run_dir),
                 "FINAL_REPORT_PATH": str(output_paths.final_report_path),
                 "COMPANY_MARKET_LABEL": workflow_inputs.get("company_market_label", ""),
+                "RUN_ID": workflow_inputs.get("run_id", ""),
             }
         ):
             with _graceful_termination_signals():
                 result = _kickoff_workflow(inputs)
         final_status = _finalize_successful_result(output_paths, result)
+        final_decision = _write_final_decision(
+            output_paths,
+            company_name=workflow_inputs["company_name"],
+            company_ticker=workflow_inputs["company_ticker"],
+            result=result,
+            final_status=final_status,
+        )
         latest_metrics = evaluation.finalize(success=True)
         latest_metrics = _annotate_latest_metrics(
             output_paths,
             latest_metrics,
             result=result,
-            final_status=final_status,
+            final_decision=final_decision,
         )
         _write_structured_outputs(
             output_paths,
+            final_decision=final_decision,
             latest_metrics=latest_metrics,
             company_name=workflow_inputs["company_name"],
             company_ticker=workflow_inputs["company_ticker"],
             watchlist_path=_resolve_watchlist_path(settings),
             save_to_watchlist=bool(trigger_payload.get("save_to_watchlist", False)),
-            final_status=final_status,
-            blocking_reasons=_blocking_reasons_from_result(result),
         )
         print(f"运行完成，文件已写入：{output_paths.run_dir}")
         return result

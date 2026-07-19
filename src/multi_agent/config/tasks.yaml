@@ -12,6 +12,16 @@ market_intelligence_task:
     请为 {company_name}（{company_ticker}）构建 {current_year} 年的事件与指引分析。
     基于 Tavily 搜索得到的新闻、公告、管理层表态和监管事件，提炼近期关键事件、
     影响路径、催化剂与待验证项。只保留有来源支撑的事实，结果必须使用中文。
+    涉及市值、估值倍数、自由现金流同比增速等数字时，只能将外部媒体数字标记为
+    “外部上下文/媒体表述”，不得写成硬事实汇总；若未与统一快照或 filing/company facts
+    核对，必须明确标注“待验证”，不得输出确定性结论。
+    执行约束：
+    1. 只允许围绕以下 6 个主题做检索：财报/指引、Apple Intelligence/中国 AI、
+    产品周期/折叠屏、提价与存储成本、DOJ/EU DMA 监管、OpenAI 诉讼与治理。
+    2. 最多调用 6 次 Tavily；若工具返回 degraded 或已拿到足够证据，不得继续扩张检索。
+    3. 忽略视频页、导航页、Cookie/隐私条款、无关同行公司结果、纯传闻汇总页。
+    4. 一旦已形成 5 个有来源支撑的核心事件账本，就停止搜索并开始写作。
+    5. 若部分主题证据不足，直接写“证据不足/待验证”，不要为了补齐版面继续搜索。
   expected_output: >
     一份中文 markdown 事件与指引分析，至少包含事件、时间、来源、影响路径、
     置信度和待验证项，并附上至少 5 条来源引用。
@@ -22,6 +32,9 @@ filing_review_task:
     结合监管文件检索和 company facts 工具，为 {company_name}（{company_ticker}）
     输出中文基本面分析。你必须明确哪些判断来自 filings、哪些来自结构化财务事实，
     并指出收入质量、利润率、现金流和资产负债表的关键结论。
+    只有 filing、company facts 或统一快照中已经验证的数字，才能写成硬事实。
+    若现金、债务、分部收入、services 占比等关键字段未验证，必须降级为待验证项，
+    不得输出“结构性改善”“净现金状态可确认”等强结论。
   expected_output: >
     一份中文 markdown 基本面分析，包含关键 filing、财务事实摘要、利多利空、
     以及待补充证据。
@@ -34,7 +47,14 @@ financial_analysis_task:
     当前本地 PDF 状态：{local_filing_pdf_available}；本地 PDF 路径：{local_filing_pdf_path}。
     只有当本地 PDF 状态为 yes 时，才允许使用 PDF 文本提取工具；如果状态不是 yes，
     不要猜测文件名、不要尝试读取不存在的本地文件。若存在数据缺口，必须明确指出，
-    不能编造数字。
+    不能编造数字。当前市值只能来自统一 market snapshot 或已验证字段，
+    FY2026E FCF 同比只能来自统一 fcf snapshot 或显式给出的计算过程；若无法取得
+    stock price、diluted shares、cash/debt 等关键字段，只能输出 evidence-limited
+    估值说明，不得输出正式估值结论。禁止事项：不得引入未在工具返回中出现的历史年份财务数字、
+    回购/股息金额、分部毛利率、行业或大型科技“典型倍数区间”、无风险利率假设、卖方一致预期；
+    不得引用“行业典型区间”或“历史均值”来支撑正式结论；不得把假设性 DCF、可比公司倍数、
+    历史均值回归区间写成正式结论。若为了说明敏感性必须展示情景分析，必须逐项标注“示例情景/
+    待验证”，且不得据此给出目标价、买卖评级或“明显高估/低估”的确定性结论。
   expected_output: >
     一份中文 markdown 估值与量化分析，包含关键指标表、估值判断、风险收益权衡
     和数据缺口说明。
@@ -42,33 +62,119 @@ financial_analysis_task:
 
 data_quality_review_task:
   description: >
-    请审查市场验证、事件与指引分析、基本面分析和估值分析四份结果，检查来源缺失、
-    市场误用、工具越界、数据冲突和无依据结论。必须引用 reviewer tools 的结构化结果，
-    只输出审查发现，不要重写分析内容。
+    你是 AgentVest 的数据质量审查代理（Data Quality Reviewer），不是研究写作者，
+    不是报告润色者，也不是终态裁决者。你必须显式仿照 GPT-Researcher 的生成哲学执行：
+    先证据，后判断；先约束，后表达；关键结论必须绑定来源；证据不足时必须降级，
+    prose 只是说明层，真正驱动 gate 的必须是 machine-readable contract。
+    你只能使用 00_market_validation.md、01_market_intelligence.md、02_filing_review.md、
+    03_financial_analysis.md、reviewer tools 的结构化输出，以及显式传入的
+    company_name、company_ticker、run_id。不得读取未明确提供的本地文件、网页缓存、
+    额外 PDF、额外 HTML 或任何外部上下文。
+    禁止事项：不要重写研究结论；不要替分析师补证据；不要仅凭语气、标题、P0、Blockers、
+    Gate 风险等 prose 风格直接给出 blocker；不要因为“看起来像专业报告”就默认
+    formal_report 可放行；不要把工具失败与研究失败混为一谈；不要输出没有 evidence ref
+    的关键判断。
+    工作步骤：
+    Step 1. 确认证据池边界，列出实际使用的 artifact 与 reviewer tools 结构化结果。
+    Step 2. 评估研究证据质量，填写 evidence_coverage_ratio、financial_coverage_score、
+    gate_financial_coverage_score，并识别 critical_conflict、unsupported_critical_claim、
+    market_policy_violation。
+    Step 3. 评估工具健康状态，对每个 reviewer tool 标记 healthy、degraded、failed
+    或 not_used，并判断 primary_class 是 none、research_blocked 还是 pipeline_degraded。
+    Step 4. 评估交付资格，判断 formal_report_allowed、evidence_limited_report_allowed、
+    blocked_notice_required，并确定 recommended_delivery_state。
+    Step 5. 先输出 JSON code block，JSON 必须符合 AgentVest Review Contract，包含
+    decision、delivery_eligibility、failure_taxonomy、coverage、tool_health、
+    blocking_reasons、rerun_reasons、allow_limited_delivery、review_summary、
+    artifact_refs、findings。
+    Step 6. 再输出 markdown 审查说明，只解释机器判定，不得新增机器判定。
+    输出格式必须严格按顺序输出：
+    PART A: MACHINE_READABLE_JSON
+    PART B: HUMAN_READABLE_MARKDOWN
+    判定规则：真实关键冲突、未经支持的关键结论、市场策略越界优先判为 research_blocked；
+    工具退化、解析失败、artifact 缺失但仍足以支持受限表达时，可判为 pipeline_degraded
+    且 allow_limited_delivery=true；formal 所需关键字段未闭合但方向性表述仍可证据绑定时，
+    可以拒绝 formal、允许 evidence_limited；不允许仅凭 prose 标题触发 blocked。
   expected_output: >
-    一份中文 markdown 数据质量审查报告，按必须修复、建议修复、仅记录三级列出问题，
-    并明确对应的 gate 风险与修复方向。
+    先输出一份符合 AgentVest Review Contract 的 machine-readable JSON，再输出一份
+    中文 markdown 数据质量审查报告，用于解释 formal_report、evidence_limited_report、
+    blocked_notice 三种交付状态的资格判断与修复方向。
   agent: data_quality_reviewer
 
 investment_report_task:
   description: >
-    请基于之前所有任务输出，为 {company_name} 撰写最终中文投资备忘录。
-    仅当 analysis gate 已通过时，才允许撰写正式投资备忘录。
-    若 gate 未通过，不得生成正式投资建议，不得擅自补充缺失证据。
-    报告必须包含执行摘要、业务概览、近期动态、财务分析、风险、催化剂、
-    投资建议和置信度，并达到可以给面试官或招聘经理评审的项目作品质量。
-    只能使用前序任务 context 和已经生成的工作流产出，不要猜测、读取或引用
-    未明确提供的本地 HTML、PDF 或其他文件路径。
+    你是 AgentVest 的投资备忘录生成代理（Investment Report Writer）。你的职责不是
+    自行决定终态，而是在给定 control-plane 决策和限定证据池的前提下，生成与该决策
+    严格一致的文本表现层。你必须显式仿照 GPT-Researcher 的生成哲学执行：
+    evidence-first、constrained generation、claim-to-source binding、
+    downgrade instead of over-complete、report is presentation not truth。
+    你只能使用 00_market_validation.md、01_market_intelligence.md、02_filing_review.md、
+    03_financial_analysis.md、08_data_quality_review 的 machine-readable contract、
+    以及显式传入的 REPORT_MODE、company_name、company_ticker、run_id。
+    不得读取未明确提供的外部网页、HTML、PDF、本地缓存或其他文件。
+    REPORT_MODE 只可能是 formal_report、evidence_limited_report、blocked_notice，
+    你必须服从 REPORT_MODE，不得自行升级或降级状态。
+    禁止事项：不要根据文稿完整性自行补全缺失事实；不要写任何无法绑定到上游 artifact
+    的关键数字、关键判断、重大风险提示、催化剂或建议；不要在 formal_report 不允许时
+    伪装成正式报告；不要在 blocked_notice 模式下输出完整研究报告；不要读取 control-plane
+    之外的额外文件。
+    写作步骤：
+    Step 1. 锁定证据边界，读取 REPORT_MODE 与 analysis review contract 中的
+    delivery_eligibility、blocking_reasons、rerun_reasons。
+    Step 2. 先生成 claim plan，对每个核心 claim 绑定至少一个 artifact ref；
+    没有 artifact ref 的 claim 直接删除。
+    Step 3. 根据 REPORT_MODE 选择写法：
+    formal_report 允许正式投资备忘录结构；
+    evidence_limited_report 只能输出受限版投资备忘录，并明确未放行边界；
+    blocked_notice 只能输出阻断通知。
+    Step 4. 执行 evidence-bound writing。每个核心结论后都附上统一格式的来源锚点：
+    [来源: <artifact_id>] 或 [来源: <artifact_id> | 字段: <field_name>]。
+    Step 5. 自检是否存在无来源锚点的关键结论、超出 REPORT_MODE 授权的表达、
+    或“看起来像 formal，但底层证据未闭合”的句子；如有，必须删除或降级。
+    强制写作规则：强买卖建议只允许出现在 formal_report 模式；
+    evidence_limited_report 模式的最高强度是“继续观察”“待补证后复核”；
+    blocked_notice 模式不得出现正式建议、估值结论、强方向判断；
+    任何“结构性改善”“净现金状态已确认”“估值已充分反映”等强结论都必须有明确锚点，
+    否则不得输出。
   expected_output: >
-    一份高质量中文 markdown 投资备忘录，具有清晰标题、引用来源、明确建议，
-    并在结尾简要说明该工作流如何提升分析师效率；若接收到 blocked 状态，
-    必须输出阻断说明而非正式报告。
+    一份严格受 REPORT_MODE 约束的中文 markdown 投资备忘录：
+    formal_report 输出正式备忘录，
+    evidence_limited_report 输出受限版备忘录，
+    blocked_notice 输出阻断通知。
+    每个核心结论必须带 claim-to-source binding，证据不足时必须写“证据不足，不作判断”。
   agent: report_writing_analyst
 
 logic_compliance_review_task:
   description: >
-    请复核最终投资备忘录及其上游审查结果，检查逻辑跳跃、证据外推、确定性表述过强、
-    合规措辞不足和风险披露缺失。只输出审查意见，不要重写整份报告。
+    你是 AgentVest 的逻辑与合规审查代理（Logic & Compliance Reviewer）。
+    你的职责是审查最终报告文本是否越权、是否超出 control-plane 允许的表达边界、
+    是否存在 claim 与 source 解绑、是否与 analysis review contract 的放行范围一致。
+    你必须显式仿照 GPT-Researcher 的生成哲学执行：先证据，后判断；prose 只做解释，
+    不做终态真值；核心审查对象不是文风，而是文本是否越权；关键 claim 必须能回指上游
+    artifact 或结构化字段；不允许通过标题、P0、Blockers、语气强弱直接决定终态。
+    你只能使用 04_investment_report.md、08_data_quality_review 的 machine-readable contract、
+    显式传入的 REPORT_MODE，以及 00 至 03 的上游 artifact。不得读取未明确提供的额外文件。
+    禁止事项：不要重写整份报告；不要把 prose 标题直接升级为终态；不要重新做 analysis gate；
+    不要因为存在 P0、Blockers、标题文字而自动输出 blocked；你的 JSON 只能表达审查建议和
+    一致性判断，不能抢 final_decision 的真值权。
+    审查步骤：
+    Step 1. 读取 control-plane 约束，明确当前报告理论上允许的表达强度。
+    Step 2. 审查报告是否越权，检查是否存在超出 REPORT_MODE 的表达、未经允许的正式建议、
+    把待验证事项写成已确认事实、或遗漏必要受限说明/阻断说明。
+    Step 3. 审查 claim-to-source binding，统计 claim_binding_ratio，并把无法回指的关键 claim
+    记为 claim_unbound，把受限模式下仍使用 formal 口吻的句子记为 report_overreach。
+    Step 4. 先输出 JSON code block，JSON 必须符合 AgentVest Review Contract，
+    review_stage 视为 report，decision 仅表示审查建议，不是最终真值。
+    Step 5. 再输出 markdown 审查说明，只解释 JSON，不得新增机器判定。
+    输出格式必须严格按顺序输出：
+    PART A: MACHINE_READABLE_JSON
+    PART B: HUMAN_READABLE_MARKDOWN
+    判定规则：文本与 REPORT_MODE 一致且关键 claim 可绑定时可为 pass；
+    文本主体正确但存在少量未绑定 claim、说明遗漏、表达偏强时可为 rerun；
+    文本明显越权、强行 formal 化、关键 claim 大量不可绑定、或与 control-plane 明显冲突时
+    可为 block；不允许通过 P0、Blockers、高风险标题等 prose 自动生成终态。
   expected_output: >
-    一份中文 markdown 逻辑与合规审查报告，按必须修复、建议修复、仅记录三级列出问题。
+    先输出一份符合 AgentVest Review Contract 的 machine-readable JSON，再输出一份
+    中文 markdown 逻辑与合规审查报告，用于解释文本是否越权、claim-to-source binding
+    是否达标，以及当前报告与 REPORT_MODE 是否一致。
   agent: logic_compliance_reviewer

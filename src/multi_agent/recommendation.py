@@ -72,6 +72,14 @@ def _extract_section_lines(report_content: str, section_name: str) -> list[str]:
     return collected
 
 
+def _extract_section_lines_by_aliases(report_content: str, section_names: list[str]) -> list[str]:
+    for section_name in section_names:
+        lines = _extract_section_lines(report_content, section_name)
+        if lines:
+            return lines
+    return []
+
+
 def _extract_section_summary(report_content: str, section_name: str) -> str:
     for line in _extract_section_lines(report_content, section_name):
         if not line.startswith("-") and not line.startswith("*"):
@@ -81,6 +89,17 @@ def _extract_section_summary(report_content: str, section_name: str) -> str:
 
 def _extract_section_text(report_content: str, section_name: str) -> str:
     return "\n".join(_extract_section_lines(report_content, section_name)).strip()
+
+
+def _extract_section_summary_by_aliases(report_content: str, section_names: list[str]) -> str:
+    for line in _extract_section_lines_by_aliases(report_content, section_names):
+        if not line.startswith("-") and not line.startswith("*"):
+            return line
+    return ""
+
+
+def _extract_section_text_by_aliases(report_content: str, section_names: list[str]) -> str:
+    return "\n".join(_extract_section_lines_by_aliases(report_content, section_names)).strip()
 
 
 def _extract_section_bullets(report_content: str, section_name: str) -> list[str]:
@@ -93,6 +112,23 @@ def _extract_section_bullets(report_content: str, section_name: str) -> list[str
         return bullets
 
     return _extract_table_items(section_lines, section_name=section_name)
+
+
+def _extract_section_bullets_by_aliases(report_content: str, section_names: list[str]) -> list[str]:
+    for section_name in section_names:
+        section_lines = _extract_section_lines(report_content, section_name)
+        if not section_lines:
+            continue
+        bullets: list[str] = []
+        for line in section_lines:
+            if line.startswith("-") or line.startswith("*"):
+                bullets.append(line[1:].strip())
+        if bullets:
+            return bullets
+        table_items = _extract_table_items(section_lines, section_name=section_name)
+        if table_items:
+            return table_items
+    return []
 
 
 def _split_markdown_row(line: str) -> list[str]:
@@ -142,14 +178,25 @@ def _extract_table_items(section_lines: list[str], *, section_name: str) -> list
 
 
 def _infer_stance(report_content: str) -> tuple[str, str]:
-    section_text = "\n".join(_extract_section_lines(report_content, "投资建议")) or report_content
+    section_text = (
+        "\n".join(
+            _extract_section_lines_by_aliases(
+                report_content,
+                ["投资建议", "投资建议与置信度", "综合评估与后续观察路径"],
+            )
+        )
+        or report_content
+    )
     sell_keywords = ("建议卖出", "卖出", "减持", "underperform", "negative")
     buy_keywords = ("建议买入", "建议增持", "买入", "增持", "outperform", "positive")
+    watch_keywords = ("继续观察", "待补证后复核", "证据受限", "watch")
     hold_keywords = ("建议持有", "持有", "中性", "观望", "hold", "neutral")
     if any(keyword in section_text for keyword in sell_keywords):
         return "sell", "减持"
     if any(keyword in section_text for keyword in buy_keywords):
         return "buy", "增持"
+    if any(keyword in section_text for keyword in watch_keywords):
+        return "watch", "观察"
     if any(keyword in section_text for keyword in hold_keywords):
         return "hold", "中性"
     return "watch", "观察"
@@ -170,10 +217,22 @@ def build_structured_report(
         metrics=metrics,
     )
     sections = {
-        "business_overview": _extract_section_text(report_content, "业务概览"),
-        "recent_updates": _extract_section_text(report_content, "近期动态"),
-        "financial_analysis": _extract_section_text(report_content, "财务分析"),
-        "investment_recommendation": _extract_section_text(report_content, "投资建议"),
+        "business_overview": _extract_section_text_by_aliases(
+            report_content,
+            ["业务概览", "已验证基本面硬事实"],
+        ),
+        "recent_updates": _extract_section_text_by_aliases(
+            report_content,
+            ["近期动态", "外部市场情报与催化剂"],
+        ),
+        "financial_analysis": _extract_section_text_by_aliases(
+            report_content,
+            ["财务分析", "核心主张的证据映射"],
+        ),
+        "investment_recommendation": _extract_section_text_by_aliases(
+            report_content,
+            ["投资建议", "投资建议与置信度", "综合评估与后续观察路径"],
+        ),
     }
     citation_urls = _URL_PATTERN.findall(report_content)
 
@@ -213,9 +272,18 @@ def build_structured_recommendation(
     report_content = report_path.read_text(encoding="utf-8")
     trust_score = metrics.get("trust_score") or calculate_trust_score(metrics)
     stance, stance_label = _infer_stance(report_content)
-    summary = _extract_section_summary(report_content, "执行摘要")
-    catalysts = _extract_section_bullets(report_content, "催化剂")
-    risks = _extract_section_bullets(report_content, "风险")
+    summary = _extract_section_summary_by_aliases(
+        report_content,
+        ["执行摘要", "综合评估与后续观察路径"],
+    )
+    catalysts = _extract_section_bullets_by_aliases(
+        report_content,
+        ["催化剂", "外部市场情报与催化剂"],
+    )
+    risks = _extract_section_bullets_by_aliases(
+        report_content,
+        ["风险", "关键风险与数据缺口"],
+    )
 
     next_actions = [
         "复核最新一季财报和关键经营指标。",

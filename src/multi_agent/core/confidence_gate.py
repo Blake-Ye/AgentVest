@@ -2,27 +2,37 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from multi_agent.core.review_contracts import GateDecision, ReviewToolSummary
+from multi_agent.core.review_contracts import GateDecision, ReviewContract, ReviewToolSummary
 
 
 @dataclass(frozen=True)
 class ConfidenceGatePolicy:
-    min_evidence_coverage_ratio: float = 0.80
-    min_financial_coverage_score: float = 0.80
-    min_trust_score: int = 75
+    min_evidence_coverage_ratio: float = 0.60
+    min_financial_coverage_score: float = 0.60
+    min_trust_score: int = 60
 
     @classmethod
     def default(cls) -> "ConfidenceGatePolicy":
         return cls()
 
-    def evaluate(self, summary: ReviewToolSummary) -> GateDecision:
+    def evaluate(self, summary: ReviewToolSummary | ReviewContract) -> GateDecision:
+        if isinstance(summary, ReviewContract):
+            summary = summary.to_review_tool_summary()
+
         blocking_reasons = list(summary.blocking_reasons)
         rerun_reasons: list[str] = []
+        gate_financial_coverage_score = (
+            summary.gate_financial_coverage_score
+            if summary.gate_financial_coverage_score is not None
+            else summary.financial_coverage_score
+        )
 
         if summary.evidence_coverage_ratio < self.min_evidence_coverage_ratio:
-            rerun_reasons.append("evidence_coverage_ratio<0.80")
+            rerun_reasons.append("evidence_coverage_ratio<0.60")
         if summary.financial_coverage_score < self.min_financial_coverage_score:
-            rerun_reasons.append("financial_coverage_score<0.80")
+            rerun_reasons.append("financial_coverage_score<0.60")
+        if gate_financial_coverage_score < 1.0:
+            rerun_reasons.append("gate_financial_coverage_incomplete")
         if summary.critical_conflict_count > 0:
             blocking_reasons.append("critical_conflict_count>0")
         if summary.market_policy_violations:
@@ -41,7 +51,7 @@ class ConfidenceGatePolicy:
             )
         )
         if trust_score < self.min_trust_score:
-            rerun_reasons.append("trust_score<75")
+            rerun_reasons.append("trust_score<60")
 
         if blocking_reasons:
             final_decision = "blocked"

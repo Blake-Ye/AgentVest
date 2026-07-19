@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -6,9 +7,10 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from multi_agent.core.confidence_gate import ConfidenceGatePolicy
 from multi_agent.core.market import MarketValidationResult, build_tool_policy
 from multi_agent.core.model_routing import ModelRouter
-from multi_agent.core.review_contracts import GateDecision
+from multi_agent.core.review_contracts import GateDecision, ReviewContract
 from multi_agent.core.state import EvidenceItem, ResearchRunState
 from multi_agent.flows.market_review_flow import MarketReviewFlow, MarketReviewFlowState
 from multi_agent.settings import InvestmentResearchSettings
@@ -25,6 +27,80 @@ def build_settings() -> InvestmentResearchSettings:
         tavily_api_key="tvly-key",
         sec_api_email="analyst@example.com",
     )
+
+
+def test_review_contract_accepts_analysis_and_report_stage_payloads() -> None:
+    analysis_contract = ReviewContract(
+        stage="analysis",
+        reviewer_name="data_quality_reviewer",
+        delivery_eligibility={
+            "formal_report_allowed": False,
+            "evidence_limited_report_allowed": True,
+            "blocked_notice_required": False,
+        },
+        failure_taxonomy={
+            "primary_code": "coverage_gap",
+            "secondary_codes": ["summary_missing"],
+        },
+        coverage_summary={
+            "evidence_coverage_ratio": 1.0,
+            "financial_coverage_score": 0.8,
+            "gate_financial_coverage_score": 0.5,
+        },
+        tool_health_summary={
+            "failed_tools": [],
+            "degraded_tools": ["financial_field_completeness_tool"],
+        },
+    )
+
+    decision = ConfidenceGatePolicy.default().evaluate(analysis_contract)
+
+    assert analysis_contract.stage == "analysis"
+    assert decision.final_decision == "rerun"
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
+
+    report_contract = ReviewContract(
+        stage="report",
+        reviewer_name="logic_compliance_reviewer",
+        delivery_eligibility={
+            "formal_report_allowed": False,
+            "evidence_limited_report_allowed": True,
+            "blocked_notice_required": False,
+        },
+        failure_taxonomy={
+            "primary_code": "report_inconsistency",
+            "secondary_codes": ["delivery_blocked"],
+        },
+        coverage_summary={
+            "evidence_coverage_ratio": 1.0,
+            "financial_coverage_score": 1.0,
+            "gate_financial_coverage_score": 1.0,
+        },
+        tool_health_summary={
+            "failed_tools": ["consistency_checker"],
+            "degraded_tools": [],
+        },
+    )
+
+    assert report_contract.stage == "report"
+    assert report_contract.failure_taxonomy.primary_code == "report_inconsistency"
+
+
+def test_review_contract_rejects_unknown_failure_taxonomy() -> None:
+    with pytest.raises(ValidationError, match="primary_code"):
+        ReviewContract(
+            stage="analysis",
+            reviewer_name="data_quality_reviewer",
+            delivery_eligibility={
+                "formal_report_allowed": False,
+                "evidence_limited_report_allowed": True,
+                "blocked_notice_required": False,
+            },
+            failure_taxonomy={
+                "primary_code": "hallucination",
+                "secondary_codes": [],
+            },
+        )
 
 
 def test_model_router_returns_expected_model_by_tier() -> None:
@@ -606,9 +682,70 @@ def test_default_flow_report_gate_blocks_when_report_uses_restricted_memo_status
 
     result = flow.kickoff()
 
+    assert result["status"] == "evidence_limited"
+    assert flow.state.final_decision == "evidence_limited"
+    assert result["blocking_reasons"] == []
+
+
+def test_flow_routes_gate_coverage_incomplete_to_evidence_limited_when_rerun_budget_is_exhausted() -> None:
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        analysis_gate=lambda _result: GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=74,
+            blocking_reasons=["gate_financial_coverage_incomplete"],
+        ),
+        report_writer=lambda _result: "# 投资备忘录\n\n**状态**：⚠️ 受限版备忘录 — Analysis Gate 未完全通过\n",
+        report_reviewer=lambda report: GateDecision(
+            passed=False,
+            final_decision="evidence_limited" if "受限版备忘录" in report else "passed",
+            trust_score=74,
+        ),
+        initial_state=MarketReviewFlowState(
+            request_id="run-007d",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            rerun_budget={"analysis": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "evidence_limited"
+    assert result["report_result"].startswith("# 投资备忘录")
+    assert flow.state.final_decision == "evidence_limited"
+    assert result["blocking_reasons"] == ["gate_financial_coverage_incomplete"]
+
+
+def test_flow_does_not_coerce_mixed_rerun_reasons_to_evidence_limited_when_rerun_budget_is_exhausted() -> None:
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        analysis_gate=lambda _result: GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=58,
+            blocking_reasons=[
+                "gate_financial_coverage_incomplete",
+                "trust_score<60",
+            ],
+        ),
+        initial_state=MarketReviewFlowState(
+            request_id="run-007e",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            rerun_budget={"analysis": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
     assert result["status"] == "blocked"
-    assert flow.state.final_decision == "blocked"
-    assert "report_marked_blocked" in result["blocking_reasons"]
+    assert result["report_result"] is None
+    assert result["blocking_reasons"] == [
+        "gate_financial_coverage_incomplete",
+        "trust_score<60",
+    ]
 
 
 def test_default_flow_analysis_gate_blocks_when_materialized_review_is_marked_blocked(
@@ -724,6 +861,41 @@ def test_default_flow_analysis_gate_blocks_when_review_uses_gate_risk_language(
     assert "analysis_review_marked_blocked" in result["blocking_reasons"]
 
 
+def test_default_flow_analysis_gate_prefers_markdown_summary_over_blocker_prose_when_both_exist(
+    tmp_path: Path,
+) -> None:
+    review_path = tmp_path / "08_data_quality_review.md"
+    review_path.write_text(
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 一、审查工具结构化结果摘要\n\n"
+        "| 工具 | 关键结果 | 解读 |\n"
+        "|---|---|---|\n"
+        "| **evidence_coverage_tool** | 覆盖率 **1.00**（18/18 claims 均有引用），无 unsupported claims | 所有结论均有引用 |\n"
+        "| **cross_source_consistency_tool** | **0** critical conflicts | 无关键冲突 |\n"
+        "| **market_tool_policy_audit_tool** | **0** violations | 无越界 |\n"
+        "| **financial_field_completeness_tool** | 整体覆盖率 **45.45%**；Gate 覆盖率 **76.92%** | 仍有关键字段缺口 |\n\n"
+        "## 二、审查发现\n\n"
+        "| Gate风险 | BLOCK - 核心估值输入不可靠 |\n",
+        encoding="utf-8",
+    )
+
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-009b",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "rerun"
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
+    assert "analysis_review_marked_blocked" not in decision.blocking_reasons
+
+
 def test_default_flow_analysis_gate_blocks_when_review_uses_p0_language(
     tmp_path: Path,
 ) -> None:
@@ -750,6 +922,117 @@ def test_default_flow_analysis_gate_blocks_when_review_uses_p0_language(
     assert result["status"] == "blocked"
     assert result["report_result"] is None
     assert "analysis_review_marked_blocked" in result["blocking_reasons"]
+
+
+def test_default_flow_analysis_gate_does_not_block_when_review_marks_issue_as_non_blocking(
+    tmp_path: Path,
+) -> None:
+    review_path = tmp_path / "08_data_quality_review.md"
+    review_path.write_text(
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 二、审查发现\n\n"
+        "| Gate 风险 | 非阻断级：该问题仅影响补充说明 |\n",
+        encoding="utf-8",
+    )
+
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-010b",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "rerun"
+    assert decision.blocking_reasons == ["analysis_review_summary_missing"]
+
+
+def test_default_flow_analysis_gate_does_not_block_when_review_says_block_is_resolved(
+    tmp_path: Path,
+) -> None:
+    review_path = tmp_path / "08_data_quality_review.md"
+    review_path.write_text(
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 三、复核结论\n\n"
+        "已解除阻断，当前问题降级为观察项。\n",
+        encoding="utf-8",
+    )
+
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-010c",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "rerun"
+    assert decision.blocking_reasons == ["analysis_review_summary_missing"]
+
+
+def test_default_flow_analysis_gate_still_blocks_when_resolved_notice_and_new_blocker_coexist(
+    tmp_path: Path,
+) -> None:
+    review_path = tmp_path / "08_data_quality_review.md"
+    review_path.write_text(
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 三、复核结论\n\n"
+        "已解除阻断，旧问题降级为观察项。\n\n"
+        "## 四、新增问题\n\n"
+        "### 🔴 必须修复（Blockers）\n"
+        "- B-1：新的核心估值输入仍然不可放行。\n",
+        encoding="utf-8",
+    )
+
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-010c2",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "blocked"
+    assert decision.blocking_reasons == ["analysis_review_marked_blocked"]
+
+
+def test_default_flow_analysis_gate_does_not_block_when_review_only_records_gate_risk(
+    tmp_path: Path,
+) -> None:
+    review_path = tmp_path / "08_data_quality_review.md"
+    review_path.write_text(
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 二、审查发现\n\n"
+        "| Gate 风险 | 记录即可：无需阻断，仅保留备查 |\n",
+        encoding="utf-8",
+    )
+
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-010d",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "rerun"
+    assert decision.blocking_reasons == ["analysis_review_summary_missing"]
 
 
 def test_default_flow_analysis_gate_prefers_structured_review_summary_over_markdown_markers(
@@ -793,3 +1076,736 @@ def test_default_flow_analysis_gate_prefers_structured_review_summary_over_markd
 
     assert result["status"] == "passed"
     assert result["report_result"] == "# investment report"
+
+
+def test_default_analysis_gate_prefers_inline_review_summary_over_blocker_headings(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "08_data_quality_review.md").write_text(
+        "# Apple Inc.（AAPL）数据质量审查报告\n\n"
+        "## 结构化工具输出摘要\n\n"
+        "| 工具 | 关键输出 | 解读 |\n"
+        "|:-----|:---------|:-----|\n"
+        "| `evidence_coverage_tool` | **覆盖率 100%（25/25）**，无 unsupported claims | 引用完整 |\n"
+        "| `cross_source_consistency_tool` | **critical_conflict_count = 0** | 无关键冲突 |\n"
+        "| `market_tool_policy_audit_tool` | **违规数 = 0** | 无越界 |\n"
+        "| `financial_field_completeness_tool` | **总覆盖率 40%（12/30）**；**Gate 覆盖率 28.6%（2/7）** | Gate 字段缺口明显 |\n\n"
+        "## 一、必须修复（P0 — 阻断下游分析或产生系统性误导）\n\n"
+        "### 🔴 ISSUE-001：Revenue 期间归属未确认\n",
+        encoding="utf-8",
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-011a",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "rerun"
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
+    assert "analysis_review_marked_blocked" not in decision.blocking_reasons
+
+
+def test_default_analysis_gate_prefers_machine_readable_review_contract_over_blocker_headings(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "08_data_quality_review.md").write_text(
+        "# Apple Inc.（AAPL）数据质量审查报告\n\n"
+        "PART A: MACHINE_READABLE_JSON\n"
+        "```json\n"
+        "{\n"
+        '  "review_stage": "analysis_review",\n'
+        '  "reviewer_name": "data_quality_reviewer",\n'
+        '  "decision": {"gate_outcome": "rerun", "decision_confidence": "high"},\n'
+        '  "delivery_eligibility": {\n'
+        '    "formal_report_allowed": false,\n'
+        '    "evidence_limited_report_allowed": true,\n'
+        '    "blocked_notice_required": false,\n'
+        '    "recommended_delivery_state": "evidence_limited_report"\n'
+        "  },\n"
+        '  "failure_taxonomy": {"primary_class": "pipeline_degraded", "secondary_causes": ["summary_missing"]},\n'
+        '  "coverage": {\n'
+        '    "evidence_coverage_ratio": 1.0,\n'
+        '    "financial_coverage_score": 0.8,\n'
+        '    "gate_financial_coverage_score": 0.5,\n'
+        '    "claim_binding_ratio": 1.0,\n'
+        '    "unresolved_critical_claim_count": 0\n'
+        "  },\n"
+        '  "tool_health": {"overall_status": "degraded", "tool_status": []},\n'
+        '  "blocking_reasons": [],\n'
+        '  "rerun_reasons": ["gate_financial_coverage_incomplete"],\n'
+        '  "allow_limited_delivery": true,\n'
+        '  "review_summary": {"one_sentence_summary": "formal 证据未闭合，只允许 limited", "operator_notes": ""},\n'
+        '  "artifact_refs": [],\n'
+        '  "findings": []\n'
+        "}\n"
+        "```\n\n"
+        "PART B: HUMAN_READABLE_MARKDOWN\n"
+        "## 一、必须修复（P0 — 阻断下游分析或产生系统性误导）\n\n"
+        "### 🔴 ISSUE-001：Revenue 期间归属未确认\n",
+        encoding="utf-8",
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-011aa",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "evidence_limited"
+    assert decision.blocking_reasons == []
+
+
+def test_default_analysis_gate_accepts_current_reviewer_contract_shape_and_locks_limited_delivery(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "08_data_quality_review.md").write_text(
+        "---\n\n"
+        "# PART A: MACHINE_READABLE_JSON\n\n"
+        "```json\n"
+        "{\n"
+        '  "decision": {\n'
+        '    "formal_report_allowed": false,\n'
+        '    "evidence_limited_report_allowed": true,\n'
+        '    "blocked_notice_required": false,\n'
+        '    "recommended_delivery_state": "evidence_limited",\n'
+        '    "primary_class": "pipeline_degraded"\n'
+        "  },\n"
+        '  "delivery_eligibility": {\n'
+        '    "formal_report_allowed": false,\n'
+        '    "evidence_limited_report_allowed": true,\n'
+        '    "blocked_notice_required": false,\n'
+        '    "evidence_limited_rationale": "SEC-verified fundamentals provide a solid directional foundation."\n'
+        "  },\n"
+        '  "failure_taxonomy": {\n'
+        '    "primary_class": "pipeline_degraded",\n'
+        '    "research_blocked": false,\n'
+        '    "pipeline_degraded": true,\n'
+        '    "degradation_cause": "financial_data_incomplete_for_formal_valuation"\n'
+        "  },\n"
+        '  "coverage": {\n'
+        '    "evidence_coverage_ratio": 1.0,\n'
+        '    "financial_coverage_score": 1.0,\n'
+        '    "gate_financial_coverage_score": 1.0,\n'
+        '    "critical_conflict_count": 0,\n'
+        '    "market_policy_violation_count": 0,\n'
+        '    "unsupported_critical_claim_count": 0\n'
+        "  },\n"
+        '  "tool_health": {\n'
+        '    "evidence_coverage_tool": "healthy",\n'
+        '    "cross_source_consistency_tool": "healthy",\n'
+        '    "market_tool_policy_audit_tool": "healthy",\n'
+        '    "financial_field_completeness_tool": "healthy"\n'
+        "  },\n"
+        '  "blocking_reasons": [],\n'
+        '  "rerun_reasons": [\n'
+        '    {"priority": "P0", "action": "Ingest stock price", "unlocks": "formal_valuation"}\n'
+        "  ],\n"
+        '  "allow_limited_delivery": true,\n'
+        '  "review_summary": "formal 不放行，但 evidence_limited 可交付。",\n'
+        '  "artifact_refs": [\n'
+        '    "00_market_validation.md",\n'
+        '    "01_market_intelligence.md",\n'
+        '    "02_filing_review.md",\n'
+        '    "03_financial_analysis.md"\n'
+        "  ],\n"
+        '  "findings": []\n'
+        "}\n"
+        "```\n\n"
+        "# PART B: HUMAN_READABLE_MARKDOWN\n\n"
+        "正式报告不放行，但允许 evidence_limited 交付。\n",
+        encoding="utf-8",
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-011ab",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "evidence_limited"
+    assert decision.passed is False
+    assert decision.blocking_reasons == []
+
+
+def test_default_analysis_gate_prefers_latest_metrics_over_markdown_fallback(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "08_data_quality_review.md").write_text(
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 二、审查发现\n\n"
+        "| Gate风险 | Block: 核心估值输入不可靠 |\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "latest_run_metrics.json").write_text(
+        '{"financial_fields":{"revenue":{"extracted":true,"normalized_value":1},"cash_and_equivalents":{"extracted":true,"normalized_value":1}},"financial_fields_success_rate":0.8}',
+        encoding="utf-8",
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-011b",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "rerun"
+    assert "analysis_review_marked_blocked" not in decision.blocking_reasons
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
+
+
+def test_default_analysis_gate_reruns_when_summary_and_markers_are_both_missing(
+    tmp_path: Path,
+) -> None:
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-012",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.passed is False
+    assert decision.final_decision == "rerun"
+    assert decision.trust_score == 0
+    assert "analysis_review_summary_missing" in decision.blocking_reasons
+
+
+def test_default_analysis_gate_builds_summary_from_latest_metrics_when_structured_summary_missing(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "latest_run_metrics.json").write_text(
+        '{"financial_fields":{"revenue":{"extracted":true,"normalized_value":1},"cash_and_equivalents":{"extracted":true,"normalized_value":1}},"financial_fields_success_rate":0.8}',
+        encoding="utf-8",
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-013",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "rerun"
+    assert "evidence_coverage_ratio<0.60" in decision.blocking_reasons
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
+    assert "trust_score<60" in decision.blocking_reasons
+    assert decision.trust_score == 40
+
+
+def test_default_analysis_gate_does_not_pass_from_latest_metrics_without_review_signals(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "latest_run_metrics.json").write_text(
+        '{"financial_fields":{"revenue":{"extracted":true,"normalized_value":1},"cash_and_equivalents":{"extracted":true,"normalized_value":1},"total_debt":{"extracted":true,"normalized_value":1},"diluted_shares":{"extracted":true,"normalized_value":1}},"financial_fields_success_rate":1.0}',
+        encoding="utf-8",
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-013b",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.passed is False
+    assert decision.final_decision == "rerun"
+    assert "evidence_coverage_ratio<0.60" in decision.blocking_reasons
+
+
+def test_default_analysis_gate_uses_six_field_formal_contract_from_latest_metrics(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "latest_run_metrics.json").write_text(
+        json.dumps(
+            {
+                "financial_fields": {
+                    "revenue": {"extracted": True, "normalized_value": 1},
+                    "cash_and_equivalents": {"extracted": True, "normalized_value": 1},
+                    "total_debt": {"extracted": True, "normalized_value": 1},
+                    "diluted_shares": {"extracted": True, "normalized_value": 1},
+                },
+                "financial_fields_success_rate": 1.0,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-013c",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.passed is False
+    assert decision.final_decision == "rerun"
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
+
+
+def test_default_analysis_gate_builds_summary_from_materialized_review_when_structured_summary_missing(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "08_data_quality_review.md").write_text(
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 一、审查工具结构化结果摘要\n\n"
+        "| 工具 | 关键结果 | 解读 |\n"
+        "|---|---|---|\n"
+        "| **evidence_coverage_tool** | 覆盖率 **1.00**（18/18 claims 均有引用），无 unsupported claims | 所有结论均有引用 |\n"
+        "| **cross_source_consistency_tool** | **0** critical conflicts | 无关键冲突 |\n"
+        "| **market_tool_policy_audit_tool** | **0** violations | 无越界 |\n"
+        "| **financial_field_completeness_tool** | 整体覆盖率 **45.45%**；Gate 覆盖率 **76.92%** | 仍有关键字段缺口 |\n",
+        encoding="utf-8",
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-014",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
+
+    assert decision.final_decision == "rerun"
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
+    assert "analysis_review_summary_missing" not in decision.blocking_reasons
+    assert decision.trust_score == 72
+
+
+def test_default_flow_routes_tasks_output_review_to_evidence_limited_when_rerun_budget_is_exhausted(
+) -> None:
+    review_text = (
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 一、审查工具结构化结果摘要\n\n"
+        "| 工具 | 关键结果 | 解读 |\n"
+        "|---|---|---|\n"
+        "| **evidence_coverage_tool** | 覆盖率 **1.00**（18/18 claims 均有引用），无 unsupported claims | 所有结论均有引用 |\n"
+        "| **cross_source_consistency_tool** | **0** critical conflicts | 无关键冲突 |\n"
+        "| **market_tool_policy_audit_tool** | **0** violations | 无越界 |\n"
+        "| **financial_field_completeness_tool** | 整体覆盖率 **80.00%**；Gate 覆盖率 **76.92%** | 仅剩 Gate 关键字段缺口 |\n"
+    )
+
+    class StubTaskOutput:
+        def __init__(self, name: str, raw: str) -> None:
+            self.name = name
+            self.raw = raw
+
+    class StubCrewResult:
+        def __init__(self, raw: str) -> None:
+            self.tasks_output = [StubTaskOutput("data_quality_review_task", raw)]
+
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: StubCrewResult(review_text),
+        report_writer=lambda _result: "# 投资备忘录\n\n**状态**：⚠️ 受限版备忘录 — Analysis Gate 未完全通过\n",
+        initial_state=MarketReviewFlowState(
+            request_id="run-016",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            rerun_budget={"analysis": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "evidence_limited"
+    assert result["report_result"].startswith("# 投资备忘录")
+    assert flow.state.final_decision == "evidence_limited"
+    assert result["blocking_reasons"] == ["gate_financial_coverage_incomplete"]
+
+
+def test_default_analysis_gate_builds_summary_from_tasks_output_when_structured_summary_missing(
+) -> None:
+    review_text = (
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 一、审查工具结构化结果摘要\n\n"
+        "| 工具 | 关键结果 | 解读 |\n"
+        "|---|---|---|\n"
+        "| **evidence_coverage_tool** | 覆盖率 **1.00**（18/18 claims 均有引用），无 unsupported claims | 所有结论均有引用 |\n"
+        "| **cross_source_consistency_tool** | **0** critical conflicts | 无关键冲突 |\n"
+        "| **market_tool_policy_audit_tool** | **0** violations | 无越界 |\n"
+        "| **financial_field_completeness_tool** | 整体覆盖率 **45.45%**；Gate 覆盖率 **76.92%** | 仍有关键字段缺口 |\n"
+    )
+
+    class StubTaskOutput:
+        def __init__(self, name: str, raw: str) -> None:
+            self.name = name
+            self.raw = raw
+
+    class StubCrewResult:
+        def __init__(self, raw: str) -> None:
+            self.tasks_output = [StubTaskOutput("data_quality_review_task", raw)]
+
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-015",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+        ),
+    )
+
+    decision = flow._default_analysis_gate(StubCrewResult(review_text))
+
+    assert decision.final_decision == "rerun"
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
+    assert "analysis_review_summary_missing" not in decision.blocking_reasons
+    assert decision.trust_score == 72
+
+
+def test_default_analysis_gate_prefers_current_tasks_output_summary_over_stale_materialized_blocked_review(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "08_data_quality_review.md").write_text(
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 二、审查发现\n\n"
+        "| Gate 风险 | Block: 这是旧的阻断结果 |\n",
+        encoding="utf-8",
+    )
+    review_text = (
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 一、审查工具结构化结果摘要\n\n"
+        "| 工具 | 关键结果 | 解读 |\n"
+        "|---|---|---|\n"
+        "| **evidence_coverage_tool** | 覆盖率 **1.00**（18/18 claims 均有引用），无 unsupported claims | 所有结论均有引用 |\n"
+        "| **cross_source_consistency_tool** | **0** critical conflicts | 无关键冲突 |\n"
+        "| **market_tool_policy_audit_tool** | **0** violations | 无越界 |\n"
+        "| **financial_field_completeness_tool** | 整体覆盖率 **45.45%**；Gate 覆盖率 **76.92%** | 当前仅为覆盖率不足 |\n"
+    )
+
+    class StubTaskOutput:
+        def __init__(self, name: str, raw: str) -> None:
+            self.name = name
+            self.raw = raw
+
+    class StubCrewResult:
+        def __init__(self, raw: str) -> None:
+            self.tasks_output = [StubTaskOutput("data_quality_review_task", raw)]
+
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-017",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate(StubCrewResult(review_text))
+
+    assert decision.final_decision == "rerun"
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
+    assert decision.blocking_reasons != ["analysis_review_marked_blocked"]
+
+
+def test_default_analysis_gate_falls_back_to_materialized_review_when_current_tasks_output_is_unparseable(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "08_data_quality_review.md").write_text(
+        "# Microsoft Corporation（MSFT）数据质量审查报告\n\n"
+        "## 一、审查工具结构化结果摘要\n\n"
+        "| 工具 | 关键结果 | 解读 |\n"
+        "|---|---|---|\n"
+        "| **evidence_coverage_tool** | 覆盖率 **1.00**（18/18 claims 均有引用），无 unsupported claims | 所有结论均有引用 |\n"
+        "| **cross_source_consistency_tool** | **0** critical conflicts | 无关键冲突 |\n"
+        "| **market_tool_policy_audit_tool** | **0** violations | 无越界 |\n"
+        "| **financial_field_completeness_tool** | 整体覆盖率 **45.45%**；Gate 覆盖率 **76.92%** | 当前仅为覆盖率不足 |\n",
+        encoding="utf-8",
+    )
+
+    class StubTaskOutput:
+        def __init__(self, name: str, raw: str) -> None:
+            self.name = name
+            self.raw = raw
+
+    class StubCrewResult:
+        def __init__(self) -> None:
+            self.tasks_output = [
+                StubTaskOutput("data_quality_review_task", "# 数据质量审查\n\n当前 reviewer 输出损坏，无法解析。")
+            ]
+
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-017b",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate(StubCrewResult())
+
+    assert decision.final_decision == "rerun"
+    assert "gate_financial_coverage_incomplete" in decision.blocking_reasons
+    assert "analysis_review_summary_missing" not in decision.blocking_reasons
+
+
+def test_analysis_evidence_limited_terminal_status_is_not_overridden_by_passed_report_gate() -> None:
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        analysis_gate=lambda _result: GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=74,
+            blocking_reasons=["gate_financial_coverage_incomplete"],
+        ),
+        report_writer=lambda _result: "# 投资备忘录\n\n没有显式受限标记\n",
+        report_reviewer=lambda _report: GateDecision(
+            passed=True,
+            final_decision="passed",
+            trust_score=90,
+        ),
+        initial_state=MarketReviewFlowState(
+            request_id="run-018",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            rerun_budget={"analysis": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "evidence_limited"
+    assert flow.state.final_decision == "evidence_limited"
+    assert result["blocking_reasons"] == ["gate_financial_coverage_incomplete"]
+
+
+def test_analysis_evidence_limited_merges_report_reasons_and_uses_conservative_trust_score() -> None:
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        analysis_gate=lambda _result: GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=74,
+            blocking_reasons=["gate_financial_coverage_incomplete"],
+        ),
+        report_writer=lambda _result: "# 投资备忘录\n\n**状态**：⚠️ 受限版备忘录 — Analysis Gate 未完全通过\n",
+        report_reviewer=lambda _report: GateDecision(
+            passed=False,
+            final_decision="evidence_limited",
+            trust_score=52,
+            blocking_reasons=["report_needs_human_review"],
+        ),
+        initial_state=MarketReviewFlowState(
+            request_id="run-018b",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            rerun_budget={"analysis": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "evidence_limited"
+    assert result["trust_score"] == 52
+    assert result["blocking_reasons"] == [
+        "gate_financial_coverage_incomplete",
+        "report_needs_human_review",
+    ]
+
+
+def test_analysis_evidence_limited_terminal_status_becomes_blocked_when_report_gate_is_blocked() -> None:
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        analysis_gate=lambda _result: GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=74,
+            blocking_reasons=["gate_financial_coverage_incomplete"],
+        ),
+        report_writer=lambda _result: "# 投资备忘录\n\nAnalysis Gate 未完全通过\n",
+        report_reviewer=lambda _report: GateDecision(
+            passed=False,
+            final_decision="blocked",
+            trust_score=0,
+            blocking_reasons=["report_marked_blocked"],
+        ),
+        initial_state=MarketReviewFlowState(
+            request_id="run-019",
+            company_name="Microsoft Corporation",
+            input_ticker="MSFT",
+            rerun_budget={"analysis": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "blocked"
+    assert flow.state.final_decision == "blocked"
+    assert result["blocking_reasons"] == ["report_marked_blocked"]
+
+
+def test_flow_blocks_when_logic_review_supports_limited_delivery_but_report_text_still_looks_formal(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "04_investment_report.md"
+    report_path.write_text(
+        "# Apple Inc.（AAPL）投资备忘录\n\n"
+        "## 一、执行摘要\n\n"
+        "当前为受限交付，估值结论仍受关键字段缺失约束。\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "09_logic_compliance_review.md").write_text(
+        "# 逻辑与合规审查报告\n\n"
+        "审查结论：有条件通过——存在若干必须修复项。\n\n"
+        "核心判断：最终备忘录的整体质量已达到“受限版”的预期标准，"
+        "上述修复项均属局部问题，不损坏报告的核心逻辑和整体可靠性。\n",
+        encoding="utf-8",
+    )
+
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        analysis_gate=lambda _result: GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=58,
+            blocking_reasons=["analysis_review_summary_missing"],
+        ),
+        initial_state=MarketReviewFlowState(
+            request_id="run-020",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            artifacts_dir=str(tmp_path),
+            final_report_path=str(report_path),
+            rerun_budget={"analysis": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "blocked"
+    assert result["report_result"] == report_path.read_text(encoding="utf-8").strip()
+    assert flow.state.final_decision == "blocked"
+    assert result["blocking_reasons"] == ["report_mode_mismatch"]
+
+
+def test_flow_does_not_use_stale_materialized_report_to_fallback_analysis_review_summary_missing(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "04_investment_report.md"
+    report_path.write_text(
+        "# 受限版投资备忘录\n\n"
+        "**状态**：⚠️ 受限版备忘录 — Analysis Gate 未完全通过\n",
+        encoding="utf-8",
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        analysis_gate=lambda _result: GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=58,
+            blocking_reasons=["analysis_review_summary_missing"],
+        ),
+        initial_state=MarketReviewFlowState(
+            request_id="run-021",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            artifacts_dir=str(tmp_path),
+            final_report_path=str(report_path),
+            rerun_budget={"analysis": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "blocked"
+    assert flow.state.final_decision == "blocked"
+    assert result["blocking_reasons"] == ["analysis_review_summary_missing"]
+
+
+def test_default_flow_report_gate_blocks_when_report_mode_mismatches_analysis_limited_decision() -> None:
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        analysis_gate=lambda _result: GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=74,
+            blocking_reasons=["gate_financial_coverage_incomplete"],
+        ),
+        report_writer=lambda _result: "# 投资备忘录\n\n## 执行摘要\n\n这是被错误写成正式版的文本。\n",
+        initial_state=MarketReviewFlowState(
+            request_id="run-022b",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            rerun_budget={"analysis": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "blocked"
+    assert result["blocking_reasons"] == ["report_mode_mismatch"]
+
+
+def test_flow_does_not_fallback_to_evidence_limited_when_logic_review_contains_blocker_language(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "09_logic_compliance_review.md").write_text(
+        "# 逻辑与合规审查报告\n\n"
+        "审查结论：有条件通过——达到受限版的预期标准。\n\n"
+        "## 必须修复（阻断级）\n"
+        "- B1：当前版本仍应视为 Blocker，修复前不建议放行。\n",
+        encoding="utf-8",
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        analysis_gate=lambda _result: GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=58,
+            blocking_reasons=["analysis_review_summary_missing"],
+        ),
+        initial_state=MarketReviewFlowState(
+            request_id="run-022",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            artifacts_dir=str(tmp_path),
+            rerun_budget={"analysis": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "blocked"
+    assert flow.state.final_decision == "blocked"
+    assert result["blocking_reasons"] == ["analysis_review_summary_missing"]

@@ -39,6 +39,7 @@ def build_flow(inputs: dict[str, str]):
 
     return MarketReviewFlow(
         initial_state=MarketReviewFlowState(
+            request_id=inputs.get("run_id", ""),
             company_name=inputs.get("company_name", ""),
             input_ticker=inputs.get("company_ticker", ""),
             current_year=inputs.get("current_year", ""),
@@ -52,7 +53,13 @@ def build_flow(inputs: dict[str, str]):
 
 
 def use_flow_execution() -> bool:
-    return os.getenv("USE_FLOW_EXECUTION", "").strip().lower() in {"1", "true", "yes", "on"}
+    raw_value = os.getenv("USE_FLOW_EXECUTION")
+    if raw_value is None:
+        return True
+    normalized = raw_value.strip().lower()
+    if not normalized:
+        return True
+    return normalized not in {"0", "false", "no", "off"}
 
 
 def kickoff_workflow(inputs: dict[str, str]):

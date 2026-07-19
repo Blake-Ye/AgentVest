@@ -224,3 +224,93 @@ def test_build_structured_report_exports_sections_and_citations(tmp_path: Path) 
         "has_investment_recommendation": True,
         "citation_count": 2,
     }
+
+
+def test_build_structured_outputs_support_current_evidence_limited_report_schema(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "04_investment_report.md"
+    report_path.write_text(
+        "\n".join(
+            [
+                "# 受限版投资备忘录",
+                "",
+                "运行 ID：20260719_215427",
+                "",
+                "## 报告性质与边界声明",
+                "",
+                "当前结论只允许输出 evidence-limited 表达，正式估值结论暂不放行。",
+                "",
+                "## 核心主张的证据映射",
+                "",
+                "- 主张：服务收入占比继续提升。[来源: 02_filing_review.md]",
+                "- 主张：估值需要等待 market snapshot 完整闭合后再升级。[来源: 03_financial_analysis.md]",
+                "",
+                "## 已验证基本面硬事实",
+                "",
+                "- FY2025 Revenue：391.0B。[来源: 02_filing_review.md | 字段: revenue]",
+                "- Cash and Equivalents：53.7B。[来源: 02_filing_review.md | 字段: cash_and_equivalents]",
+                "",
+                "## 外部市场情报与催化剂",
+                "",
+                "- Apple Intelligence 终端落地节奏，是未来 12 个月的重要催化剂。[来源: 01_market_intelligence.md]",
+                "- 服务业务 ARPU 提升，支撑利润结构继续优化。[来源: 01_market_intelligence.md]",
+                "",
+                "## 关键风险与数据缺口",
+                "",
+                "- stock_price 尚未完成统一快照验证，正式估值区间暂不放行。[来源: 03_financial_analysis.md]",
+                "- 海外监管与硬件需求波动仍需持续跟踪。[来源: 01_market_intelligence.md]",
+                "",
+                "## 综合评估与后续观察路径",
+                "",
+                "苹果基本面与服务业务趋势仍然稳健，但在 market snapshot 与 formal gate 字段完全闭合前，仅维持继续观察。[来源: 02_filing_review.md][来源: 03_financial_analysis.md]",
+                "",
+                "参考 https://example.com/report",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    metrics = {
+        "trust_score": {
+            "score": 74.0,
+            "level": "medium",
+            "summary": "formal 证据尚未闭合，但受限表达已有足够依据。",
+        }
+    }
+
+    recommendation = build_structured_recommendation(
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        report_path=report_path,
+        metrics=metrics,
+    )
+    structured_report = build_structured_report(
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        report_path=report_path,
+        metrics=metrics,
+    )
+
+    assert recommendation["summary"].startswith("苹果基本面与服务业务趋势仍然稳健")
+    assert recommendation["catalysts"] == [
+        "Apple Intelligence 终端落地节奏，是未来 12 个月的重要催化剂。[来源: 01_market_intelligence.md]",
+        "服务业务 ARPU 提升，支撑利润结构继续优化。[来源: 01_market_intelligence.md]",
+    ]
+    assert recommendation["risks"] == [
+        "stock_price 尚未完成统一快照验证，正式估值区间暂不放行。[来源: 03_financial_analysis.md]",
+        "海外监管与硬件需求波动仍需持续跟踪。[来源: 01_market_intelligence.md]",
+    ]
+    assert recommendation["stance"] == "watch"
+    assert recommendation["stance_label"] == "观察"
+    assert structured_report["sections"]["business_overview"].startswith(
+        "- FY2025 Revenue：391.0B。"
+    )
+    assert structured_report["sections"]["recent_updates"].startswith(
+        "- Apple Intelligence 终端落地节奏"
+    )
+    assert structured_report["sections"]["financial_analysis"].startswith(
+        "- 主张：服务收入占比继续提升。"
+    )
+    assert structured_report["sections"]["investment_recommendation"].startswith(
+        "苹果基本面与服务业务趋势仍然稳健"
+    )
