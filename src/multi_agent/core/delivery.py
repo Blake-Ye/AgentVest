@@ -2,8 +2,8 @@
 
 Each target file replacement is atomic. A process crash between replacements cannot
 be made atomic across the filesystem, so an unfinished transaction marker retains
-the prior generation and is recovered to that generation before the next delivery
-operation in the same run directory.
+the prior generation and is recovered to that generation before any terminal
+artifact consumer reads from the same run directory.
 """
 
 from __future__ import annotations
@@ -208,7 +208,7 @@ def write_delivery_package(
     replace_file: ReplaceFile = os.replace,
 ) -> None:
     """Commit the five terminal artifacts or restore their entire prior generation."""
-    recover_incomplete_delivery_transactions(paths.run_dir)
+    recover_delivery_transaction(paths.run_dir)
     result = DeliveryValidator().validate_package(package)
     if not result.valid:
         raise ValueError(f"delivery package validation failed: {', '.join(result.errors)}")
@@ -217,13 +217,20 @@ def write_delivery_package(
 
 def invalidate_delivery_package(paths: RunArtifactPaths) -> None:
     """Remove all terminal truth artifacts as one recoverable invalidation operation."""
-    recover_incomplete_delivery_transactions(paths.run_dir)
+    recover_delivery_transaction(paths.run_dir)
     payload_paths = tuple(path for path, _ in _terminal_payload_paths(paths))
     _invalidate_paths(paths.run_dir, payload_paths)
 
 
-def recover_incomplete_delivery_transactions(run_dir: Path) -> None:
-    root = _transaction_root(run_dir)
+def recover_delivery_transaction(run_dir: Path) -> None:
+    """Restore a complete prior terminal generation before any artifact read.
+
+    The transaction marker is the reader boundary: a marker in any state other
+    than ``committed`` means targets may be a mixed generation and must be rolled
+    back before a caller inspects them. A committed marker has already installed
+    all payloads, so only its temporary bookkeeping is removed.
+    """
+    root = run_dir / ".delivery-transactions"
     if not root.exists():
         return
     for transaction_dir in root.iterdir():
@@ -236,6 +243,11 @@ def recover_incomplete_delivery_transactions(run_dir: Path) -> None:
             _rollback_entries(manifest.get("entries", []))
         _cleanup_transaction(manifest.get("entries", []), transaction_dir)
     root.rmdir() if root.exists() and not any(root.iterdir()) else None
+
+
+def recover_incomplete_delivery_transactions(run_dir: Path) -> None:
+    """Backward-compatible alias for the terminal artifact read boundary."""
+    recover_delivery_transaction(run_dir)
 
 
 def _commit_payloads(

@@ -1547,13 +1547,22 @@ def test_post_delivery_failure_preserves_committed_terminal_package(
     monkeypatch.setattr(main, "_now_for_output_paths", lambda: datetime(2026, 6, 15, 10, 30, 45))
     monkeypatch.setattr(main.WorkflowEvaluation, "finalize", _fail_only_success_finalize)
 
-    with pytest.raises(SystemExit):
-        main.run()
+    result = main.run()
 
     run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    assert result is None
     assert json.loads((run_dir / "final_decision.json").read_text(encoding="utf-8"))["final_decision"] == "passed"
     assert json.loads((run_dir / "06_structured_recommendation.json").read_text(encoding="utf-8"))["status"] == "passed"
     assert "# Apple Inc. Investment Research" in (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
+    metrics = json.loads((run_dir / "latest_run_metrics.json").read_text(encoding="utf-8"))
+    summary = json.loads((run_dir / "evaluation_summary.json").read_text(encoding="utf-8"))
+    assert metrics["status"] == "delivered_with_warnings"
+    assert metrics["success"] is True
+    assert metrics["delivery_validation_passed"] is True
+    assert metrics["final_status"] == "passed"
+    assert summary["latest_status"] == "delivered_with_warnings"
+    assert summary["successful_runs"] == 1
+    assert "post_delivery_warning" in (run_dir / "05_runtime.txt").read_text(encoding="utf-8")
 
 
 def test_build_run_output_paths_groups_all_outputs_in_company_folder(tmp_path: Path) -> None:

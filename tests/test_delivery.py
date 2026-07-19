@@ -219,3 +219,54 @@ def test_delivery_package_snapshots_cannot_be_mutated_after_validation(
     report = json.loads(paths.structured_report_path.read_text(encoding="utf-8"))
     assert recommendation["status"] == "passed"
     assert report["sections"]["financial_analysis"] == "financial_analysis content"
+
+
+def test_watchlist_rebuild_recovers_interrupted_delivery_before_reading_terminal_artifacts(
+    tmp_path: Path, formal_document: ReportDocument
+) -> None:
+    """Readers must restore the previous generation before consuming terminal truth."""
+    from multi_agent import main
+    from multi_agent.core.delivery import DeliveryPackage, write_delivery_package
+
+    run_dir = tmp_path / "artifacts" / "apple_inc__aapl" / "20260615_103045"
+    paths = build_run_artifact_paths(run_dir)
+    previous = DeliveryPackage.from_document(decision=_decision(), document=formal_document)
+    write_delivery_package(paths=paths, package=previous)
+    prior_generation = _terminal_bytes(paths)
+    (run_dir / "latest_run_metrics.json").write_text(
+        json.dumps({"company_name": "Apple Inc.", "company_ticker": "AAPL"}),
+        encoding="utf-8",
+    )
+
+    replacement_document = formal_document.model_copy(update={"title": "Replacement generation"})
+    replacement = DeliveryPackage.from_document(
+        decision=_decision(), document=replacement_document
+    )
+    transaction_dir = run_dir / ".delivery-transactions" / "delivery-crash-simulation"
+    transaction_dir.mkdir(parents=True)
+    entries: list[dict[str, object]] = []
+    for index, (target, payload) in enumerate(replacement.payloads(paths)):
+        backup = target.parent / f".{target.name}.delivery-backup-crash-{index}"
+        os.replace(target, backup)
+        if index < 2:
+            target.write_text(payload, encoding="utf-8")
+        entries.append(
+            {
+                "target": str(target),
+                "backup": str(backup),
+                "stage": "",
+                "original_exists": True,
+            }
+        )
+    (transaction_dir / "manifest.json").write_text(
+        json.dumps({"state": "prepared", "entries": entries}), encoding="utf-8"
+    )
+
+    rebuilt = main._rebuild_watchlist_from_artifacts(
+        base_artifacts_dir=tmp_path / "artifacts",
+        watchlist_path=tmp_path / "watchlist.json",
+    )
+
+    assert rebuilt == 1
+    assert _terminal_bytes(paths) == prior_generation
+    assert not (run_dir / ".delivery-transactions").exists()
