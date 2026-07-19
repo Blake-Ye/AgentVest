@@ -308,7 +308,15 @@ class MultiAgent:
                 "quant_valuation_analyst",
                 "data_quality_reviewer",
             ]
-        expanded_targets = list(dict.fromkeys(expanded_targets))
+        target_order = (
+            "market_validation_analyst",
+            "event_guidance_analyst",
+            "fundamental_analyst",
+            "quant_valuation_analyst",
+            "data_quality_reviewer",
+        )
+        expanded_target_set = set(expanded_targets)
+        expanded_targets = [target for target in target_order if target in expanded_target_set]
         task_specs = {
             "market_validation_analyst": (
                 "market_validation_task", self.market_validation_analyst,
@@ -331,20 +339,42 @@ class MultiAgent:
                 "08_data_quality_review.md",
             ),
         }
-        tasks: list[Task] = []
+        context_targets = {
+            "event_guidance_analyst": ("market_validation_analyst",),
+            "fundamental_analyst": (
+                "market_validation_analyst",
+                "event_guidance_analyst",
+            ),
+            "quant_valuation_analyst": (
+                "market_validation_analyst",
+                "fundamental_analyst",
+            ),
+            "data_quality_reviewer": (
+                "market_validation_analyst",
+                "event_guidance_analyst",
+                "fundamental_analyst",
+                "quant_valuation_analyst",
+            ),
+        }
+        tasks_by_target: dict[str, Task] = {}
         for target in expanded_targets:
             spec = task_specs.get(target)
             if spec is None:
                 continue
             task_name, agent_factory, output_name = spec
-            tasks.append(
-                Task(
-                    config=self.tasks_config[task_name],  # type: ignore[index]
-                    agent=agent_factory(),
-                    output_file=self._task_output_file(self._artifact_path(output_name)),
-                    callback=record_task_completion_callback,
-                )
+            context = [
+                tasks_by_target[dependency]
+                for dependency in context_targets.get(target, ())
+                if dependency in tasks_by_target
+            ]
+            tasks_by_target[target] = Task(
+                config=self.tasks_config[task_name],  # type: ignore[index]
+                agent=agent_factory(),
+                context=context,
+                output_file=self._task_output_file(self._artifact_path(output_name)),
+                callback=record_task_completion_callback,
             )
+        tasks = list(tasks_by_target.values())
         if not tasks:
             raise ValueError("targeted analysis requires at least one supported RepairAction target")
         return self._make_crew(tasks=tasks)

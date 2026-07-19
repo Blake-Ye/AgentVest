@@ -236,3 +236,47 @@ def test_flow_crews_preserve_seven_agent_topology_and_allow_targeted_override(
     assert len(workflow.crew().tasks) == 7
     assert len(workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks) == 3
     assert workflow.quant_valuation_analyst().llm.model == "deep-model"
+
+
+def test_targeted_financial_repair_preserves_current_task_context_chain(
+    monkeypatch: pytest.MonkeyPatch, writable_crewai_storage: Path
+) -> None:
+    monkeypatch.setenv("FAST_MODEL", "fast-model")
+    monkeypatch.setenv("DEEP_MODEL", "deep-model")
+    monkeypatch.setenv("REVIEW_MODEL", "review-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+
+    targeted_tasks = MultiAgent().targeted_analysis_crew(["quant_valuation_analyst"]).tasks
+    tasks_by_output = {Path(task.output_file).name: task for task in targeted_tasks}
+    filing = tasks_by_output["02_filing_review.md"]
+    financial = tasks_by_output["03_financial_analysis.md"]
+    reviewer = tasks_by_output["08_data_quality_review.md"]
+
+    assert financial.context == [filing]
+    assert reviewer.context == [filing, financial]
+
+
+def test_targeted_reviewer_context_excludes_prior_analysis_task_instances(
+    monkeypatch: pytest.MonkeyPatch, writable_crewai_storage: Path
+) -> None:
+    monkeypatch.setenv("FAST_MODEL", "fast-model")
+    monkeypatch.setenv("DEEP_MODEL", "deep-model")
+    monkeypatch.setenv("REVIEW_MODEL", "review-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+
+    workflow = MultiAgent()
+    prior_analysis_tasks = workflow.analysis_crew().tasks
+    targeted_tasks = workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks
+    filing = next(task for task in targeted_tasks if Path(task.output_file).name == "02_filing_review.md")
+    financial = next(task for task in targeted_tasks if Path(task.output_file).name == "03_financial_analysis.md")
+    reviewer = next(task for task in targeted_tasks if Path(task.output_file).name == "08_data_quality_review.md")
+
+    assert reviewer.context == [filing, financial]
+    assert all(context in targeted_tasks for context in reviewer.context)
+    assert all(context not in prior_analysis_tasks for context in reviewer.context)
