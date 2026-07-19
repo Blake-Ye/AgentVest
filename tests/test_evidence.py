@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import date
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from multi_agent.core.evidence import (
     EvidenceNormalizer,
@@ -100,6 +102,149 @@ def test_flow_and_instant_facts_with_same_fiscal_period_are_compatible():
     )
 
     assert periods_are_compatible(revenue, shares) is True
+
+
+def test_financial_fact_with_incomplete_period_metadata_is_not_period_compatible():
+    complete = FinancialFact(
+        field_name="revenue",
+        value=100,
+        unit="USD",
+        period_end=date(2025, 9, 27),
+        fiscal_year=2025,
+        source_tag="sec_companyfacts",
+    )
+    incomplete = complete.model_copy(update={"fiscal_year": None})
+
+    assert periods_are_compatible(complete, incomplete) is False
+
+
+def test_incomplete_period_candidate_does_not_displace_complete_evidence(apple_companyfacts):
+    entries = apple_companyfacts["facts"]["us-gaap"][
+        "RevenueFromContractWithCustomerExcludingAssessedTax"
+    ]["units"]["USD"]
+    incomplete = dict(entries[-1])
+    incomplete.update({"val": 500_000_000_000, "fy": 2026, "filed": "2026-10-31"})
+    incomplete.pop("end")
+    entries.append(incomplete)
+
+    bundle = EvidenceNormalizer().normalize_company_facts(
+        company_name="Apple Inc.", ticker="AAPL", payload=apple_companyfacts
+    )
+
+    assert bundle.require_fact("revenue").value == 416_161_000_000
+    assert any(
+        gap.code == "incomplete_financial_period" and gap.fields == ["revenue"]
+        for gap in bundle.gaps
+    )
+
+
+def test_ambiguous_only_evidence_emits_targeted_period_gap():
+    payload = {
+        "cik": 320193,
+        "facts": {
+            "us-gaap": {
+                "Revenues": {
+                    "units": {
+                        "USD": [
+                            {
+                                "val": 100,
+                                "form": "10-K",
+                                "filed": "2025-10-31",
+                                "accn": "0000320193-25-000079",
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    }
+
+    bundle = EvidenceNormalizer().normalize_company_facts(
+        company_name="Apple Inc.", ticker="AAPL", payload=payload
+    )
+
+    assert bundle.require_fact("revenue").formal_eligible is False
+    assert any(
+        gap.code == "ambiguous_financial_period" and gap.fields == ["revenue"]
+        for gap in bundle.gaps
+    )
+
+
+def test_point_in_time_shares_are_exposed_as_shares_outstanding_not_diluted(
+    apple_companyfacts,
+):
+    bundle = EvidenceNormalizer().normalize_company_facts(
+        company_name="Apple Inc.", ticker="AAPL", payload=apple_companyfacts
+    )
+
+    assert bundle.require_fact("shares_outstanding").taxonomy_concept == (
+        "EntityCommonStockSharesOutstanding"
+    )
+    with pytest.raises(ValueError, match="diluted_shares"):
+        bundle.require_fact("diluted_shares")
+
+
+def test_weighted_average_diluted_share_concept_maps_to_diluted_shares(apple_companyfacts):
+    us_gaap = apple_companyfacts["facts"]["us-gaap"]
+    us_gaap["WeightedAverageNumberOfDilutedSharesOutstanding"] = {
+        "units": {
+            "shares": [
+                {
+                    "start": "2024-09-29",
+                    "end": "2025-09-27",
+                    "val": 15_000_000_000,
+                    "fy": 2025,
+                    "fp": "FY",
+                    "form": "10-K",
+                    "filed": "2025-10-31",
+                    "accn": "0000320193-25-000079",
+                    "frame": "CY2025",
+                }
+            ]
+        }
+    }
+
+    bundle = EvidenceNormalizer().normalize_company_facts(
+        company_name="Apple Inc.", ticker="AAPL", payload=apple_companyfacts
+    )
+
+    assert bundle.require_fact("diluted_shares").taxonomy_concept == (
+        "WeightedAverageNumberOfDilutedSharesOutstanding"
+    )
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_non_finite_financial_candidate_is_rejected_before_creating_claim(
+    apple_companyfacts,
+    value,
+):
+    entries = apple_companyfacts["facts"]["us-gaap"][
+        "RevenueFromContractWithCustomerExcludingAssessedTax"
+    ]["units"]["USD"]
+    invalid = dict(entries[-1])
+    invalid.update({"val": value, "filed": "2025-11-01"})
+    entries.append(invalid)
+
+    bundle = EvidenceNormalizer().normalize_company_facts(
+        company_name="Apple Inc.", ticker="AAPL", payload=apple_companyfacts
+    )
+
+    assert bundle.require_fact("revenue").value == 416_161_000_000
+    assert any(
+        gap.code == "invalid_financial_fact" and gap.fields == ["revenue"]
+        for gap in bundle.gaps
+    )
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_financial_fact_rejects_non_finite_claim_value(value):
+    with pytest.raises(ValidationError):
+        FinancialFact(
+            field_name="revenue",
+            value=value,
+            unit="USD",
+            source_tag="sec_companyfacts",
+        )
 
 
 def test_normalizer_selects_newest_filed_fact_in_the_newest_fiscal_period_and_records_rejections(

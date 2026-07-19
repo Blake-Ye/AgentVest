@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from math import isfinite
 from typing import Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -11,7 +12,7 @@ class FinancialFact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     field_name: str
-    value: float
+    value: float = Field(allow_inf_nan=False)
     unit: str
     period_start: date | None = None
     period_end: date | None = None
@@ -133,16 +134,14 @@ class ResearchEvidenceBundle(BaseModel):
 
 def periods_are_compatible(left: FinancialFact, right: FinancialFact) -> bool:
     """Compare SEC reporting periods without treating flow and instant facts as incompatible."""
+    if not _has_complete_period(left) or not _has_complete_period(right):
+        return False
     if (
-        left.fiscal_year is not None
-        and right.fiscal_year is not None
-        and left.fiscal_year != right.fiscal_year
+        left.fiscal_year != right.fiscal_year
     ):
         return False
     if (
-        left.period_end is not None
-        and right.period_end is not None
-        and left.period_end != right.period_end
+        left.period_end != right.period_end
     ):
         return False
     return True
@@ -175,9 +174,14 @@ _FIELD_CONCEPTS: dict[str, tuple[str, ...]] = {
     "cash_and_equivalents": ("CashAndCashEquivalentsAtCarryingValue",),
     "debt_current": ("LongTermDebtCurrent",),
     "debt_noncurrent": ("LongTermDebtNoncurrent",),
-    "diluted_shares": (
+    "shares_outstanding": (
         "EntityCommonStockSharesOutstanding",
         "CommonStockSharesOutstanding",
+        "CommonStocksIncludingAdditionalPaidInCapitalMember",
+    ),
+    "diluted_shares": (
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+        "WeightedAverageNumberOfSharesOutstandingDiluted",
     ),
     "eps": ("EarningsPerShareDiluted",),
     "segment_revenue_services": ("SalesRevenueServicesGross",),
@@ -214,7 +218,39 @@ class EvidenceNormalizer:
             if not candidates:
                 continue
 
-            winner = _select_newest_compatible_candidate(candidates)
+            complete_candidates = [
+                candidate for candidate in candidates if _has_complete_period(candidate.fact)
+            ]
+            incomplete_candidates = [
+                candidate for candidate in candidates if not _has_complete_period(candidate.fact)
+            ]
+            for candidate in incomplete_candidates:
+                bundle.gaps.append(
+                    _period_gap(
+                        code="incomplete_financial_period",
+                        field_name=field_name,
+                        candidate=candidate,
+                        message=(
+                            "SEC Company Facts candidate is missing fiscal year or period end "
+                            "and cannot be matched confidently."
+                        ),
+                    )
+                )
+            if complete_candidates:
+                winner = _select_newest_compatible_candidate(complete_candidates)
+            else:
+                winner = max(candidates, key=_filing_sort_key)
+                bundle.gaps.append(
+                    _period_gap(
+                        code="ambiguous_financial_period",
+                        field_name=field_name,
+                        candidate=winner,
+                        message=(
+                            "No SEC Company Facts candidate has both fiscal year and period end; "
+                            "the selected fact is period-ambiguous."
+                        ),
+                    )
+                )
             bundle.financial_facts.append(winner.fact)
             for candidate in candidates:
                 if candidate is not winner:
@@ -297,6 +333,25 @@ def _select_newest_compatible_candidate(candidates: list[_CandidateFact]) -> _Ca
     return max(compatible, key=_filing_sort_key)
 
 
+def _has_complete_period(fact: FinancialFact) -> bool:
+    return fact.fiscal_year is not None and fact.period_end is not None
+
+
+def _period_gap(
+    code: str,
+    field_name: str,
+    candidate: _CandidateFact,
+    message: str,
+) -> EvidenceGap:
+    return EvidenceGap(
+        code=code,
+        target="fundamental_analyst",
+        fields=[field_name],
+        sources=[candidate.fact.source_url] if candidate.fact.source_url else [],
+        message=message,
+    )
+
+
 def _period_sort_key(candidate: _CandidateFact) -> tuple[int, date, str, str]:
     fact = candidate.fact
     return (
@@ -343,9 +398,10 @@ def _as_float(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     try:
-        return float(value) if value is not None else None
+        numeric_value = float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+    return numeric_value if numeric_value is not None and isfinite(numeric_value) else None
 
 
 def _normalize_cik(value: object) -> str:
