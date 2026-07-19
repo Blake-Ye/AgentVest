@@ -53,7 +53,7 @@ def test_review_contract_accepts_analysis_and_report_stage_payloads() -> None:
         },
     )
 
-    decision = ConfidenceGatePolicy.default().evaluate(analysis_contract)
+    decision = ConfidenceGatePolicy.default().evaluate_legacy(analysis_contract)
 
     assert analysis_contract.stage == "analysis"
     assert decision.final_decision == "rerun"

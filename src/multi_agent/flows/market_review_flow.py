@@ -12,7 +12,12 @@ from crewai.flow.flow import Flow, listen, router, start
 from multi_agent.core.confidence_gate import ConfidenceGatePolicy
 from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
 from multi_agent.core.market import MarketValidationResult
-from multi_agent.core.review_contracts import GateDecision, ReviewContract, ReviewToolSummary
+from multi_agent.core.review_contracts import (
+    GateDecision,
+    ReviewContract,
+    ReviewToolSummary,
+    parse_legacy_review_contract,
+)
 from multi_agent.core.state import ResearchRunState
 from multi_agent.crew import MultiAgent
 
@@ -349,13 +354,13 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 normalized_payload = cls._normalize_machine_readable_review_contract_payload(
                     json.loads(raw_contract)
                 )
-                return ReviewContract.model_validate(normalized_payload)
+                return parse_legacy_review_contract(normalized_payload)
             except Exception:
                 return None
 
     @staticmethod
     def _gate_decision_from_review_contract(contract: ReviewContract) -> GateDecision:
-        policy_decision = ConfidenceGatePolicy.default().evaluate(contract)
+        policy_decision = ConfidenceGatePolicy.default().evaluate_legacy(contract)
         delivery = contract.delivery_eligibility
         recommended_delivery_state = delivery.recommended_delivery_state
 
@@ -578,18 +583,18 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         materialized_review_text = self._materialized_analysis_review_content()
         summary = self._structured_review_summary(analysis_result, "analysis_review_summary")
         if summary is not None:
-            return ConfidenceGatePolicy.default().evaluate(summary)
+            return ConfidenceGatePolicy.default().evaluate_legacy(summary)
         for candidate_review_text in (review_text, materialized_review_text):
             contract = self._machine_readable_review_contract_from_text(candidate_review_text)
             if contract is not None:
                 return self._gate_decision_from_review_contract(contract)
         summary = self._summary_from_latest_metrics()
         if summary is not None:
-            return ConfidenceGatePolicy.default().evaluate(summary)
+            return ConfidenceGatePolicy.default().evaluate_legacy(summary)
         for candidate_review_text in (review_text, materialized_review_text):
             summary = self._summary_from_review_text(candidate_review_text)
             if summary is not None:
-                return ConfidenceGatePolicy.default().evaluate(summary)
+                return ConfidenceGatePolicy.default().evaluate_legacy(summary)
             blocked_decision = self._explicit_blocked_decision_from_review_text(candidate_review_text)
             if blocked_decision is not None:
                 return blocked_decision

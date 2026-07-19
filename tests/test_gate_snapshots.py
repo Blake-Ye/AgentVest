@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from multi_agent.tools.investment_tools import build_fcf_snapshot, build_market_snapshot
 from multi_agent.tools.review_tools import FinancialFieldCompletenessTool
+from multi_agent.core.review_contracts import parse_legacy_review_contract
 
 
 def test_fcf_snapshot_uses_single_growth_rate_definition() -> None:
@@ -35,3 +36,23 @@ def test_financial_field_completeness_supports_gate_required_fields() -> None:
 
     assert result["gate_financial_coverage_score"] == 0.5
     assert result["gate_missing_fields"] == ["CashAndEquivalents"]
+
+
+def test_legacy_review_contract_requires_explicit_adapter() -> None:
+    contract = parse_legacy_review_contract(
+        {
+            "review_stage": "analysis",
+            "decision": "passed",
+            "coverage": {
+                "evidence_coverage_ratio": 1.0,
+                "financial_coverage_score": 1.0,
+                "claim_binding_ratio": 1.0,
+            },
+            "tool_health": {"sec": "healthy"},
+            "delivery_eligibility": {"formal_report_allowed": True},
+            "failure_taxonomy": {"primary_code": "none"},
+        }
+    )
+
+    assert contract.stage == "analysis"
+    assert contract.decision.gate_outcome == "pass"
