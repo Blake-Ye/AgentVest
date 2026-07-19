@@ -24,6 +24,9 @@ class RunArtifactPaths:
     latest_metrics_path: Path
     evaluation_summary_path: Path
     readme_path: Path
+    evidence_bundle_path: Path
+    report_document_path: Path
+    final_decision_path: Path
 
     @property
     def market_validation_json(self) -> Path:
@@ -64,4 +67,7 @@ def build_run_artifact_paths(run_dir: Path) -> RunArtifactPaths:
         latest_metrics_path=run_dir / "latest_run_metrics.json",
         evaluation_summary_path=run_dir / "evaluation_summary.json",
         readme_path=run_dir / "README.md",
+        evidence_bundle_path=run_dir / "10_research_evidence.json",
+        report_document_path=run_dir / "11_report_document.json",
+        final_decision_path=run_dir / "final_decision.json",
     )

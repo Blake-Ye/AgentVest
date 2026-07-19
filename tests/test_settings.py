@@ -313,6 +313,9 @@ def test_build_run_artifact_paths_returns_expected_files(tmp_path: Path) -> None
         latest_metrics_path=tmp_path / "run-001" / "latest_run_metrics.json",
         evaluation_summary_path=tmp_path / "run-001" / "evaluation_summary.json",
         readme_path=tmp_path / "run-001" / "README.md",
+        evidence_bundle_path=tmp_path / "run-001" / "10_research_evidence.json",
+        report_document_path=tmp_path / "run-001" / "11_report_document.json",
+        final_decision_path=tmp_path / "run-001" / "final_decision.json",
     )
     assert paths.market_validation_json == paths.market_intelligence_path
     assert paths.final_report_md == paths.final_report_path

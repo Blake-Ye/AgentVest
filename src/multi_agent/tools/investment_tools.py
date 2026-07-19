@@ -4,6 +4,8 @@ import html as html_module
 import json
 import re
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from math import isfinite
 from pathlib import Path
 from typing import Any, Type
 
@@ -12,6 +14,16 @@ from pydantic import BaseModel, Field
 from crewai.tools import BaseTool
 
 from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
+from multi_agent.core.evidence import (
+    EvidenceGap,
+    EvidenceNormalizer,
+    EventEvidence,
+    FinancialFact,
+    MarketSnapshotEvidence,
+    ResearchEvidenceBundle,
+    ToolHealthRecord,
+    periods_are_compatible,
+)
 from multi_agent.evaluation import record_financial_fields
 from multi_agent.finance import CompanyFinancialSnapshot, compute_key_metrics
 from multi_agent.settings import InvestmentResearchSettings
@@ -39,14 +51,18 @@ class FinancialFieldExtraction:
     normalized_value: float
     extracted: bool
     source_tag: str | None
+    fact: FinancialFact | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "value": self.value,
             "normalized_value": self.normalized_value,
             "extracted": self.extracted,
             "source_tag": self.source_tag,
         }
+        if self.fact is not None:
+            payload["fact"] = self.fact.model_dump(mode="json")
+        return payload
 
 
 def build_fcf_snapshot(
@@ -117,11 +133,14 @@ def _extract_latest_fact(company_facts: dict[str, Any], candidate_tags: list[str
             if not entries:
                 continue
 
-            comparable_entries = [
-                entry
-                for entry in entries
-                if entry.get("val") is not None
-            ]
+            comparable_entries = []
+            for entry in entries:
+                try:
+                    value = float(entry.get("val"))
+                except (TypeError, ValueError):
+                    continue
+                if isfinite(value):
+                    comparable_entries.append(entry)
             if not comparable_entries:
                 continue
 
@@ -134,11 +153,33 @@ def _extract_latest_fact(company_facts: dict[str, Any], candidate_tags: list[str
                 ),
             )
             value = float(latest_entry.get("val", 0.0))
+            accession = str(latest_entry.get("accn", "")).strip() or None
+            cik = str(company_facts.get("cik", "")).strip()
+            source_url = (
+                f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession.replace('-', '')}/"
+                if cik.isdigit() and accession
+                else None
+            )
             return FinancialFieldExtraction(
                 value=value,
                 normalized_value=value,
                 extracted=True,
                 source_tag=tag,
+                fact=FinancialFact(
+                    field_name=tag,
+                    value=value,
+                    unit=unit_name,
+                    period_start=_optional_date(latest_entry.get("start")),
+                    period_end=_optional_date(latest_entry.get("end")),
+                    fiscal_year=_optional_int(latest_entry.get("fy")),
+                    fiscal_period=str(latest_entry.get("fp", "")).strip() or None,
+                    form=str(latest_entry.get("form", "")).strip() or None,
+                    accession=accession,
+                    filed_at=_optional_date(latest_entry.get("filed")),
+                    source_url=source_url,
+                    source_tag="sec_companyfacts",
+                    taxonomy_concept=tag,
+                ),
             )
     return FinancialFieldExtraction(
         value=0.0,
@@ -146,6 +187,20 @@ def _extract_latest_fact(company_facts: dict[str, Any], candidate_tags: list[str
         extracted=False,
         source_tag=None,
     )
+
+
+def _optional_date(value: object) -> date | None:
+    try:
+        return date.fromisoformat(str(value)) if value else None
+    except ValueError:
+        return None
+
+
+def _optional_int(value: object) -> int | None:
+    try:
+        return int(value) if value is not None and not isinstance(value, bool) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_services_revenue_from_filing_html(filing_html: str) -> FinancialFieldExtraction:
@@ -199,6 +254,236 @@ def _extract_stock_price_from_quote_payload(
         else "nasdaq_last_sale_price"
     )
     return stock_price, as_of_date, source_ref, source_tag
+
+
+def _quote_source_url(ticker: str, quote_payload: dict[str, Any]) -> str:
+    explicit_url = str(quote_payload.get("source_url", "")).strip()
+    if explicit_url:
+        return explicit_url
+    if str(quote_payload.get("source", "")).strip() == "stockanalysis_quote_page":
+        return f"https://stockanalysis.com/stocks/{ticker.lower()}/"
+    return f"https://api.nasdaq.com/api/quote/{ticker.upper()}/info?assetclass=stocks"
+
+
+def _parse_observed_at(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.strip().replace("Z", "+00:00")
+    try:
+        observed_at = datetime.fromisoformat(normalized)
+    except ValueError:
+        for pattern in ("%b %d, %Y", "%B %d, %Y"):
+            try:
+                observed_at = datetime.strptime(normalized.split(",", 2)[0] + ", " + normalized.split(",", 2)[1].strip(), pattern)
+                break
+            except (ValueError, IndexError):
+                continue
+        else:
+            return None
+    return observed_at if observed_at.tzinfo is not None else observed_at.replace(tzinfo=timezone.utc)
+
+
+def _event_timestamp(value: object) -> datetime | None:
+    return _parse_observed_at(str(value).strip()) if value else None
+
+
+def _evidence_gap(
+    *,
+    code: str,
+    target: str,
+    message: str,
+    fields: list[str] | None = None,
+    sources: list[str] | None = None,
+) -> EvidenceGap:
+    return EvidenceGap(
+        code=code,
+        target=target,  # type: ignore[arg-type]
+        fields=fields or [],
+        sources=sources or [],
+        message=message,
+    )
+
+
+def _add_total_debt(bundle: ResearchEvidenceBundle) -> None:
+    components = [
+        fact
+        for fact in bundle.financial_facts
+        if fact.field_name in {"debt_current", "debt_noncurrent"}
+    ]
+    if len(components) != 2:
+        bundle.gaps.append(
+            _evidence_gap(
+                code="total_debt_incomplete",
+                target="fundamental_analyst",
+                fields=["total_debt"],
+                message="Both current and non-current debt are required to construct total debt.",
+            )
+        )
+        return
+    if not periods_are_compatible(components[0], components[1]):
+        bundle.gaps.append(
+            _evidence_gap(
+                code="total_debt_period_mismatch",
+                target="fundamental_analyst",
+                fields=["total_debt"],
+                sources=[fact.source_url for fact in components if fact.source_url],
+                message="Current and non-current debt facts do not share a compatible fiscal period.",
+            )
+        )
+        return
+    representative = components[0]
+    bundle.financial_facts.append(
+        representative.model_copy(
+            update={
+                "field_name": "total_debt",
+                "value": sum(fact.value for fact in components),
+                "source_tag": "sec_companyfacts_total_debt",
+                "taxonomy_concept": "+".join(
+                    fact.taxonomy_concept or "" for fact in components
+                ),
+            }
+        )
+    )
+
+
+def _add_services_revenue_from_filing(
+    bundle: ResearchEvidenceBundle,
+    filing_html: str,
+) -> None:
+    if any(fact.field_name == "segment_revenue_services" for fact in bundle.financial_facts):
+        return
+    extracted = _extract_services_revenue_from_filing_html(filing_html)
+    revenue = next((fact for fact in bundle.financial_facts if fact.field_name == "revenue"), None)
+    if not extracted.extracted or revenue is None:
+        bundle.tool_health.append(
+            ToolHealthRecord(
+                tool_name="sec_filing_html",
+                status="degraded",
+                message="Annual filing HTML did not yield Services revenue with reusable provenance.",
+            )
+        )
+        bundle.gaps.append(
+            _evidence_gap(
+                code="services_revenue_unavailable",
+                target="fundamental_analyst",
+                fields=["segment_revenue_services"],
+                message="Services revenue could not be extracted from the annual filing HTML.",
+            )
+        )
+        return
+    bundle.financial_facts.append(
+        revenue.model_copy(
+            update={
+                "field_name": "segment_revenue_services",
+                "value": extracted.normalized_value,
+                "source_tag": extracted.source_tag or "sec_filing_html",
+                "taxonomy_concept": "ProductsAndServicesPerformance.Services",
+            }
+        )
+    )
+    bundle.tool_health.append(ToolHealthRecord(tool_name="sec_filing_html", status="healthy"))
+
+
+def _add_quote_evidence(
+    bundle: ResearchEvidenceBundle,
+    ticker: str,
+    quote_payload: dict[str, Any],
+) -> None:
+    price, observed_text, _source_ref, source_tag = _extract_stock_price_from_quote_payload(quote_payload)
+    observed_at = _parse_observed_at(observed_text)
+    if quote_payload.get("status") == "degraded" or price is None or observed_at is None:
+        bundle.tool_health.append(
+            ToolHealthRecord(
+                tool_name="quote",
+                status="degraded",
+                message=str(quote_payload.get("degraded_reason", "Market quote is unavailable or undated.")),
+            )
+        )
+        bundle.gaps.append(
+            _evidence_gap(
+                code="market_quote_unavailable",
+                target="market_validation_analyst",
+                fields=["stock_price"],
+                message="Market quote is unavailable, invalid, or has no observable timestamp.",
+            )
+        )
+        return
+    bundle.market_snapshots.append(
+        MarketSnapshotEvidence(
+            price=price,
+            currency=str(quote_payload.get("currency", "USD")),
+            observed_at=observed_at,
+            source_url=_quote_source_url(ticker, quote_payload),
+            source_tag=source_tag or "market_quote",
+        )
+    )
+    bundle.tool_health.append(ToolHealthRecord(tool_name="quote", status="healthy"))
+
+
+def _add_tavily_events(
+    bundle: ResearchEvidenceBundle,
+    tavily_payloads: list[dict[str, object]],
+) -> None:
+    if not tavily_payloads:
+        return
+    degraded = False
+    event_count = 0
+    for payload_index, payload in enumerate(tavily_payloads):
+        status = str(payload.get("status", "ok")).lower()
+        results = payload.get("results", [])
+        if status != "ok" or not isinstance(results, list):
+            degraded = True
+            continue
+        for result_index, raw_result in enumerate(results):
+            if not isinstance(raw_result, dict):
+                continue
+            url = str(raw_result.get("url", "")).strip()
+            title = str(raw_result.get("title", "")).strip()
+            if not url or not title:
+                continue
+            event_count += 1
+            bundle.events.append(
+                EventEvidence(
+                    event_id=f"tavily-{payload_index}-{result_index}",
+                    title=title,
+                    published_at=_event_timestamp(raw_result.get("published_at")),
+                    source_url=url,
+                    source_type=str(raw_result.get("source_type", "news")) or "news",
+                    confidence=0.6,
+                )
+            )
+    if degraded:
+        bundle.tool_health.append(ToolHealthRecord(tool_name="tavily", status="degraded"))
+    else:
+        bundle.tool_health.append(ToolHealthRecord(tool_name="tavily", status="healthy"))
+    if degraded or event_count == 0:
+        bundle.gaps.append(
+            _evidence_gap(
+                code="independent_event_sources_insufficient",
+                target="event_guidance_analyst",
+                fields=["events"],
+                message="Tavily did not return sufficient healthy, independently sourced event evidence.",
+            )
+        )
+
+
+def build_research_evidence_bundle(
+    *,
+    company_name: str,
+    ticker: str,
+    company_facts: dict[str, object],
+    filing_html: str,
+    quote_payload: dict[str, object],
+    tavily_payloads: list[dict[str, object]],
+) -> ResearchEvidenceBundle:
+    """Normalize SEC, filing, quote, and news payloads into one auditable bundle."""
+    bundle = EvidenceNormalizer().normalize_company_facts(company_name, ticker, company_facts)
+    bundle.tool_health.append(ToolHealthRecord(tool_name="sec_company_facts", status="healthy"))
+    _add_total_debt(bundle)
+    _add_services_revenue_from_filing(bundle, filing_html)
+    _add_quote_evidence(bundle, ticker, quote_payload)
+    _add_tavily_events(bundle, tavily_payloads)
+    return bundle
 
 
 def _build_financial_snapshot_with_metadata(
@@ -537,6 +822,7 @@ class FinancialMetricsTool(BaseTool):
             "services_revenue": None,
             "source_refs": [],
         }
+        filing_html = ""
         fetch_filing_html = getattr(self._service, "fetch_latest_annual_report_html", None)
         if callable(fetch_filing_html):
             try:
@@ -549,7 +835,7 @@ class FinancialMetricsTool(BaseTool):
                         "source_refs": ["10-K Products and Services Performance"],
                     }
             except Exception:
-                pass
+                filing_html = ""
 
         diluted_shares = metadata.get("diluted_shares", {}).get("normalized_value")
         if metadata.get("segment_revenue_services", {}).get("extracted"):
@@ -561,6 +847,7 @@ class FinancialMetricsTool(BaseTool):
         as_of_date = None
         stock_price_source_ref = None
         stock_price_source_tag = None
+        quote_payload: dict[str, Any] = {"status": "degraded", "degraded_reason": "Quote service unavailable."}
         fetch_market_quote = getattr(self._service, "fetch_market_quote", None)
         if callable(fetch_market_quote):
             try:
@@ -576,6 +863,7 @@ class FinancialMetricsTool(BaseTool):
                 as_of_date = None
                 stock_price_source_ref = None
                 stock_price_source_tag = None
+                quote_payload = {"status": "degraded", "degraded_reason": "Quote service request failed."}
         metadata["stock_price"] = FinancialFieldExtraction(
             value=stock_price or 0.0,
             normalized_value=stock_price or 0.0,
@@ -589,6 +877,15 @@ class FinancialMetricsTool(BaseTool):
             source_refs=[stock_price_source_ref] if stock_price is not None and stock_price_source_ref else [],
         )
         formal_gate_snapshot = build_formal_gate_snapshot(metadata)
+        company_name = str(company_facts.get("entityName", "")).strip() or ticker.upper()
+        evidence_bundle = build_research_evidence_bundle(
+            company_name=company_name,
+            ticker=ticker.upper(),
+            company_facts=company_facts,
+            filing_html=filing_html,
+            quote_payload=quote_payload,
+            tavily_payloads=[],
+        )
 
         record_financial_fields(metadata)
         return json.dumps(
@@ -598,6 +895,7 @@ class FinancialMetricsTool(BaseTool):
                 "market_snapshot": market_snapshot,
                 "segment_snapshot": segment_snapshot,
                 "formal_gate_snapshot": formal_gate_snapshot,
+                "evidence_bundle": evidence_bundle.model_dump(mode="json"),
             },
             indent=2,
             ensure_ascii=False,

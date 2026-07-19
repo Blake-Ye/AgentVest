@@ -1,0 +1,10 @@
+{
+  "source": "nasdaq_quote_info",
+  "source_url": "https://api.nasdaq.com/api/quote/AAPL/info?assetclass=stocks",
+  "data": {
+    "primaryData": {
+      "lastSalePrice": "$210.05",
+      "lastTradeTimestamp": "2026-07-19T20:00:00+00:00"
+    }
+  }
+}

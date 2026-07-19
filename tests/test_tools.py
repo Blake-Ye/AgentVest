@@ -1,6 +1,9 @@
 import sys
 import json
+from copy import deepcopy
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -11,6 +14,8 @@ from multi_agent.tools.investment_tools import (
     FinancialMetricsTool,
     SecCompanyFactsTool,
     SecFilingSearchTool,
+    build_research_evidence_bundle,
+    _extract_latest_fact,
     _extract_services_revenue_from_filing_html,
 )
 from multi_agent.tools.tavily_search import TavilySearchTool
@@ -27,6 +32,99 @@ def build_settings() -> InvestmentResearchSettings:
         tavily_api_key="tvly-key",
         sec_api_email="analyst@example.com",
     )
+
+
+@pytest.fixture
+def apple_sources() -> dict[str, object]:
+    fixture_dir = Path(__file__).parent / "fixtures" / "apple"
+    company_facts = json.loads((fixture_dir / "companyfacts.json").read_text(encoding="utf-8"))
+    facts = company_facts["facts"]["us-gaap"]
+    annual = {
+        "end": "2025-09-27",
+        "fy": 2025,
+        "fp": "FY",
+        "form": "10-K",
+        "filed": "2025-10-31",
+        "accn": "0000320193-25-000079",
+    }
+
+    def add_fact(concept: str, unit: str, value: float, *, start: str | None = None) -> None:
+        entry = dict(annual, val=value)
+        if start:
+            entry["start"] = start
+        facts[concept] = {"units": {unit: [entry]}}
+
+    add_fact("CashAndCashEquivalentsAtCarryingValue", "USD", 35_900_000_000)
+    add_fact("LongTermDebtCurrent", "USD", 10_000_000_000)
+    add_fact("LongTermDebtNoncurrent", "USD", 90_000_000_000)
+    add_fact(
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+        "shares",
+        15_000_000_000,
+        start="2024-09-29",
+    )
+    return {
+        "company_name": "Apple Inc.",
+        "ticker": "AAPL",
+        "company_facts": company_facts,
+        "filing_html": (fixture_dir / "filing.html").read_text(encoding="utf-8"),
+        "quote_payload": json.loads((fixture_dir / "quote.json").read_text(encoding="utf-8")),
+        "tavily_payloads": [json.loads((fixture_dir / "news.json").read_text(encoding="utf-8"))],
+    }
+
+
+def test_build_bundle_contains_all_formal_gate_facts(apple_sources: dict[str, object]) -> None:
+    bundle = build_research_evidence_bundle(**apple_sources)
+
+    assert {fact.field_name for fact in bundle.formal_facts()} >= {
+        "revenue",
+        "cash_and_equivalents",
+        "total_debt",
+        "diluted_shares",
+        "segment_revenue_services",
+    }
+    quote = bundle.market_snapshots[0]
+    assert quote.price > 0
+    assert quote.observed_at is not None
+    assert quote.source_url
+    assert bundle.tool_status("sec_company_facts") == "healthy"
+    assert bundle.tool_status("quote") == "healthy"
+    assert bundle.tool_status("tavily") == "healthy"
+
+
+def test_tavily_failure_is_recorded_as_degraded_not_hidden(
+    apple_sources: dict[str, object],
+) -> None:
+    sources = deepcopy(apple_sources)
+    sources["tavily_payloads"] = [{"status": "degraded", "results": []}]
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    assert bundle.tool_status("tavily") == "degraded"
+    assert any(gap.code == "independent_event_sources_insufficient" for gap in bundle.gaps)
+
+
+def test_quote_failure_is_recorded_as_degraded_not_hidden(apple_sources: dict[str, object]) -> None:
+    sources = deepcopy(apple_sources)
+    sources["quote_payload"] = {"status": "degraded", "degraded_reason": "timeout"}
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    assert bundle.tool_status("quote") == "degraded"
+    assert any(gap.code == "market_quote_unavailable" for gap in bundle.gaps)
+
+
+def test_legacy_financial_field_keeps_selected_sec_fact_provenance(
+    apple_sources: dict[str, object],
+) -> None:
+    extraction = _extract_latest_fact(
+        apple_sources["company_facts"],
+        ["RevenueFromContractWithCustomerExcludingAssessedTax"],
+    )
+
+    assert extraction.fact is not None
+    assert extraction.fact.accession == "0000320193-25-000079"
+    assert extraction.as_dict()["fact"]["period_end"] == "2025-09-27"
 
 
 def test_tool_metadata_can_remain_english() -> None:
