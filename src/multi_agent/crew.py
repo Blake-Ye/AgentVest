@@ -33,6 +33,16 @@ class MultiAgent:
     agents_config = "config/agents.yaml"
     tasks_config = "config/tasks.yaml"
 
+    def configure_run(
+        self,
+        *,
+        model_tier_overrides: dict[str, str] | None = None,
+        rerun_targets: list[str] | None = None,
+    ) -> None:
+        """Receive Flow-owned routing instructions without changing Crew topology."""
+        self._model_tier_overrides = dict(model_tier_overrides or {})
+        self._rerun_targets = list(rerun_targets or [])
+
     def _settings(self) -> InvestmentResearchSettings:
         # 所有运行参数统一从 settings 中读取，避免散落在各个工具里。
         return InvestmentResearchSettings.from_env()
@@ -91,11 +101,15 @@ class MultiAgent:
             temperature=0.3,
         )
 
+    def _tier_for_agent(self, agent_name: str, default_tier: str) -> str:
+        overrides = getattr(self, "_model_tier_overrides", {})
+        return str(overrides.get(agent_name, default_tier))
+
     @agent
     def market_validation_analyst(self) -> Agent:
         return Agent(
             config=self.agents_config["market_validation_analyst"],  # type: ignore[index]
-            llm=self._llm_for_tier("fast"),
+            llm=self._llm_for_tier(self._tier_for_agent("market_validation_analyst", "fast")),
             tools=[MarketValidationTool(settings=self._settings())],
             max_retry_limit=3,
             verbose=True,
@@ -105,7 +119,7 @@ class MultiAgent:
     def event_guidance_analyst(self) -> Agent:
         return Agent(
             config=self.agents_config["event_guidance_analyst"],  # type: ignore[index]
-            llm=self._llm_for_tier("fast"),
+            llm=self._llm_for_tier(self._tier_for_agent("event_guidance_analyst", "fast")),
             tools=[
                 TavilySearchTool(settings=self._settings()),
             ],
@@ -124,7 +138,7 @@ class MultiAgent:
 
         return Agent(
             config=self.agents_config["fundamental_analyst"],  # type: ignore[index]
-            llm=self._llm_for_tier("deep"),
+            llm=self._llm_for_tier(self._tier_for_agent("fundamental_analyst", "deep")),
             tools=tools,
             max_retry_limit=3,
             verbose=True,
@@ -134,7 +148,7 @@ class MultiAgent:
     def quant_valuation_analyst(self) -> Agent:
         return Agent(
             config=self.agents_config["quant_valuation_analyst"],  # type: ignore[index]
-            llm=self._llm_for_tier("deep"),
+            llm=self._llm_for_tier(self._tier_for_agent("quant_valuation_analyst", "deep")),
             tools=[FinancialMetricsTool(settings=self._settings())],
             max_retry_limit=3,
             verbose=True,
@@ -144,7 +158,7 @@ class MultiAgent:
     def data_quality_reviewer(self) -> Agent:
         return Agent(
             config=self.agents_config["data_quality_reviewer"],  # type: ignore[index]
-            llm=self._llm_for_tier("review"),
+            llm=self._llm_for_tier(self._tier_for_agent("data_quality_reviewer", "review")),
             tools=[
                 EvidenceCoverageTool(),
                 CrossSourceConsistencyTool(),
@@ -159,7 +173,7 @@ class MultiAgent:
     def report_writing_analyst(self) -> Agent:
         return Agent(
             config=self.agents_config["report_writing_analyst"],  # type: ignore[index]
-            llm=self._llm_for_tier("deep"),
+            llm=self._llm_for_tier(self._tier_for_agent("report_writing_analyst", "deep")),
             tools=[],
             max_retry_limit=3,
             verbose=True,
@@ -169,7 +183,7 @@ class MultiAgent:
     def logic_compliance_reviewer(self) -> Agent:
         return Agent(
             config=self.agents_config["logic_compliance_reviewer"],  # type: ignore[index]
-            llm=self._llm_for_tier("review"),
+            llm=self._llm_for_tier(self._tier_for_agent("logic_compliance_reviewer", "review")),
             tools=[],
             max_retry_limit=3,
             verbose=True,
@@ -248,15 +262,110 @@ class MultiAgent:
             callback=record_task_completion_callback,
         )
 
-    @crew
-    def crew(self) -> Crew:
-        """创建顺序执行的投研工作流。"""
+    def _make_crew(self, *, tasks: list[Task]) -> Crew:
         self._ensure_crewai_storage_dir()
         return Crew(
-            agents=self.agents,
-            tasks=self.tasks,
+            agents=self._all_agents(),
+            tasks=tasks,
             process=Process.sequential,
             cache=True,
             output_log_file=self._artifact_path("05_runtime"),
             verbose=True,
+        )
+
+    def _all_agents(self) -> list[BaseAgent]:
+        return [
+            self.market_validation_analyst(),
+            self.event_guidance_analyst(),
+            self.fundamental_analyst(),
+            self.quant_valuation_analyst(),
+            self.data_quality_reviewer(),
+            self.report_writing_analyst(),
+            self.logic_compliance_reviewer(),
+        ]
+
+    def analysis_crew(self) -> Crew:
+        """First five agents: research evidence and the strict data-quality contract."""
+        return self._make_crew(
+            tasks=[
+                self.market_validation_task(),
+                self.market_intelligence_task(),
+                self.filing_review_task(),
+                self.financial_analysis_task(),
+                self.data_quality_review_task(),
+            ]
+        )
+
+    def targeted_analysis_crew(self, targets: list[str]) -> Crew:
+        """Rerun only the agent tasks named by typed RepairAction targets."""
+        task_specs = {
+            "market_validation_analyst": (
+                "market_validation_task", self.market_validation_analyst,
+                "00_market_validation.md",
+            ),
+            "event_guidance_analyst": (
+                "market_intelligence_task", self.event_guidance_analyst,
+                "01_market_intelligence.md",
+            ),
+            "fundamental_analyst": (
+                "filing_review_task", self.fundamental_analyst,
+                "02_filing_review.md",
+            ),
+            "quant_valuation_analyst": (
+                "financial_analysis_task", self.quant_valuation_analyst,
+                "03_financial_analysis.md",
+            ),
+            "data_quality_reviewer": (
+                "data_quality_review_task", self.data_quality_reviewer,
+                "08_data_quality_review.md",
+            ),
+        }
+        tasks: list[Task] = []
+        for target in targets:
+            spec = task_specs.get(target)
+            if spec is None:
+                continue
+            task_name, agent_factory, output_name = spec
+            tasks.append(
+                Task(
+                    config=self.tasks_config[task_name],  # type: ignore[index]
+                    agent=agent_factory(),
+                    output_file=self._task_output_file(self._artifact_path(output_name)),
+                    callback=record_task_completion_callback,
+                )
+            )
+        if not tasks:
+            raise ValueError("targeted analysis requires at least one supported RepairAction target")
+        return self._make_crew(tasks=tasks)
+
+    def report_crew(self) -> Crew:
+        """Run writer and logic reviewer only after Flow supplies REPORT_CONTEXT_JSON."""
+        writer = Task(
+            config=self.tasks_config["investment_report_task"],  # type: ignore[index]
+            agent=self.report_writing_analyst(),
+            output_file=self._task_output_file(self._artifact_path("04_writer_payload.json")),
+            callback=record_task_completion_callback,
+        )
+        reviewer = Task(
+            config=self.tasks_config["logic_compliance_review_task"],  # type: ignore[index]
+            agent=self.logic_compliance_reviewer(),
+            context=[writer],
+            output_file=self._task_output_file(self._artifact_path("09_logic_compliance_review.md")),
+            callback=record_task_completion_callback,
+        )
+        return self._make_crew(tasks=[writer, reviewer])
+
+    @crew
+    def crew(self) -> Crew:
+        """创建顺序执行的投研工作流。"""
+        return self._make_crew(
+            tasks=[
+                self.market_validation_task(),
+                self.market_intelligence_task(),
+                self.filing_review_task(),
+                self.financial_analysis_task(),
+                self.data_quality_review_task(),
+                self.investment_report_task(),
+                self.logic_compliance_review_task(),
+            ]
         )

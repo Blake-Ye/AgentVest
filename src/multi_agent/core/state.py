@@ -7,7 +7,12 @@ from pydantic import BaseModel, Field
 from multi_agent.core.evidence import ResearchEvidenceBundle
 from multi_agent.core.market import MarketValidationResult
 from multi_agent.core.report_document import ReportDocument, ReportGenerationContext
-from multi_agent.core.review_contracts import FinalDecisionRecord, GateDecision, ReviewContract
+from multi_agent.core.review_contracts import (
+    FinalDecisionRecord,
+    GateDecision,
+    RepairAction,
+    ReviewContract,
+)
 
 ModelTier: TypeAlias = Literal["fast", "deep", "review"]
 FinalDecision: TypeAlias = Literal["passed", "blocked", "evidence_limited"]
@@ -50,3 +55,4 @@ class ResearchRunState(BaseModel):
     report_context: ReportGenerationContext | None = None
     report_document: ReportDocument | None = None
     final_decision_record: FinalDecisionRecord | None = None
+    last_repair_actions: list[RepairAction] = Field(default_factory=list)

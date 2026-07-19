@@ -25,6 +25,12 @@ def test_investment_report_prompt_restricts_writing_to_report_mode() -> None:
     assert "evidence_limited_report" in content
     assert "blocked_notice" in content
     assert "claim-to-source binding" in content
+    assert "REPORT_CONTEXT_JSON" in content
+    assert "10_research_evidence.json" in content
+    assert "08_data_quality_review.json" in content
+    assert "09_logic_compliance_review.json" in content
+    assert "executive_summary、business_overview、recent_events" in content
+    assert "不得输出 final_decision" in content
 
 
 def test_financial_analysis_prompt_forbids_unsupported_external_benchmarks() -> None:

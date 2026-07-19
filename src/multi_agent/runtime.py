@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 
 
@@ -38,6 +39,28 @@ def build_flow(inputs: dict[str, str]):
         requires_human_confirmation=market_label == "UNRESOLVED" or resolution_status != "confirmed",
         tool_policy=build_tool_policy(market_label),  # type: ignore[arg-type]
     )
+    raw_rerun_budget = inputs.get("rerun_budget_json") or os.getenv("RERUN_BUDGET_JSON", "")
+    try:
+        parsed_rerun_budget = json.loads(raw_rerun_budget) if raw_rerun_budget else {}
+    except json.JSONDecodeError:
+        parsed_rerun_budget = {}
+    rerun_budget: dict[str, int] = {}
+    if isinstance(parsed_rerun_budget, dict):
+        for target, value in parsed_rerun_budget.items():
+            try:
+                rerun_budget[str(target)] = max(int(value), 0)
+            except (TypeError, ValueError):
+                continue
+    if not rerun_budget:
+        rerun_budget = {
+            "market_validation_analyst": 1,
+            "event_guidance_analyst": 1,
+            "fundamental_analyst": 1,
+            "quant_valuation_analyst": 1,
+            "data_quality_reviewer": 1,
+            "report_writing_analyst": 1,
+            "logic_compliance_reviewer": 1,
+        }
 
     return MarketReviewFlow(
         initial_state=MarketReviewFlowState(
@@ -50,6 +73,7 @@ def build_flow(inputs: dict[str, str]):
             local_filing_pdf_path=inputs.get("local_filing_pdf_path", "未提供本地 PDF 文件"),
             local_filing_pdf_available=inputs.get("local_filing_pdf_available", "no"),
             market_validation=market_validation,
+            rerun_budget=rerun_budget,
         )
     )
 

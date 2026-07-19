@@ -212,3 +212,27 @@ def test_reviewer_prompts_reference_gate_and_tool_outputs() -> None:
     assert "仅当 analysis gate 已通过时" in tasks_yaml
     assert "若 gate 未通过，不得生成正式投资建议" in tasks_yaml
     assert "必须输出阻断说明而非正式报告" in tasks_yaml
+
+
+def test_flow_crews_preserve_seven_agent_topology_and_allow_targeted_override(
+    monkeypatch: pytest.MonkeyPatch, writable_crewai_storage: Path
+) -> None:
+    monkeypatch.setenv("FAST_MODEL", "fast-model")
+    monkeypatch.setenv("DEEP_MODEL", "deep-model")
+    monkeypatch.setenv("REVIEW_MODEL", "review-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+
+    workflow = MultiAgent()
+    workflow.configure_run(
+        model_tier_overrides={"quant_valuation_analyst": "deep"},
+        rerun_targets=["quant_valuation_analyst"],
+    )
+
+    assert len(workflow.analysis_crew().tasks) == 5
+    assert len(workflow.report_crew().tasks) == 2
+    assert len(workflow.crew().tasks) == 7
+    assert len(workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks) == 1
+    assert workflow.quant_valuation_analyst().llm.model == "deep-model"

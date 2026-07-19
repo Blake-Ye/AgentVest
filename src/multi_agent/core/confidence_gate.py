@@ -48,7 +48,7 @@ class ConfidenceGatePolicy:
             *diagnostics.repair_actions,
             *self._tool_health_actions(bundle, contract),
         ]
-        if contract.decision.gate_outcome == "rerun":
+        if contract.decision.gate_outcome == "rerun" and not contract.repair_actions:
             rerun_reasons = contract.rerun_reasons or ["Reviewer requested evidence repair."]
             repair_actions.extend(
                 RepairAction(

@@ -8,13 +8,127 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from multi_agent.core.confidence_gate import ConfidenceGatePolicy
-from multi_agent.core.evidence import ResearchEvidenceBundle
+from multi_agent.core.evidence import (
+    FinancialFact,
+    MarketSnapshotEvidence,
+    ResearchEvidenceBundle,
+    ToolHealthRecord,
+)
 from multi_agent.core.market import MarketValidationResult, build_tool_policy
 from multi_agent.core.model_routing import ModelRouter
 from multi_agent.core.review_contracts import GateDecision, ReviewContract
 from multi_agent.core.state import EvidenceItem, ResearchRunState
 from multi_agent.flows.market_review_flow import MarketReviewFlow, MarketReviewFlowState
 from multi_agent.settings import InvestmentResearchSettings
+
+
+def _typed_bundle() -> ResearchEvidenceBundle:
+    """A self-contained formal-eligible bundle for Flow control-plane tests."""
+    from datetime import date, datetime, timezone
+
+    common = {
+        "period_end": date(2025, 9, 27),
+        "fiscal_year": 2025,
+        "fiscal_period": "FY",
+        "form": "10-K",
+        "accession": "0000320193-25-000079",
+        "filed_at": date(2025, 10, 31),
+        "source_url": "https://www.sec.gov/Archives/edgar/data/320193/example.htm",
+        "source_tag": "sec_companyfacts",
+    }
+    return ResearchEvidenceBundle(
+        company_name="Apple Inc.",
+        ticker="AAPL",
+        financial_facts=[
+            FinancialFact(field_name=name, value=float(index + 1), unit="USD", **common)
+            for index, name in enumerate(
+                (
+                    "revenue",
+                    "cash_and_equivalents",
+                    "total_debt",
+                    "diluted_shares",
+                    "segment_revenue_services",
+                )
+            )
+        ],
+        market_snapshots=[
+            MarketSnapshotEvidence(
+                price=200.0,
+                currency="USD",
+                observed_at=datetime(2025, 10, 31, tzinfo=timezone.utc),
+                source_url="https://example.com/quote",
+                source_tag="quote",
+                diluted_shares_period_end=date(2025, 9, 27),
+            )
+        ],
+        tool_health=[ToolHealthRecord(tool_name="sec_company_facts", status="healthy")],
+    )
+
+
+def _typed_contract(*, outcome: str = "pass", actions: list[dict[str, object]] | None = None) -> ReviewContract:
+    return ReviewContract.model_validate(
+        {
+            "stage": "analysis_review",
+            "reviewer_name": "data_quality_reviewer",
+            "decision": {"gate_outcome": outcome, "decision_confidence": "high"},
+            "delivery_eligibility": {
+                "formal_report_allowed": outcome == "pass",
+                "evidence_limited_report_allowed": False,
+                "blocked_notice_required": outcome == "block",
+                "recommended_delivery_state": "formal_report" if outcome == "pass" else "blocked_notice",
+            },
+            "failure_taxonomy": {"primary_class": "none", "secondary_causes": []},
+            "coverage_summary": {
+                "evidence_coverage_ratio": 1.0,
+                "financial_coverage_score": 1.0,
+                "claim_binding_ratio": 1.0,
+            },
+            "tool_health_summary": {"overall_status": "healthy"},
+            "repair_actions": actions or [],
+        }
+    )
+
+
+def _typed_writer_payload() -> dict[str, object]:
+    from multi_agent.core.report_document import REQUIRED_SECTION_KEYS, SECTION_HEADINGS
+
+    source = {
+        "source_id": "sec-revenue",
+        "title": "Apple 2025 Form 10-K",
+        "url": "https://www.sec.gov/Archives/edgar/data/320193/example.htm",
+        "source_tag": "sec_companyfacts",
+        "field_name": "revenue",
+    }
+    claim = {
+        "claim_id": "claim:revenue",
+        "text": "收入事实来自 2025 年 10-K。",
+        "critical": True,
+        "source_ids": ["sec-revenue"],
+    }
+    return {
+        "title": "Apple Inc. (AAPL) 投资备忘录",
+        "stance": "hold",
+        "executive_summary": "基于已验证的财务证据维持持有观点。",
+        "catalysts": ["经验证的收入增长。"],
+        "risks": ["市场价格可能波动。"],
+        "sections": {
+            key: {
+                "heading": SECTION_HEADINGS[key],
+                "content": f"{SECTION_HEADINGS[key]}的已验证内容。",
+                "claim_ids": ["claim:revenue"] if key != "source_index" else [],
+            }
+            for key in REQUIRED_SECTION_KEYS
+        },
+        "claims": [claim],
+        "sources": [source],
+    }
+
+
+def _typed_report_contract(*, outcome: str = "pass") -> ReviewContract:
+    payload = _typed_contract(outcome=outcome).model_dump(mode="json")
+    payload["stage"] = "report_review"
+    payload["reviewer_name"] = "logic_compliance_reviewer"
+    return ReviewContract.model_validate(payload)
 
 
 class _StubTaskOutput:
@@ -1295,7 +1409,7 @@ def test_evidence_backed_flow_rejects_legacy_summary_without_strict_contract() -
     )
 
     assert decision.final_decision == "rerun"
-    assert decision.blocking_reasons == ["review_contract_missing"]
+    assert decision.blocking_reasons == ["analysis_review_contract_missing"]
 
 
 def test_default_analysis_gate_accepts_current_reviewer_contract_shape_and_locks_limited_delivery(
@@ -1940,3 +2054,171 @@ def test_flow_does_not_fallback_to_evidence_limited_when_logic_review_contains_b
     assert result["status"] == "blocked"
     assert flow.state.final_decision == "blocked"
     assert result["blocking_reasons"] == ["analysis_review_summary_missing"]
+
+
+def test_typed_flow_passes_only_from_bundle_contract_and_document() -> None:
+    bundle = _typed_bundle()
+    analysis_contract = _typed_contract()
+    report_contract = _typed_report_contract()
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": analysis_contract.model_dump(mode="json"),
+        },
+        report_writer=lambda context: _typed_writer_payload(),
+        report_reviewer=lambda _document: report_contract.model_dump(mode="json"),
+        initial_state=MarketReviewFlowState(
+            request_id="typed-pass",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "passed"
+    assert result["final_decision_record"]["final_delivery_state"] == "formal_report"
+    assert result["report_document"]["report_mode"] == "formal_report"
+    assert result["analysis_review_contract"]["stage"] == "analysis_review"
+    assert result["report_review_contract"]["stage"] == "report_review"
+
+
+def test_typed_flow_rejects_prose_pass_without_strict_contract() -> None:
+    bundle = _typed_bundle()
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"review_text": "审查通过"},
+        initial_state=MarketReviewFlowState(
+            request_id="typed-no-contract",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "blocked"
+    assert "analysis_review_contract_missing" in result["blocking_reasons"]
+
+
+def test_typed_flow_reruns_only_repair_target_with_override_and_budget() -> None:
+    bundle = _typed_bundle()
+    rerun_contract = _typed_contract(
+        outcome="rerun",
+        actions=[
+            {
+                "target": "quant_valuation_analyst",
+                "code": "quote_missing",
+                "instruction": "补齐报价与估值计算。",
+            }
+        ],
+    )
+    attempts: list[dict[str, object]] = []
+
+    def executor(inputs: dict[str, object]) -> dict[str, object]:
+        attempts.append(dict(inputs))
+        contract = _typed_contract() if len(attempts) == 2 else rerun_contract
+        return {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": contract.model_dump(mode="json"),
+        }
+
+    flow = MarketReviewFlow(
+        analysis_executor=executor,
+        report_writer=lambda _context: _typed_writer_payload(),
+        report_reviewer=lambda _document: _typed_report_contract().model_dump(mode="json"),
+        initial_state=MarketReviewFlowState(
+            request_id="typed-targeted-rerun",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            rerun_budget={"quant_valuation_analyst": 1},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "passed"
+    assert attempts[1]["rerun_targets"] == ["quant_valuation_analyst"]
+    assert attempts[1]["model_tier_overrides"] == {"quant_valuation_analyst": "deep"}
+    assert flow.state.rerun_budget["quant_valuation_analyst"] == 0
+    assert result["repair_actions"][0]["target"] == "quant_valuation_analyst"
+
+
+def test_typed_flow_blocks_after_target_budget_is_exhausted() -> None:
+    bundle = _typed_bundle()
+    contract = _typed_contract(
+        outcome="rerun",
+        actions=[
+            {
+                "target": "quant_valuation_analyst",
+                "code": "quote_missing",
+                "instruction": "补齐报价。",
+            }
+        ],
+    )
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": contract.model_dump(mode="json"),
+        },
+        initial_state=MarketReviewFlowState(
+            request_id="typed-budget-exhausted",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            rerun_budget={"quant_valuation_analyst": 0},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "blocked"
+    assert "rerun_budget_exhausted:quant_valuation_analyst" in result["blocking_reasons"]
+
+
+@pytest.mark.parametrize("payload", [{}, {"title": "bad"}])
+def test_typed_flow_blocks_malformed_writer_payload(payload: dict[str, object]) -> None:
+    bundle = _typed_bundle()
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": _typed_contract().model_dump(mode="json"),
+        },
+        report_writer=lambda _context: payload,
+        initial_state=MarketReviewFlowState(
+            request_id="typed-malformed-writer",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "blocked"
+    assert "writer_payload_invalid" in result["blocking_reasons"]
+
+
+def test_typed_flow_blocks_malformed_or_rejecting_logic_review() -> None:
+    bundle = _typed_bundle()
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": _typed_contract().model_dump(mode="json"),
+        },
+        report_writer=lambda _context: _typed_writer_payload(),
+        report_reviewer=lambda _document: _typed_report_contract(outcome="block").model_dump(mode="json"),
+        initial_state=MarketReviewFlowState(
+            request_id="typed-logic-block",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "blocked"
+    assert "logic_reviewer_requested_block" in result["blocking_reasons"]

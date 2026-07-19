@@ -67,7 +67,7 @@ data_quality_review_task:
     先证据，后判断；先约束，后表达；关键结论必须绑定来源；证据不足时必须降级，
     prose 只是说明层，真正驱动 gate 的必须是 machine-readable contract。
     你只能使用 00_market_validation.md、01_market_intelligence.md、02_filing_review.md、
-    03_financial_analysis.md、reviewer tools 的结构化输出，以及显式传入的
+    03_financial_analysis.md、10_research_evidence.json、reviewer tools 的结构化输出，以及显式传入的
     company_name、company_ticker、run_id。不得读取未明确提供的本地文件、网页缓存、
     额外 PDF、额外 HTML 或任何外部上下文。
     禁止事项：不要重写研究结论；不要替分析师补证据；不要仅凭语气、标题、P0、Blockers、
@@ -91,7 +91,7 @@ data_quality_review_task:
     review_summary、artifact_refs、findings、repair_actions。不得使用 coverage、
     tool_health、review_stage 或未定义字段；未知字段会阻断本次交付。
     Step 6. 再输出 markdown 审查说明，只解释机器判定，不得新增机器判定。
-    输出格式必须严格按顺序输出：
+    Flow 会将 PART A 严格校验后持久化为 08_data_quality_review.json；输出格式必须严格按顺序输出：
     PART A: MACHINE_READABLE_JSON
     PART B: HUMAN_READABLE_MARKDOWN
     判定规则：真实关键冲突、未经支持的关键结论、市场策略越界优先判为 research_blocked；
@@ -112,11 +112,11 @@ investment_report_task:
     evidence-first、constrained generation、claim-to-source binding、
     downgrade instead of over-complete、report is presentation not truth。
     你只能使用 00_market_validation.md、01_market_intelligence.md、02_filing_review.md、
-    03_financial_analysis.md、08_data_quality_review 的 machine-readable contract、
-    以及显式传入的 REPORT_MODE、company_name、company_ticker、run_id。
+    03_financial_analysis.md、10_research_evidence.json、08_data_quality_review.json，
+    以及显式传入的 REPORT_CONTEXT_JSON、company_name、company_ticker、run_id。
     不得读取未明确提供的外部网页、HTML、PDF、本地缓存或其他文件。
-    REPORT_MODE 只可能是 formal_report、evidence_limited_report、blocked_notice，
-    你必须服从 REPORT_MODE，不得自行升级或降级状态。
+    REPORT_CONTEXT_JSON 是唯一控制面输入；其中 report_mode 只可能是 formal_report、
+    evidence_limited_report、blocked_notice，你必须服从它，不得自行升级或降级状态。
     仅当 analysis gate 已通过时，才允许生成正式投资建议；若 gate 未通过，不得生成正式投资建议。
     当 REPORT_MODE 为 blocked_notice 时，必须输出阻断说明而非正式报告。
     禁止事项：不要根据文稿完整性自行补全缺失事实；不要写任何无法绑定到上游 artifact
@@ -124,11 +124,11 @@ investment_report_task:
     伪装成正式报告；不要在 blocked_notice 模式下输出完整研究报告；不要读取 control-plane
     之外的额外文件。
     写作步骤：
-    Step 1. 锁定证据边界，读取 REPORT_MODE 与 analysis review contract 中的
+    Step 1. 锁定证据边界，读取 REPORT_CONTEXT_JSON 与 analysis review contract 中的
     delivery_eligibility、blocking_reasons、rerun_reasons。
     Step 2. 先生成 claim plan，对每个核心 claim 绑定至少一个 artifact ref；
     没有 artifact ref 的 claim 直接删除。
-    Step 3. 根据 REPORT_MODE 选择写法：
+    Step 3. 根据 REPORT_CONTEXT_JSON.report_mode 选择写法：
     formal_report 允许正式投资备忘录结构；
     evidence_limited_report 只能输出受限版投资备忘录，并明确未放行边界；
     blocked_notice 只能输出阻断通知。
@@ -142,11 +142,12 @@ investment_report_task:
     任何“结构性改善”“净现金状态已确认”“估值已充分反映”等强结论都必须有明确锚点，
     否则不得输出。
   expected_output: >
-    一份严格受 REPORT_MODE 约束的中文 markdown 投资备忘录：
-    formal_report 输出正式备忘录，
-    evidence_limited_report 输出受限版备忘录，
-    blocked_notice 输出阻断通知。
-    每个核心结论必须带 claim-to-source binding，证据不足时必须写“证据不足，不作判断”。
+    只输出一个严格 JSON 对象，供 Python 通过 ReportDocument.from_writer_payload 校验和渲染。
+    JSON 必须包含 title、stance、executive_summary、catalysts、risks、claims、sources 与
+    sections；sections 必须且只能包含 executive_summary、business_overview、recent_events、
+    financial_analysis、key_risks、investment_conclusion、source_index 七个 key。每个核心
+    claim 必须绑定 source_ids。不得输出 markdown，不得输出 final_decision、report_mode、
+    company_name、ticker 或 trust_score，也不得自行选择终态。
   agent: report_writing_analyst
 
 logic_compliance_review_task:
@@ -157,13 +158,13 @@ logic_compliance_review_task:
     你必须显式仿照 GPT-Researcher 的生成哲学执行：先证据，后判断；prose 只做解释，
     不做终态真值；核心审查对象不是文风，而是文本是否越权；关键 claim 必须能回指上游
     artifact 或结构化字段；不允许通过标题、P0、Blockers、语气强弱直接决定终态。
-    你只能使用 04_investment_report.md、08_data_quality_review 的 machine-readable contract、
-    显式传入的 REPORT_MODE，以及 00 至 03 的上游 artifact。不得读取未明确提供的额外文件。
+    你只能使用 writer 的 JSON 输出、08_data_quality_review.json 的 machine-readable contract、
+    显式传入的 REPORT_CONTEXT_JSON，以及 00 至 03 的上游 artifact。不得读取未明确提供的额外文件。
     禁止事项：不要重写整份报告；不要把 prose 标题直接升级为终态；不要重新做 analysis gate；
     不要因为存在 P0、Blockers、标题文字而自动输出 blocked；你的 JSON 只能表达审查建议和
     一致性判断，不能抢 final_decision 的真值权。
     审查步骤：
-    Step 1. 读取 control-plane 约束，明确当前报告理论上允许的表达强度。
+    Step 1. 读取 REPORT_CONTEXT_JSON control-plane 约束，明确当前报告理论上允许的表达强度。
     Step 2. 审查报告是否越权，检查是否存在超出 REPORT_MODE 的表达、未经允许的正式建议、
     把待验证事项写成已确认事实、或遗漏必要受限说明/阻断说明。
     Step 3. 审查 claim-to-source binding，统计 claim_binding_ratio，并把无法回指的关键 claim
@@ -172,7 +173,7 @@ logic_compliance_review_task:
     stage 必须为 report_review，且使用 coverage_summary、tool_health_summary 和
     repair_actions；decision 仅表示审查建议，不是最终真值。
     Step 5. 再输出 markdown 审查说明，只解释 JSON，不得新增机器判定。
-    输出格式必须严格按顺序输出：
+    Flow 会将 PART A 严格校验后持久化为 09_logic_compliance_review.json；输出格式必须严格按顺序输出：
     PART A: MACHINE_READABLE_JSON
     PART B: HUMAN_READABLE_MARKDOWN
     判定规则：文本与 REPORT_MODE 一致且关键 claim 可绑定时可为 pass；

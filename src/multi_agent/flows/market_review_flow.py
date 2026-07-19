@@ -13,7 +13,10 @@ from multi_agent.core.confidence_gate import ConfidenceGatePolicy
 from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
 from multi_agent.core.evidence import ResearchEvidenceBundle
 from multi_agent.core.market import MarketValidationResult
+from multi_agent.core.delivery import DeliveryValidator
+from multi_agent.core.report_document import ReportDocument, ReportGenerationContext
 from multi_agent.core.review_contracts import (
+    FinalDecisionRecord,
     GateDecision,
     RepairAction,
     ReviewContract,
@@ -51,6 +54,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         "fundamental_analyst": "deep",
         "quant_valuation_analyst": "deep",
     }
+    _ANALYSIS_CONTRACT_FILE = "08_data_quality_review.json"
+    _REPORT_CONTRACT_FILE = "09_logic_compliance_review.json"
 
     def __init__(
         self,
@@ -71,6 +76,10 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         self._analysis_gate = analysis_gate or self._default_analysis_gate
         self._report_writer = report_writer or self._load_materialized_report
         self._report_reviewer = report_reviewer or self._default_report_gate
+        self._report_writer_injected = report_writer is not None
+        self._report_reviewer_injected = report_reviewer is not None
+        self._typed_report_execution: Any = None
+        self._active_rerun_targets: list[str] = []
         if initial_state is not None:
             snapshot = initial_state.model_copy(deep=True)
             for key in type(snapshot).model_fields:
@@ -82,7 +91,94 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
 
     def _execute_existing_crew(self, inputs: dict[str, Any]) -> Any:
         crew_factory = self._crew_factory or MultiAgent()
+        configure = getattr(crew_factory, "configure_run", None)
+        if callable(configure):
+            configure(
+                model_tier_overrides=inputs.get("model_tier_overrides", {}),
+                rerun_targets=inputs.get("rerun_targets", []),
+            )
+        targeted_crew = getattr(crew_factory, "targeted_analysis_crew", None)
+        targets = inputs.get("rerun_targets", [])
+        if targets and callable(targeted_crew):
+            return targeted_crew(targets).kickoff(inputs=inputs)
+        analysis_crew = getattr(crew_factory, "analysis_crew", None)
+        if callable(analysis_crew):
+            return analysis_crew().kickoff(inputs=inputs)
         return crew_factory.crew().kickoff(inputs=inputs)
+
+    def _typed_run(self) -> bool:
+        return self._has_evidence_context()
+
+    def _artifact_json_path(self, filename: str) -> Path | None:
+        artifacts_dir = self.state.artifacts_dir.strip()
+        return Path(artifacts_dir) / filename if artifacts_dir else None
+
+    def _persist_json_artifact(self, filename: str, payload: dict[str, object]) -> None:
+        path = self._artifact_json_path(filename)
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _strict_contract_payload(value: Any) -> dict[str, object] | None:
+        if isinstance(value, ReviewContract):
+            return value.model_dump(mode="json")
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return None
+            return parsed if isinstance(parsed, dict) else None
+        return None
+
+    def _load_strict_contract(
+        self, *, value: Any, filename: str, expected_stage: str
+    ) -> tuple[ReviewContract | None, str | None]:
+        payload = self._strict_contract_payload(value)
+        if payload is None:
+            path = self._artifact_json_path(filename)
+            if path is not None and path.exists():
+                try:
+                    candidate = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    return None, "invalid"
+                payload = candidate if isinstance(candidate, dict) else None
+        if payload is None:
+            return None, "missing"
+        try:
+            contract = ReviewContract.model_validate(payload)
+        except Exception:
+            return None, "invalid"
+        if contract.stage != expected_stage:
+            return None, "invalid"
+        self._persist_json_artifact(filename, contract.model_dump(mode="json"))
+        return contract, None
+
+    def _ingest_typed_analysis_result(self, result: Any) -> None:
+        if not isinstance(result, dict):
+            return
+        raw_bundle = result.get("evidence_bundle")
+        if raw_bundle is not None:
+            try:
+                bundle = ResearchEvidenceBundle.model_validate(raw_bundle)
+            except Exception:
+                return
+            self.state.evidence_bundle = bundle
+            self._persist_json_artifact("10_research_evidence.json", bundle.model_dump(mode="json"))
+        raw_contract = result.get("analysis_review_contract")
+        contract, error = self._load_strict_contract(
+            value=raw_contract,
+            filename=self._ANALYSIS_CONTRACT_FILE,
+            expected_stage="analysis_review",
+        )
+        if contract is not None:
+            self.state.analysis_review_contract = contract
+        elif error == "invalid":
+            # Keep no prior contract: a malformed fresh output must fail closed.
+            self.state.analysis_review_contract = None
 
     @staticmethod
     def _allow_stage_to_continue(_: Any) -> GateDecision:
@@ -110,6 +206,34 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         if report_content:
             return report_content
         return self._pass_through_report(analysis_result)
+
+    @classmethod
+    def _task_output_raw(
+        cls, result: Any, task_name: str, *, fallback_index: int | None = None
+    ) -> str:
+        task_outputs = cls._review_task_outputs(result)
+        for task_output in task_outputs:
+            if str(getattr(task_output, "name", "")).strip() == task_name:
+                return str(getattr(task_output, "raw", "")).strip()
+        if fallback_index is not None and task_outputs:
+            try:
+                return str(getattr(task_outputs[fallback_index], "raw", "")).strip()
+            except IndexError:
+                return ""
+        return ""
+
+    def _execute_existing_report_writer(self, writer_input: dict[str, Any]) -> Any:
+        crew_factory = self._crew_factory or MultiAgent()
+        configure = getattr(crew_factory, "configure_run", None)
+        if callable(configure):
+            configure(model_tier_overrides=dict(self.state.model_tier_overrides))
+        report_crew = getattr(crew_factory, "report_crew", None)
+        if not callable(report_crew):
+            raise ValueError("writer_payload_invalid")
+        result = report_crew().kickoff(inputs=writer_input)
+        self._typed_report_execution = result
+        raw = self._task_output_raw(result, "investment_report_task", fallback_index=0)
+        return raw
 
     def _materialized_analysis_review_content(self) -> str:
         artifacts_dir = self.state.artifacts_dir.strip()
@@ -404,6 +528,21 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             repair_actions=[action],
         )
 
+    @staticmethod
+    def _typed_missing_review_contract_decision() -> GateDecision:
+        action = RepairAction(
+            target="data_quality_reviewer",
+            code="analysis_review_contract_missing",
+            instruction="生成严格 08_data_quality_review.json 后重新审查。",
+        )
+        return GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=0,
+            blocking_reasons=["analysis_review_contract_missing"],
+            repair_actions=[action],
+        )
+
     def _has_evidence_context(self) -> bool:
         if self.state.evidence_bundle is not None:
             return True
@@ -622,6 +761,38 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         return False
 
     def _default_analysis_gate(self, analysis_result: Any) -> GateDecision:
+        if self._typed_run():
+            raw_contract = (
+                analysis_result.get("analysis_review_contract")
+                if isinstance(analysis_result, dict)
+                else None
+            )
+            contract = self.state.analysis_review_contract
+            if contract is None:
+                contract, error = self._load_strict_contract(
+                    value=raw_contract,
+                    filename=self._ANALYSIS_CONTRACT_FILE,
+                    expected_stage="analysis_review",
+                )
+                if contract is None and error == "missing":
+                    # Crew returns the strict JSON block as task text; persist it as the
+                    # canonical JSON sibling before the typed gate evaluates it.
+                    review_text = self._review_text_from_tasks_output(analysis_result)
+                    contract, error = self._machine_readable_review_contract_from_text(review_text)
+                    if contract is not None:
+                        if contract.stage != "analysis_review":
+                            contract, error = None, "invalid"
+                        else:
+                            self._persist_json_artifact(
+                                self._ANALYSIS_CONTRACT_FILE,
+                                contract.model_dump(mode="json"),
+                            )
+                if error == "invalid":
+                    return self._invalid_review_contract_decision()
+                if contract is None:
+                    return self._typed_missing_review_contract_decision()
+                self.state.analysis_review_contract = contract
+            return self._gate_decision_from_review_contract(contract)
         review_text = self._review_text_from_tasks_output(analysis_result)
         materialized_review_text = self._materialized_analysis_review_content()
         for candidate_review_text in (review_text, materialized_review_text):
@@ -717,6 +888,152 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 trust_score=60,
             )
         return self._allow_stage_to_continue(report)
+
+    def _report_mode_for_gate(self, gate: GateDecision) -> str:
+        return {
+            "passed": "formal_report",
+            "evidence_limited": "evidence_limited_report",
+            "blocked": "blocked_notice",
+        }.get(gate.final_decision, "blocked_notice")
+
+    def _build_report_context(self) -> ReportGenerationContext:
+        gate = self.state.analysis_gate_decision or self.state.gate_decision
+        bundle = self._evidence_bundle_for_gate()
+        contract = self.state.analysis_review_contract
+        if gate is None or bundle is None or contract is None:
+            raise ValueError("typed report context requires analysis gate, bundle, and contract")
+        allowed_claim_ids = sorted(
+            {
+                *(f"claim:{fact.field_name}" for fact in bundle.formal_facts()),
+                *(f"event:{event.event_id}" for event in bundle.events),
+            }
+        )
+        return ReportGenerationContext(
+            company_name=self.state.company_name,
+            ticker=self.state.input_ticker,
+            report_mode=self._report_mode_for_gate(gate),  # type: ignore[arg-type]
+            evidence_bundle=bundle,
+            analysis_review_contract=contract,
+            allowed_claim_ids=allowed_claim_ids,
+        )
+
+    def _typed_writer_document(self) -> ReportDocument:
+        context = self._build_report_context()
+        self.state.report_context = context
+        writer_input = {
+            "REPORT_CONTEXT_JSON": context.model_dump_json(),
+            "report_context": context.model_dump(mode="json"),
+            "analysis_result": self.state.analysis_result,
+        }
+        raw_payload = (
+            self._report_writer(writer_input)
+            if self._report_writer_injected
+            else self._execute_existing_report_writer(writer_input)
+        )
+        payload = self._strict_contract_payload(raw_payload)
+        if payload is None:
+            raise ValueError("writer_payload_invalid")
+        gate = self.state.analysis_gate_decision or self.state.gate_decision
+        if gate is None:
+            raise ValueError("writer_payload_invalid")
+        try:
+            return ReportDocument.from_writer_payload(
+                context=context,
+                writer_payload=payload,
+                trust_score=gate.trust_score,
+            )
+        except Exception as error:
+            raise ValueError("writer_payload_invalid") from error
+
+    def _typed_report_gate(self, report: Any) -> GateDecision:
+        if not isinstance(report, ReportDocument):
+            return GateDecision(
+                passed=False,
+                final_decision="blocked",
+                trust_score=0,
+                blocking_reasons=["writer_payload_invalid"],
+            )
+        raw_contract = (
+            self._report_reviewer(report)
+            if self._report_reviewer_injected
+            else self._task_output_raw(
+                self._typed_report_execution,
+                "logic_compliance_review_task",
+                fallback_index=-1,
+            )
+        )
+        if isinstance(raw_contract, str):
+            contract_from_text, text_error = self._machine_readable_review_contract_from_text(
+                raw_contract
+            )
+            if contract_from_text is not None:
+                raw_contract = contract_from_text
+            elif text_error is not None:
+                raw_contract = {"_invalid": True}
+        contract, error = self._load_strict_contract(
+            value=raw_contract,
+            filename=self._REPORT_CONTRACT_FILE,
+            expected_stage="report_review",
+        )
+        if error == "missing":
+            return GateDecision(
+                passed=False,
+                final_decision="blocked",
+                trust_score=0,
+                blocking_reasons=["report_review_contract_missing"],
+            )
+        if error == "invalid" or contract is None:
+            return GateDecision(
+                passed=False,
+                final_decision="blocked",
+                trust_score=0,
+                blocking_reasons=["report_review_contract_invalid"],
+            )
+        self.state.report_review_contract = contract
+        if contract.decision.gate_outcome == "block":
+            self.state.report_document = None
+            return GateDecision(
+                passed=False,
+                final_decision="blocked",
+                trust_score=0,
+                blocking_reasons=["logic_reviewer_requested_block", *contract.blocking_reasons],
+            )
+        if contract.decision.gate_outcome == "rerun":
+            return GateDecision(
+                passed=False,
+                final_decision="rerun",
+                trust_score=(self.state.analysis_gate_decision or self.state.gate_decision).trust_score,  # type: ignore[union-attr]
+                blocking_reasons=["logic_reviewer_requested_rerun", *contract.rerun_reasons],
+                repair_actions=contract.repair_actions or [
+                    RepairAction(
+                        target="report_writing_analyst",
+                        code="logic_reviewer_requested_rerun",
+                        instruction="根据严格逻辑审查契约修订 writer JSON。",
+                    )
+                ],
+            )
+        analysis_gate = self.state.analysis_gate_decision or self.state.gate_decision
+        if analysis_gate is None:
+            return GateDecision(
+                passed=False,
+                final_decision="blocked",
+                trust_score=0,
+                blocking_reasons=["analysis_gate_missing"],
+            )
+        expected_mode = self._report_mode_for_gate(analysis_gate)
+        if report.report_mode != expected_mode:
+            return GateDecision(
+                passed=False,
+                final_decision="blocked",
+                trust_score=0,
+                blocking_reasons=["report_mode_mismatch"],
+            )
+        return GateDecision(
+            passed=analysis_gate.final_decision == "passed",
+            final_decision=analysis_gate.final_decision,
+            trust_score=analysis_gate.trust_score,
+            blocking_reasons=list(analysis_gate.blocking_reasons),
+        )
 
     def _market_validation(self) -> MarketValidationResult | None:
         market_validation = self.state.market_validation
@@ -818,6 +1135,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             "local_filing_pdf_path": self.state.local_filing_pdf_path,
             "local_filing_pdf_available": self.state.local_filing_pdf_available,
             "model_tier_overrides": dict(self.state.model_tier_overrides),
+            "rerun_targets": list(self._active_rerun_targets),
         }
 
     def _review_analysis(self, analysis_result: Any) -> Any:
@@ -830,12 +1148,58 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         self._ensure_gate_consistency(gate, "apply_analysis_gate")
         self.state.analysis_gate_decision = gate
         self.state.gate_decision = gate
+        if gate.repair_actions:
+            self.state.last_repair_actions = list(gate.repair_actions)
         return gate
+
+    @staticmethod
+    def _model_tier_for_target(target: str) -> str:
+        if target in {"data_quality_reviewer", "logic_compliance_reviewer"}:
+            return "review"
+        if target == "market_validation_analyst":
+            return "fast"
+        return "deep"
+
+    def _typed_rerun_targets_for_gate(self, gate: GateDecision) -> tuple[list[str], list[str]]:
+        targets = sorted({action.target for action in gate.repair_actions})
+        exhausted: list[str] = []
+        runnable: list[str] = []
+        for target in targets:
+            if self.state.rerun_budget.get(target, 0) > 0:
+                runnable.append(target)
+            else:
+                exhausted.append(target)
+        return runnable, exhausted
 
     def _route_after_analysis_gate(self, gate: GateDecision) -> str:
         if gate.final_decision == "passed":
             self._record_stage("analysis_passed")
             return "analysis_passed"
+        if self._typed_run() and gate.final_decision == "evidence_limited":
+            self._record_stage("analysis_evidence_limited")
+            return "analysis_evidence_limited"
+        if self._typed_run() and gate.final_decision == "rerun":
+            targets, exhausted = self._typed_rerun_targets_for_gate(gate)
+            if targets and not exhausted:
+                self._active_rerun_targets = targets
+                self._record_stage("analysis_needs_rerun")
+                return "analysis_needs_rerun"
+            self.state.analysis_gate_decision = GateDecision(
+                passed=False,
+                final_decision="blocked",
+                trust_score=gate.trust_score,
+                blocking_reasons=[
+                    *gate.blocking_reasons,
+                    *(f"rerun_budget_exhausted:{target}" for target in exhausted),
+                ],
+                repair_actions=list(gate.repair_actions),
+            )
+            self.state.gate_decision = self.state.analysis_gate_decision
+            self._record_stage("analysis_blocked")
+            return "analysis_blocked"
+        if self._typed_run() and gate.final_decision == "blocked" and self.state.analysis_review_contract is not None:
+            self._record_stage("analysis_blocked_write")
+            return "analysis_blocked_write"
         if gate.final_decision == "rerun" and self.state.rerun_budget.get(self.ANALYSIS_RERUN_KEY, 0) > 0:
             self._record_stage("analysis_needs_rerun")
             return "analysis_needs_rerun"
@@ -850,16 +1214,79 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     def _build_final_result(self, gate: GateDecision) -> dict[str, Any]:
         gate = self._coerce_terminal_gate(gate)
         self._ensure_gate_consistency(gate, "finalize_delivery")
-        return {
+        result = {
             "status": gate.final_decision,
             "trust_score": gate.trust_score,
             "blocking_reasons": list(gate.blocking_reasons),
             "analysis_result": self.state.analysis_result,
             "report_result": self.state.report_result,
         }
+        if self._typed_run():
+            result.update(
+                {
+                    "final_decision_record": (
+                        self.state.final_decision_record.model_dump(mode="json")
+                        if self.state.final_decision_record is not None
+                        else None
+                    ),
+                    "report_document": (
+                        self.state.report_document.model_dump(mode="json")
+                        if self.state.report_document is not None
+                        else None
+                    ),
+                    "analysis_review_contract": (
+                        self.state.analysis_review_contract.model_dump(mode="json")
+                        if self.state.analysis_review_contract is not None
+                        else None
+                    ),
+                    "report_review_contract": (
+                        self.state.report_review_contract.model_dump(mode="json")
+                        if self.state.report_review_contract is not None
+                        else None
+                    ),
+                    "repair_actions": [
+                        action.model_dump(mode="json") for action in self.state.last_repair_actions
+                    ],
+                }
+            )
+        return result
 
     def _finalize(self, gate: GateDecision) -> dict[str, Any]:
         gate = self._coerce_terminal_gate(gate)
+        if self._typed_run():
+            decision = FinalDecisionRecord(
+                company_name=self.state.company_name,
+                company_ticker=self.state.input_ticker,
+                final_decision=gate.final_decision,
+                final_delivery_state=self._report_mode_for_gate(gate),  # type: ignore[arg-type]
+                trust_score=gate.trust_score,
+                blocking_reasons=list(gate.blocking_reasons),
+                analysis_review_contract=self.state.analysis_review_contract,
+                report_review_contract=self.state.report_review_contract,
+            )
+            validation = (
+                DeliveryValidator().validate(decision=decision, document=self.state.report_document)
+                if self.state.report_document is not None
+                else None
+            )
+            if validation is not None and not validation.valid:
+                gate = GateDecision(
+                    passed=False,
+                    final_decision="blocked",
+                    trust_score=0,
+                    blocking_reasons=["delivery_validation_failed", *validation.errors],
+                )
+                decision = FinalDecisionRecord(
+                    company_name=self.state.company_name,
+                    company_ticker=self.state.input_ticker,
+                    final_decision="blocked",
+                    final_delivery_state="blocked_notice",
+                    trust_score=0,
+                    blocking_reasons=list(gate.blocking_reasons),
+                    analysis_review_contract=self.state.analysis_review_contract,
+                    report_review_contract=self.state.report_review_contract,
+                )
+            self.state.final_decision_record = decision
         self._record_stage("finalize_delivery")
         self._ensure_gate_consistency(gate, "finalize_delivery")
         self.state.blocking_reasons = list(gate.blocking_reasons)
@@ -879,6 +1306,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         self._record_stage("run_analysis")
         result = self._analysis_executor(inputs)
         self.state.analysis_result = result
+        self._ingest_typed_analysis_result(result)
         return result
 
     @listen(run_analysis)
@@ -896,6 +1324,18 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     @listen("analysis_needs_rerun")
     def rerun_analysis_if_needed(self) -> Any:
         self._record_stage("rerun_analysis_if_needed")
+        if self._typed_run():
+            targets = list(self._active_rerun_targets)
+            for target in targets:
+                self.state.rerun_budget[target] = max(self.state.rerun_budget.get(target, 0) - 1, 0)
+            self.state.model_tier_overrides = {
+                target: self._model_tier_for_target(target)  # type: ignore[dict-item]
+                for target in targets
+            }
+            result = self._analysis_executor(self._analysis_inputs())
+            self.state.analysis_result = result
+            self._ingest_typed_analysis_result(result)
+            return result
         remaining_budget = self.state.rerun_budget.get(self.ANALYSIS_RERUN_KEY, 0)
         self.state.rerun_budget[self.ANALYSIS_RERUN_KEY] = max(remaining_budget - 1, 0)
         self.state.model_tier_overrides = dict(self.ANALYSIS_RERUN_MODEL_OVERRIDES)
@@ -918,6 +1358,14 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     @listen("analysis_passed")
     def write_report(self) -> Any:
         self._record_stage("write_report")
+        if self._typed_run():
+            try:
+                report = self._typed_writer_document()
+                self.state.report_document = report
+            except ValueError as error:
+                report = {"typed_error": str(error)}
+            self.state.report_result = report
+            return report
         report = self._report_writer(self.state.analysis_result)
         self.state.report_result = report
         return report
@@ -925,14 +1373,33 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     @listen("analysis_evidence_limited")
     def write_evidence_limited_report(self) -> Any:
         self._record_stage("write_report")
+        if self._typed_run():
+            try:
+                report = self._typed_writer_document()
+                self.state.report_document = report
+            except ValueError as error:
+                report = {"typed_error": str(error)}
+            self.state.report_result = report
+            return report
         report = self._report_writer(self.state.analysis_result)
+        self.state.report_result = report
+        return report
+
+    @listen("analysis_blocked_write")
+    def write_blocked_report(self) -> Any:
+        self._record_stage("write_report")
+        try:
+            report = self._typed_writer_document()
+            self.state.report_document = report
+        except ValueError as error:
+            report = {"typed_error": str(error)}
         self.state.report_result = report
         return report
 
     @listen(write_report)
     def review_report(self, report: Any) -> GateDecision:
         self._record_stage("review_report")
-        gate = self._report_reviewer(report)
+        gate = self._typed_report_gate(report) if self._typed_run() else self._report_reviewer(report)
         self._ensure_gate_consistency(gate, "review_report")
         self.state.report_gate_decision = gate
         self.state.gate_decision = gate
@@ -942,6 +1409,15 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     def review_evidence_limited_report(self, report: Any) -> GateDecision:
         self._record_stage("review_report")
         gate = self._report_reviewer(report)
+        self._ensure_gate_consistency(gate, "review_report")
+        self.state.report_gate_decision = gate
+        self.state.gate_decision = gate
+        return gate
+
+    @listen(write_blocked_report)
+    def review_blocked_report(self, report: Any) -> GateDecision:
+        self._record_stage("review_report")
+        gate = self._typed_report_gate(report)
         self._ensure_gate_consistency(gate, "review_report")
         self.state.report_gate_decision = gate
         self.state.gate_decision = gate
@@ -990,3 +1466,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 blocking_reasons=merged_reasons,
             )
         return self._finalize(locked_gate)
+
+    @listen(review_blocked_report)
+    def finalize_blocked_report_delivery(self, report_gate: GateDecision) -> Any:
+        return self._finalize(report_gate)
