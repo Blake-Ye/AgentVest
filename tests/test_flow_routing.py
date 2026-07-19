@@ -8,12 +8,19 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from multi_agent.core.confidence_gate import ConfidenceGatePolicy
+from multi_agent.core.evidence import ResearchEvidenceBundle
 from multi_agent.core.market import MarketValidationResult, build_tool_policy
 from multi_agent.core.model_routing import ModelRouter
 from multi_agent.core.review_contracts import GateDecision, ReviewContract
 from multi_agent.core.state import EvidenceItem, ResearchRunState
 from multi_agent.flows.market_review_flow import MarketReviewFlow, MarketReviewFlowState
 from multi_agent.settings import InvestmentResearchSettings
+
+
+class _StubTaskOutput:
+    def __init__(self, name: str, raw: str) -> None:
+        self.name = name
+        self.raw = raw
 
 
 def build_settings() -> InvestmentResearchSettings:
@@ -1162,8 +1169,131 @@ def test_default_analysis_gate_prefers_machine_readable_review_contract_over_blo
 
     decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
 
-    assert decision.final_decision == "evidence_limited"
-    assert decision.blocking_reasons == []
+    assert decision.final_decision == "blocked"
+    assert "invalid_review_contract" in decision.blocking_reasons
+    assert [action.code for action in decision.repair_actions] == ["invalid_review_contract"]
+
+
+def test_default_analysis_gate_uses_typed_state_evidence_for_strict_contract() -> None:
+    strict_contract = {
+        "stage": "analysis_review",
+        "reviewer_name": "data_quality_reviewer",
+        "decision": {"gate_outcome": "pass", "decision_confidence": "high"},
+        "delivery_eligibility": {
+            "formal_report_allowed": True,
+            "evidence_limited_report_allowed": True,
+            "blocked_notice_required": False,
+        },
+        "failure_taxonomy": {"primary_class": "none"},
+        "coverage_summary": {
+            "evidence_coverage_ratio": 1.0,
+            "financial_coverage_score": 1.0,
+            "claim_binding_ratio": 1.0,
+        },
+        "tool_health_summary": {"overall_status": "healthy"},
+        "review_summary": {"one_sentence_summary": "Strict contract."},
+    }
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-strict-evidence",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=ResearchEvidenceBundle(company_name="Apple Inc.", ticker="AAPL"),
+        ),
+    )
+
+    decision = flow._default_analysis_gate(
+        {
+            "tasks_output": [
+                _StubTaskOutput(
+                    "data_quality_review_task",
+                    "PART A: MACHINE_READABLE_JSON\n```json\n"
+                    + json.dumps(strict_contract)
+                    + "\n```",
+                )
+            ]
+        }
+    )
+
+    assert decision.final_decision == "rerun"
+    assert [action.code for action in decision.repair_actions] == [
+        "missing_financial_fact",
+        "missing_market_snapshot",
+    ]
+
+
+def test_default_analysis_gate_loads_evidence_bundle_artifact_for_strict_contract(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "10_research_evidence.json").write_text(
+        ResearchEvidenceBundle(company_name="Apple Inc.", ticker="AAPL").model_dump_json(),
+        encoding="utf-8",
+    )
+    strict_contract = {
+        "stage": "analysis_review",
+        "reviewer_name": "data_quality_reviewer",
+        "decision": {"gate_outcome": "pass", "decision_confidence": "high"},
+        "delivery_eligibility": {"formal_report_allowed": True},
+        "failure_taxonomy": {"primary_class": "none"},
+        "coverage_summary": {
+            "evidence_coverage_ratio": 1.0,
+            "financial_coverage_score": 1.0,
+            "claim_binding_ratio": 1.0,
+        },
+        "tool_health_summary": {"overall_status": "healthy"},
+    }
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-artifact-evidence",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    decision = flow._default_analysis_gate(
+        {
+            "tasks_output": [
+                _StubTaskOutput(
+                    "data_quality_review_task",
+                    "PART A: MACHINE_READABLE_JSON\n```json\n"
+                    + json.dumps(strict_contract)
+                    + "\n```",
+                )
+            ]
+        }
+    )
+
+    assert flow.state.evidence_bundle is not None
+    assert decision.final_decision == "rerun"
+    assert any(action.code == "missing_financial_fact" for action in decision.repair_actions)
+
+
+def test_evidence_backed_flow_rejects_legacy_summary_without_strict_contract() -> None:
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {"analysis_markdown": "analysis complete"},
+        initial_state=MarketReviewFlowState(
+            request_id="run-no-strict-contract",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=ResearchEvidenceBundle(company_name="Apple Inc.", ticker="AAPL"),
+        ),
+    )
+
+    decision = flow._default_analysis_gate(
+        {
+            "analysis_review_summary": {
+                "evidence_coverage_ratio": 1.0,
+                "financial_coverage_score": 1.0,
+                "gate_financial_coverage_score": 1.0,
+            }
+        }
+    )
+
+    assert decision.final_decision == "rerun"
+    assert decision.blocking_reasons == ["review_contract_missing"]
 
 
 def test_default_analysis_gate_accepts_current_reviewer_contract_shape_and_locks_limited_delivery(
@@ -1238,9 +1368,8 @@ def test_default_analysis_gate_accepts_current_reviewer_contract_shape_and_locks
 
     decision = flow._default_analysis_gate({"analysis_markdown": "analysis complete"})
 
-    assert decision.final_decision == "evidence_limited"
-    assert decision.passed is False
-    assert decision.blocking_reasons == []
+    assert decision.final_decision == "blocked"
+    assert "invalid_review_contract" in decision.blocking_reasons
 
 
 def test_default_analysis_gate_prefers_latest_metrics_over_markdown_fallback(

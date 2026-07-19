@@ -481,6 +481,14 @@ def _add_quote_evidence(
             )
         )
         return
+    diluted_shares = next(
+        (
+            fact
+            for fact in bundle.financial_facts
+            if fact.field_name == "diluted_shares" and fact.formal_eligible
+        ),
+        None,
+    )
     bundle.market_snapshots.append(
         MarketSnapshotEvidence(
             price=price,
@@ -488,6 +496,9 @@ def _add_quote_evidence(
             observed_at=observed_at,
             source_url=_quote_source_url(ticker, quote_payload),
             source_tag=source_tag or "market_quote",
+            diluted_shares_period_end=(
+                diluted_shares.period_end if diluted_shares is not None else None
+            ),
         )
     )
     bundle.tool_health.append(ToolHealthRecord(tool_name="quote", status="healthy"))

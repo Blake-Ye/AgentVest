@@ -1,6 +1,7 @@
 import sys
 import json
 from copy import deepcopy
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,14 @@ def test_build_bundle_contains_all_formal_gate_facts(apple_sources: dict[str, ob
     assert bundle.tool_status("quote") == "healthy"
     assert bundle.tool_status("tavily") == "degraded"
     assert any(gap.code == "independent_event_sources_insufficient" for gap in bundle.gaps)
+
+
+def test_quote_snapshot_keeps_the_canonical_diluted_share_period(
+    apple_sources: dict[str, object],
+) -> None:
+    bundle = build_research_evidence_bundle(**apple_sources)
+
+    assert bundle.market_snapshots[0].diluted_shares_period_end == date(2025, 9, 27)
 
 
 def test_tavily_events_require_distinct_valid_source_domains(apple_sources: dict[str, object]) -> None:

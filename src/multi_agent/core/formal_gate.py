@@ -81,6 +81,29 @@ def diagnose_formal_delivery(
     ):
         blockers.append("valuation_period_mismatch")
 
+    if "stock_price" in required_fields and diluted_shares is not None:
+        for snapshot in bundle.market_snapshots:
+            if snapshot.diluted_shares_period_end is None:
+                repair_actions.append(
+                    RepairAction(
+                        target="market_validation_analyst",
+                        code="market_denominator_period_unknown",
+                        fields=["stock_price", "diluted_shares"],
+                        sources=[snapshot.source_url],
+                        instruction="补齐报价使用的稀释股数期间后重新审查。",
+                    )
+                )
+            elif snapshot.diluted_shares_period_end != diluted_shares.period_end:
+                repair_actions.append(
+                    RepairAction(
+                        target="market_validation_analyst",
+                        code="market_denominator_period_mismatch",
+                        fields=["stock_price", "diluted_shares"],
+                        sources=[snapshot.source_url],
+                        instruction="将报价估值分母与正式稀释股数期间对齐后重新审查。",
+                    )
+                )
+
     return FormalDeliveryDiagnostics(
         blocking_reasons=sorted(set(blockers)),
         repair_actions=repair_actions,

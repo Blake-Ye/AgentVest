@@ -40,8 +40,24 @@ class ConfidenceGatePolicy:
             blocking_reasons.append("unresolved_critical_claims>0")
         if contract.delivery_eligibility.blocked_notice_required:
             blocking_reasons.append("delivery_blocked")
+        if contract.decision.gate_outcome == "block":
+            blocking_reasons.append("reviewer_requested_block")
 
-        repair_actions = [*contract.repair_actions, *diagnostics.repair_actions]
+        repair_actions = [
+            *contract.repair_actions,
+            *diagnostics.repair_actions,
+            *self._tool_health_actions(bundle, contract),
+        ]
+        if contract.decision.gate_outcome == "rerun":
+            rerun_reasons = contract.rerun_reasons or ["Reviewer requested evidence repair."]
+            repair_actions.extend(
+                RepairAction(
+                    target="data_quality_reviewer",
+                    code="reviewer_rerun_requested",
+                    instruction=reason,
+                )
+                for reason in rerun_reasons
+            )
         trust_score = self.calculate_trust_score(bundle, contract)
         below_threshold = (
             coverage.evidence_coverage_ratio < self.min_evidence_coverage_ratio
@@ -77,6 +93,59 @@ class ConfidenceGatePolicy:
             blocking_reasons=sorted(set(blocking_reasons)),
             repair_actions=_deduplicate_actions(repair_actions),
         )
+
+    @staticmethod
+    def _tool_health_actions(
+        bundle: ResearchEvidenceBundle, contract: ReviewContract
+    ) -> list[RepairAction]:
+        raw_statuses = {item.tool_name: item.status for item in bundle.tool_health}
+        raw_degraded = sorted(
+            tool_name for tool_name, status in raw_statuses.items() if status == "degraded"
+        )
+        raw_failed = sorted(
+            tool_name for tool_name, status in raw_statuses.items() if status == "failed"
+        )
+        reviewed_degraded = set(contract.tool_health_summary.degraded_tools)
+        reviewed_failed = set(contract.tool_health_summary.failed_tools)
+        actions: list[RepairAction] = []
+        if raw_degraded:
+            actions.append(
+                RepairAction(
+                    target="data_quality_reviewer",
+                    code="degraded_tool_health",
+                    sources=raw_degraded,
+                    instruction="修复或复核降级工具的数据后重新审查。",
+                )
+            )
+        critical_targets = {
+            "sec_company_facts": "fundamental_analyst",
+            "sec_filing": "fundamental_analyst",
+            "quote": "market_validation_analyst",
+        }
+        for tool_name in raw_failed:
+            target = critical_targets.get(tool_name, "data_quality_reviewer")
+            actions.append(
+                RepairAction(
+                    target=target,
+                    code="critical_tool_failed",
+                    sources=[tool_name],
+                    instruction="修复失败工具并补齐受影响证据后重新审查。",
+                )
+            )
+        declared_problem_tools = reviewed_degraded | reviewed_failed
+        raw_problem_tools = set(raw_degraded) | set(raw_failed)
+        if declared_problem_tools != raw_problem_tools or (
+            raw_problem_tools and contract.tool_health_summary.overall_status == "healthy"
+        ):
+            actions.append(
+                RepairAction(
+                    target="data_quality_reviewer",
+                    code="tool_health_disagreement",
+                    sources=sorted(declared_problem_tools | raw_problem_tools),
+                    instruction="使审查契约中的工具健康状态与原始证据记录一致后重新审查。",
+                )
+            )
+        return actions
 
     def calculate_trust_score(
         self, bundle: ResearchEvidenceBundle, contract: ReviewContract
@@ -137,6 +206,18 @@ class ConfidenceGatePolicy:
 def _deduplicate_actions(actions: list[RepairAction]) -> list[RepairAction]:
     unique: dict[tuple[object, ...], RepairAction] = {}
     for action in actions:
-        key = (action.target, action.code, tuple(action.fields), tuple(action.sources), action.instruction)
-        unique[key] = action
-    return list(unique.values())
+        normalized = action.model_copy(
+            update={
+                "fields": sorted(set(action.fields)),
+                "sources": sorted(set(action.sources)),
+            }
+        )
+        key = (
+            normalized.target,
+            normalized.code,
+            tuple(normalized.fields),
+            tuple(normalized.sources),
+            normalized.instruction,
+        )
+        unique[key] = normalized
+    return [unique[key] for key in sorted(unique)]

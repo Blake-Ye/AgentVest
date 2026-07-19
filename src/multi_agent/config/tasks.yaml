@@ -83,10 +83,13 @@ data_quality_review_task:
     或 not_used，并判断 primary_class 是 none、research_blocked 还是 pipeline_degraded。
     Step 4. 评估交付资格，判断 formal_report_allowed、evidence_limited_report_allowed、
     blocked_notice_required，并确定 recommended_delivery_state。
-    Step 5. 先输出 JSON code block，JSON 必须符合 AgentVest Review Contract，包含
-    decision、delivery_eligibility、failure_taxonomy、coverage、tool_health、
-    blocking_reasons、rerun_reasons、allow_limited_delivery、review_summary、
-    artifact_refs、findings。
+    Step 5. 先输出 JSON code block，必须引用 reviewer tools 的结构化结果；JSON 必须严格符合 AgentVest ReviewContract：
+    stage、reviewer_name、decision（gate_outcome、decision_confidence）、
+    delivery_eligibility、failure_taxonomy、coverage_summary（含
+    evidence_coverage_ratio、financial_coverage_score、claim_binding_ratio）、
+    tool_health_summary、blocking_reasons、rerun_reasons、allow_limited_delivery、
+    review_summary、artifact_refs、findings、repair_actions。不得使用 coverage、
+    tool_health、review_stage 或未定义字段；未知字段会阻断本次交付。
     Step 6. 再输出 markdown 审查说明，只解释机器判定，不得新增机器判定。
     输出格式必须严格按顺序输出：
     PART A: MACHINE_READABLE_JSON
@@ -114,6 +117,8 @@ investment_report_task:
     不得读取未明确提供的外部网页、HTML、PDF、本地缓存或其他文件。
     REPORT_MODE 只可能是 formal_report、evidence_limited_report、blocked_notice，
     你必须服从 REPORT_MODE，不得自行升级或降级状态。
+    仅当 analysis gate 已通过时，才允许生成正式投资建议；若 gate 未通过，不得生成正式投资建议。
+    当 REPORT_MODE 为 blocked_notice 时，必须输出阻断说明而非正式报告。
     禁止事项：不要根据文稿完整性自行补全缺失事实；不要写任何无法绑定到上游 artifact
     的关键数字、关键判断、重大风险提示、催化剂或建议；不要在 formal_report 不允许时
     伪装成正式报告；不要在 blocked_notice 模式下输出完整研究报告；不要读取 control-plane
@@ -163,8 +168,9 @@ logic_compliance_review_task:
     把待验证事项写成已确认事实、或遗漏必要受限说明/阻断说明。
     Step 3. 审查 claim-to-source binding，统计 claim_binding_ratio，并把无法回指的关键 claim
     记为 claim_unbound，把受限模式下仍使用 formal 口吻的句子记为 report_overreach。
-    Step 4. 先输出 JSON code block，JSON 必须符合 AgentVest Review Contract，
-    review_stage 视为 report，decision 仅表示审查建议，不是最终真值。
+    Step 4. 先输出 JSON code block，JSON 必须严格符合 AgentVest ReviewContract，
+    stage 必须为 report_review，且使用 coverage_summary、tool_health_summary 和
+    repair_actions；decision 仅表示审查建议，不是最终真值。
     Step 5. 再输出 markdown 审查说明，只解释 JSON，不得新增机器判定。
     输出格式必须严格按顺序输出：
     PART A: MACHINE_READABLE_JSON

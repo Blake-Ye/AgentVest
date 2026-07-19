@@ -11,12 +11,13 @@ from crewai.flow.flow import Flow, listen, router, start
 
 from multi_agent.core.confidence_gate import ConfidenceGatePolicy
 from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
+from multi_agent.core.evidence import ResearchEvidenceBundle
 from multi_agent.core.market import MarketValidationResult
 from multi_agent.core.review_contracts import (
     GateDecision,
+    RepairAction,
     ReviewContract,
     ReviewToolSummary,
-    parse_legacy_review_contract,
 )
 from multi_agent.core.state import ResearchRunState
 from multi_agent.crew import MultiAgent
@@ -334,56 +335,97 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         return normalized
 
     @classmethod
-    def _machine_readable_review_contract_from_text(cls, review_text: str) -> ReviewContract | None:
+    def _machine_readable_review_contract_from_text(
+        cls, review_text: str
+    ) -> tuple[ReviewContract | None, str | None]:
         if not review_text.strip():
-            return None
+            return None, None
         match = re.search(
             r"PART A:\s*MACHINE_READABLE_JSON[\s\S]*?```(?:json)?\s*([\s\S]*?)\s*```",
             review_text,
             re.IGNORECASE,
         )
         if match is None:
-            return None
+            return None, None
         raw_contract = match.group(1).strip()
         if not raw_contract:
+            return None, "invalid_review_contract"
+        try:
+            return ReviewContract.model_validate_json(raw_contract), None
+        except Exception:
+            return None, "invalid_review_contract"
+
+    def _evidence_bundle_for_gate(self) -> ResearchEvidenceBundle | None:
+        if self.state.evidence_bundle is not None:
+            return self.state.evidence_bundle
+        artifacts_dir = self.state.artifacts_dir.strip()
+        if not artifacts_dir:
+            return None
+        evidence_path = Path(artifacts_dir) / "10_research_evidence.json"
+        if not evidence_path.exists():
             return None
         try:
-            return ReviewContract.model_validate_json(raw_contract)
+            bundle = ResearchEvidenceBundle.model_validate_json(
+                evidence_path.read_text(encoding="utf-8")
+            )
         except Exception:
-            try:
-                normalized_payload = cls._normalize_machine_readable_review_contract_payload(
-                    json.loads(raw_contract)
-                )
-                return parse_legacy_review_contract(normalized_payload)
-            except Exception:
-                return None
+            return None
+        self.state.evidence_bundle = bundle
+        return bundle
 
     @staticmethod
-    def _gate_decision_from_review_contract(contract: ReviewContract) -> GateDecision:
-        policy_decision = ConfidenceGatePolicy.default().evaluate_legacy(contract)
-        delivery = contract.delivery_eligibility
-        recommended_delivery_state = delivery.recommended_delivery_state
+    def _invalid_review_contract_decision() -> GateDecision:
+        action = RepairAction(
+            target="data_quality_reviewer",
+            code="invalid_review_contract",
+            instruction="按严格 ReviewContract 契约重新生成审查 JSON。",
+        )
+        return GateDecision(
+            passed=False,
+            final_decision="blocked",
+            trust_score=0,
+            blocking_reasons=["invalid_review_contract"],
+            repair_actions=[action],
+        )
 
-        if delivery.blocked_notice_required or recommended_delivery_state == "blocked_notice":
+    @staticmethod
+    def _missing_review_contract_decision() -> GateDecision:
+        action = RepairAction(
+            target="data_quality_reviewer",
+            code="review_contract_missing",
+            instruction="生成严格 ReviewContract JSON 后重新审查。",
+        )
+        return GateDecision(
+            passed=False,
+            final_decision="rerun",
+            trust_score=0,
+            blocking_reasons=["review_contract_missing"],
+            repair_actions=[action],
+        )
+
+    def _has_evidence_context(self) -> bool:
+        if self.state.evidence_bundle is not None:
+            return True
+        artifacts_dir = self.state.artifacts_dir.strip()
+        return bool(artifacts_dir and (Path(artifacts_dir) / "10_research_evidence.json").exists())
+
+    def _gate_decision_from_review_contract(self, contract: ReviewContract) -> GateDecision:
+        bundle = self._evidence_bundle_for_gate()
+        if bundle is None:
             return GateDecision(
                 passed=False,
-                final_decision="blocked",
-                trust_score=policy_decision.trust_score,
-                blocking_reasons=list(contract.blocking_reasons) or ["delivery_blocked"],
+                final_decision="rerun",
+                trust_score=0,
+                blocking_reasons=["research_evidence_bundle_missing"],
+                repair_actions=[
+                    RepairAction(
+                        target="fundamental_analyst",
+                        code="research_evidence_bundle_missing",
+                        instruction="生成并持久化 10_research_evidence.json 后重新审查。",
+                    )
+                ],
             )
-
-        if (
-            not delivery.formal_report_allowed
-            and (delivery.evidence_limited_report_allowed or contract.allow_limited_delivery)
-        ) or recommended_delivery_state == "evidence_limited_report":
-            return GateDecision(
-                passed=False,
-                final_decision="evidence_limited",
-                trust_score=min(policy_decision.trust_score, 60),
-                blocking_reasons=list(contract.blocking_reasons),
-            )
-
-        return policy_decision
+        return ConfidenceGatePolicy.default().evaluate(bundle, contract)
 
     @staticmethod
     def _review_task_outputs(result: Any) -> list[Any]:
@@ -581,13 +623,19 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     def _default_analysis_gate(self, analysis_result: Any) -> GateDecision:
         review_text = self._review_text_from_tasks_output(analysis_result)
         materialized_review_text = self._materialized_analysis_review_content()
+        for candidate_review_text in (review_text, materialized_review_text):
+            contract, contract_error = self._machine_readable_review_contract_from_text(
+                candidate_review_text
+            )
+            if contract_error is not None:
+                return self._invalid_review_contract_decision()
+            if contract is not None:
+                return self._gate_decision_from_review_contract(contract)
+        if self._has_evidence_context():
+            return self._missing_review_contract_decision()
         summary = self._structured_review_summary(analysis_result, "analysis_review_summary")
         if summary is not None:
             return ConfidenceGatePolicy.default().evaluate_legacy(summary)
-        for candidate_review_text in (review_text, materialized_review_text):
-            contract = self._machine_readable_review_contract_from_text(candidate_review_text)
-            if contract is not None:
-                return self._gate_decision_from_review_contract(contract)
         summary = self._summary_from_latest_metrics()
         if summary is not None:
             return ConfidenceGatePolicy.default().evaluate_legacy(summary)
