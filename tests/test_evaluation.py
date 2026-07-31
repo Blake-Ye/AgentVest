@@ -1,6 +1,10 @@
 import json
+from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
+from multi_agent.core.evidence import FinancialFact, MarketSnapshotEvidence, ResearchEvidenceBundle
 from multi_agent.evaluation import WorkflowEvaluation
 
 
@@ -252,3 +256,132 @@ def test_formal_delivery_success_requires_all_semantic_completion_metrics(tmp_pa
     assert metrics["status"] == "failed"
     assert metrics["report_sections_complete"] is False
     assert metrics["delivery_validation_passed"] is False
+
+
+def test_formal_fact_provenance_requires_auditable_stock_price_snapshot() -> None:
+    common = {
+        "unit": "USD",
+        "period_end": date(2025, 9, 27),
+        "fiscal_year": 2025,
+        "fiscal_period": "FY",
+        "form": "10-K",
+        "accession": "0000320193-25-000079",
+        "filed_at": date(2025, 10, 31),
+        "source_url": "https://www.sec.gov/Archives/edgar/data/320193/aapl-20250927.htm",
+        "source_tag": "sec_companyfacts",
+    }
+    bundle = ResearchEvidenceBundle(
+        company_name="Apple Inc.",
+        ticker="AAPL",
+        financial_facts=[
+            FinancialFact(
+                field_name=field_name,
+                value=1.0,
+                unit="shares" if field_name == "diluted_shares" else "USD",
+                **{key: value for key, value in common.items() if key != "unit"},
+            )
+            for field_name in (
+                "revenue",
+                "cash_and_equivalents",
+                "total_debt",
+                "diluted_shares",
+                "segment_revenue_services",
+            )
+        ],
+        market_snapshots=[
+            MarketSnapshotEvidence(
+                price=210.05,
+                currency="USD",
+                observed_at=datetime(2026, 7, 19, tzinfo=timezone.utc),
+                source_url="https://api.nasdaq.com/api/quote/AAPL/info?assetclass=stocks",
+                source_tag="nasdaq_quote_info",
+                diluted_shares_period_end=date(2025, 9, 27),
+            )
+        ],
+    )
+
+    assert WorkflowEvaluation._formal_fact_provenance_complete(bundle) is True
+    assert WorkflowEvaluation._formal_fact_provenance_complete(
+        bundle.model_copy(update={"market_snapshots": []})
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["cash_and_equivalents", "total_debt", "segment_revenue_services"],
+)
+def test_formal_fact_provenance_rejects_cross_period_required_fact(field_name: str) -> None:
+    bundle = _complete_formal_bundle()
+    original = bundle.require_fact(field_name)
+    bundle.financial_facts = [
+        fact.model_copy(
+            update={
+                "fiscal_year": 2024,
+                "period_end": date(2024, 9, 28),
+                "accession": "0000320193-24-000081",
+            }
+        )
+        if fact is original
+        else fact
+        for fact in bundle.financial_facts
+    ]
+
+    assert WorkflowEvaluation._formal_fact_provenance_complete(bundle) is False
+
+
+def test_formal_fact_provenance_rejects_duplicate_required_fact() -> None:
+    bundle = _complete_formal_bundle()
+    bundle.financial_facts.append(bundle.require_fact("revenue").model_copy(deep=True))
+
+    assert WorkflowEvaluation._formal_fact_provenance_complete(bundle) is False
+
+
+def test_formal_fact_provenance_rejects_quote_currency_mismatch() -> None:
+    bundle = _complete_formal_bundle()
+    bundle.market_snapshots[0] = bundle.market_snapshots[0].model_copy(
+        update={"currency": "EUR"}
+    )
+
+    assert WorkflowEvaluation._formal_fact_provenance_complete(bundle) is False
+
+
+def _complete_formal_bundle() -> ResearchEvidenceBundle:
+    common = {
+        "period_end": date(2025, 9, 27),
+        "fiscal_year": 2025,
+        "fiscal_period": "FY",
+        "form": "10-K",
+        "accession": "0000320193-25-000079",
+        "filed_at": date(2025, 10, 31),
+        "source_url": "https://www.sec.gov/Archives/edgar/data/320193/aapl-20250927.htm",
+        "source_tag": "sec_companyfacts",
+    }
+    return ResearchEvidenceBundle(
+        company_name="Apple Inc.",
+        ticker="AAPL",
+        financial_facts=[
+            FinancialFact(
+                field_name=field_name,
+                value=1.0,
+                unit="shares" if field_name == "diluted_shares" else "USD",
+                **common,
+            )
+            for field_name in (
+                "revenue",
+                "cash_and_equivalents",
+                "total_debt",
+                "diluted_shares",
+                "segment_revenue_services",
+            )
+        ],
+        market_snapshots=[
+            MarketSnapshotEvidence(
+                price=210.05,
+                currency="USD",
+                observed_at=datetime(2026, 7, 19, tzinfo=timezone.utc),
+                source_url="https://api.nasdaq.com/api/quote/AAPL/info?assetclass=stocks",
+                source_tag="nasdaq_quote_info",
+                diluted_shares_period_end=date(2025, 9, 27),
+            )
+        ],
+    )

@@ -41,7 +41,12 @@ def _typed_bundle() -> ResearchEvidenceBundle:
         company_name="Apple Inc.",
         ticker="AAPL",
         financial_facts=[
-            FinancialFact(field_name=name, value=float(index + 1), unit="USD", **common)
+            FinancialFact(
+                field_name=name,
+                value=float(index + 1),
+                unit="shares" if name == "diluted_shares" else "USD",
+                **common,
+            )
             for index, name in enumerate(
                 (
                     "revenue",

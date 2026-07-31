@@ -1,7 +1,8 @@
-import os
 import json
+import os
+import socket
+import urllib.request
 from argparse import Namespace
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,19 +18,38 @@ os.environ.setdefault(
 )
 
 
+class UnexpectedNetworkRequest(BaseException):
+    """Escape broad production Exception handlers during offline tests."""
+
+
 @pytest.fixture(autouse=True)
 def _block_unstubbed_network_and_crewai(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests must explicitly stub every external workflow boundary."""
 
     def _blocked_request(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("unexpected network request in test")
+        raise UnexpectedNetworkRequest("unexpected network request in test")
 
     monkeypatch.setattr(requests.sessions.Session, "request", _blocked_request)
+    monkeypatch.setattr(urllib.request, "urlopen", _blocked_request)
+    monkeypatch.setattr(socket.socket, "connect", _blocked_request)
+    monkeypatch.setattr(socket, "create_connection", _blocked_request)
 
     try:
         from crewai import Crew
+        from crewai.events.utils import console_formatter
     except ImportError:
         return
+
+    monkeypatch.setattr(
+        console_formatter,
+        "is_newer_version_available",
+        lambda: (False, "test-version", None),
+    )
+    monkeypatch.setattr(
+        console_formatter,
+        "is_current_version_yanked",
+        lambda: (False, ""),
+    )
 
     def _blocked_kickoff(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("unexpected CrewAI kickoff in test")
@@ -44,13 +64,101 @@ class _FakeTaskOutput:
 
 
 class _FakeCrewOutput:
-    """Minimal CrewOutput-shaped boundary object for an offline CLI run."""
+    """Minimal CrewOutput-shaped value emitted by the fixture execution adapter."""
 
-    def __init__(self, flow_result: dict[str, object], task_outputs: list[_FakeTaskOutput]) -> None:
+    def __init__(
+        self,
+        task_outputs: list[_FakeTaskOutput],
+        *,
+        json_dict: dict[str, object] | None = None,
+    ) -> None:
         self.tasks_output = task_outputs
+        self.json_dict = json_dict or {}
         self.raw = ""
-        for key, value in flow_result.items():
-            setattr(self, key, value)
+
+
+@dataclass
+class _FixtureResponse:
+    status_code: int
+    payload: dict[str, object]
+    text: str = ""
+
+    def json(self) -> dict[str, object]:
+        return self.payload
+
+
+class _OfficialFixtureSession:
+    """Recording SEC/Nasdaq session that exercises OfficialSecService URL parsing."""
+
+    def __init__(self, payloads: dict[str, object]) -> None:
+        self.payloads = payloads
+        self.calls: list[str] = []
+
+    def get(self, url: str, **_kwargs: object) -> _FixtureResponse:
+        from multi_agent.tools.official_sec import OfficialSecService
+
+        self.calls.append(url)
+        if url == OfficialSecService.SEC_TICKERS_URL:
+            return _FixtureResponse(
+                200,
+                {"0": {"ticker": "AAPL", "title": "Apple Inc.", "cik_str": 320193}},
+            )
+        if url == OfficialSecService.SEC_COMPANY_FACTS_URL.format(cik="0000320193"):
+            return _FixtureResponse(200, self.payloads["company_facts"])
+        if url == OfficialSecService.SEC_SUBMISSIONS_URL.format(cik="0000320193"):
+            return _FixtureResponse(
+                200,
+                {
+                    "filings": {
+                        "recent": {
+                            "form": ["10-K"],
+                            "filingDate": ["2025-10-31"],
+                            "reportDate": ["2025-09-27"],
+                            "accessionNumber": ["0000320193-25-000079"],
+                            "primaryDocument": ["aapl-20250927.htm"],
+                            "primaryDocDescription": ["Apple 2025 Form 10-K"],
+                        }
+                    }
+                },
+            )
+        if "/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm" in url:
+            return _FixtureResponse(200, {}, str(self.payloads["filing_html"]))
+        if url == OfficialSecService.NASDAQ_QUOTE_INFO_URL.format(ticker="AAPL"):
+            return _FixtureResponse(200, self.payloads["quote_payload"])
+        raise AssertionError(f"unexpected fixture SEC request: {url}")
+
+
+class _TavilyFixtureSession:
+    """Recording Tavily session returning two independent source domains."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def post(self, url: str, **_kwargs: object) -> _FixtureResponse:
+        self.calls.append(url)
+        if url != "https://api.tavily.com/search":
+            raise AssertionError(f"unexpected fixture Tavily request: {url}")
+        return _FixtureResponse(
+            200,
+            {
+                "results": [
+                    {
+                        "title": "Apple Services Growth",
+                        "url": "https://news.example.com/apple-services",
+                        "type": "news",
+                        "published_date": "2026-07-18T12:00:00+00:00",
+                        "content": "Apple reported continued Services growth.",
+                    },
+                    {
+                        "title": "Apple Services Growth",
+                        "url": "https://wire.example.net/apple-services",
+                        "type": "news",
+                        "published_date": "2026-07-18T13:00:00+00:00",
+                        "content": "A second independent publisher confirmed Services growth.",
+                    },
+                ]
+            },
+        )
 
 
 def _append_annual_fact(
@@ -80,6 +188,7 @@ def apple_fixture_payloads() -> dict[str, object]:
     """Production-shaped Apple tool responses, kept entirely on disk."""
     fixture_dir = Path(__file__).parent / "fixtures" / "apple"
     company_facts = json.loads((fixture_dir / "companyfacts.json").read_text(encoding="utf-8"))
+    company_facts["entityName"] = "Apple Inc."
     facts = company_facts["facts"]["us-gaap"]
     _append_annual_fact(facts, "CashAndCashEquivalentsAtCarryingValue", "USD", 35_900_000_000)
     _append_annual_fact(facts, "LongTermDebtCurrent", "USD", 10_000_000_000)
@@ -91,18 +200,6 @@ def apple_fixture_payloads() -> dict[str, object]:
         15_000_000_000,
         start="2024-09-29",
     )
-    news = json.loads((fixture_dir / "news.json").read_text(encoding="utf-8"))
-    first_event = dict(news["results"][0])
-    first_event.update({"event_key": "apple-services-growth", "url": "https://news.example.com/apple-services"})
-    second_event = dict(first_event)
-    second_event.update(
-        {
-            "title": "Apple Services growth independently confirmed",
-            "url": "https://wire.example.net/apple-services",
-        }
-    )
-    news["results"] = [first_event, second_event]
-    news["artifact_ref"] = "https://api.tavily.com/search/apple-services"
     return {
         "company_name": "Apple Inc.",
         "ticker": "AAPL",
@@ -119,7 +216,6 @@ def apple_fixture_payloads() -> dict[str, object]:
             "period_end": "2025-09-27",
         },
         "quote_payload": json.loads((fixture_dir / "quote.json").read_text(encoding="utf-8")),
-        "tavily_payloads": [news],
     }
 
 
@@ -128,13 +224,16 @@ def apple_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     apple_fixture_payloads: dict[str, object],
 ):
-    """Run the typed Flow through the production CLI finalization boundary offline."""
+    """Run actual runtime Flow construction with fixture-backed execution adapters."""
     from multi_agent import main
     from multi_agent.core.report_document import REQUIRED_SECTION_KEYS, SECTION_HEADINGS
+    from multi_agent.core.evidence import ResearchEvidenceBundle
     from multi_agent.core.review_contracts import ReviewContract
-    from multi_agent.flows.market_review_flow import MarketReviewFlow, MarketReviewFlowState
+    from multi_agent.flows import market_review_flow
     from multi_agent.settings import InvestmentResearchSettings
-    from multi_agent.tools.investment_tools import build_research_evidence_bundle
+    from multi_agent.tools.investment_tools import FinancialMetricsTool
+    from multi_agent.tools.official_sec import OfficialSecService
+    from multi_agent.tools.tavily_search import TavilySearchService, TavilySearchTool
 
     def review_contract(stage: str) -> ReviewContract:
         return ReviewContract.model_validate(
@@ -159,7 +258,12 @@ def apple_pipeline(
             }
         )
 
-    def writer_payload() -> dict[str, object]:
+    def writer_payload(report_inputs: dict[str, str]) -> dict[str, object]:
+        report_context = json.loads(report_inputs["REPORT_CONTEXT_JSON"])
+        source_ids = [
+            json.loads(source_json)["source_id"]
+            for source_json in report_context["canonical_sources_json"]
+        ]
         return {
             "title": "Apple Inc. (AAPL) 投资研究报告",
             "stance": "hold",
@@ -186,13 +290,17 @@ def apple_pipeline(
                     "source_ids": ["claim:revenue"],
                 }
             ],
-            "sources": [{"source_id": "claim:revenue"}],
+            "sources": [{"source_id": source_id} for source_id in source_ids],
         }
 
     class _ApplePipeline:
-        last_result: object | None = None
+        official_session: _OfficialFixtureSession | None = None
+        tavily_session: _TavilyFixtureSession | None = None
+        analysis_kickoffs: int = 0
+        report_kickoffs: int = 0
 
         def run(self, tmp_path: Path) -> tuple[dict[str, object], Path]:
+            captured_flow_result: dict[str, object] | None = None
             runs_dir = tmp_path / "runs"
             settings = InvestmentResearchSettings(
                 fast_model="offline-fast",
@@ -216,45 +324,118 @@ def apple_pipeline(
                 "local_filing_pdf_available": "no",
             }
 
-            def kickoff(inputs: dict[str, str]) -> _FakeCrewOutput:
-                bundle = build_research_evidence_bundle(**deepcopy(apple_fixture_payloads))
-                analysis_contract = review_contract("analysis_review")
-                flow = MarketReviewFlow(
-                    analysis_executor=lambda _inputs: {
-                        "evidence_bundle": bundle.model_dump(mode="json"),
-                        "analysis_review_contract": analysis_contract.model_dump(mode="json"),
-                    },
-                    report_writer=lambda _inputs: writer_payload(),
-                    report_reviewer=lambda _document: review_contract("report_review").model_dump(mode="json"),
-                    initial_state=MarketReviewFlowState(
-                        request_id=inputs["run_id"],
-                        company_name=inputs["company_name"],
-                        input_ticker=inputs["company_ticker"],
-                        execution_mode="new",
-                        artifacts_dir=inputs["artifacts_dir"],
-                        final_report_path=inputs["final_report_path"],
-                    ),
-                )
-                flow_result = flow.kickoff()
-                self.last_result = flow_result
-                task_outputs = [
-                    _FakeTaskOutput(name, f"# {name}\n\nOffline Apple fixture output.")
-                    for name in (
-                        "market_validation_task",
-                        "market_intelligence_task",
-                        "filing_review_task",
-                        "financial_analysis_task",
-                        "investment_report_task",
-                        "data_quality_review_task",
-                        "logic_compliance_review_task",
+            self.official_session = _OfficialFixtureSession(apple_fixture_payloads)
+            self.tavily_session = _TavilyFixtureSession()
+            official_service = OfficialSecService(settings, session=self.official_session)
+            tavily_service = TavilySearchService(settings, session=self.tavily_session)
+            artifact_dir: Path | None = None
+
+            def write_task_artifact(filename: str, content: str) -> None:
+                if artifact_dir is None:
+                    raise AssertionError("fixture task output has no runtime artifacts directory")
+                (artifact_dir / filename).write_text(content, encoding="utf-8")
+
+            class _FixtureAnalysisCrew:
+                def kickoff(_self, *, inputs: dict[str, str]) -> _FakeCrewOutput:
+                    nonlocal artifact_dir
+                    self.analysis_kickoffs += 1
+                    artifact_dir = Path(os.environ["ARTIFACTS_DIR"])
+                    tavily_payload = TavilySearchTool(
+                        settings=settings,
+                        service=tavily_service,
+                    )._run(
+                        query="Services growth",
+                        topic="news",
+                        market_label="US",
+                        company_name="Apple Inc.",
                     )
-                ]
-                return _FakeCrewOutput(flow_result, task_outputs)
+                    metrics_payload = json.loads(
+                        FinancialMetricsTool(settings=settings, service=official_service)._run("AAPL")
+                    )
+                    evidence_bundle = ResearchEvidenceBundle.model_validate(
+                        metrics_payload["evidence_bundle"]
+                    )
+                    analysis_contract = review_contract("analysis_review")
+                    contract_json = analysis_contract.model_dump_json(indent=2)
+                    evidence_url = evidence_bundle.require_fact("revenue").source_url
+                    write_task_artifact(
+                        "00_market_validation.md",
+                        "# 市场验证结果\n\nApple Inc.（AAPL）market_label=US；状态：confirmed。\n",
+                    )
+                    write_task_artifact(
+                        "01_market_intelligence.md",
+                        "# 市场情报简报\n\nApple Inc.（AAPL）Tavily 事件：Apple Services Growth；"
+                        f"来源：{tavily_payload['results'][0]['url']}。\n",
+                    )
+                    write_task_artifact(
+                        "02_filing_review.md",
+                        "# 监管文件复核\n\nApple Inc.（AAPL）10-K；"
+                        "Accession：0000320193-25-000079；"
+                        f"来源：{evidence_url}。\n",
+                    )
+                    write_task_artifact(
+                        "03_financial_analysis.md",
+                        "# 财务分析结果\n\nApple Inc.（AAPL）收入：416161000000 USD；"
+                        "稀释股数：15000000000 shares；"
+                        "来源 ID：claim:revenue。\n",
+                    )
+                    write_task_artifact(
+                        "08_data_quality_review.md",
+                        "# 数据质量审查结果\n\nApple Inc.（AAPL）严格审查契约：\n\n"
+                        f"```json\n{contract_json}\n```\n",
+                    )
+                    return _FakeCrewOutput(
+                        [
+                            _FakeTaskOutput("market_validation_task", "Apple Inc. AAPL US confirmed"),
+                            _FakeTaskOutput("market_intelligence_task", json.dumps(tavily_payload)),
+                            _FakeTaskOutput("filing_review_task", "Apple 10-K 0000320193-25-000079"),
+                            _FakeTaskOutput("financial_analysis_task", json.dumps(metrics_payload)),
+                            _FakeTaskOutput("data_quality_review_task", contract_json),
+                        ],
+                        json_dict={
+                            "evidence_bundle": evidence_bundle.model_dump(mode="json"),
+                            "analysis_review_contract": analysis_contract.model_dump(mode="json"),
+                        },
+                    )
+
+            class _FixtureReportCrew:
+                def kickoff(_self, *, inputs: dict[str, str]) -> _FakeCrewOutput:
+                    self.report_kickoffs += 1
+                    if artifact_dir is None:
+                        raise AssertionError("analysis crew must run before report crew")
+                    report_contract = review_contract("report_review")
+                    report_contract_json = report_contract.model_dump_json(indent=2)
+                    write_task_artifact(
+                        "09_logic_compliance_review.md",
+                        "# 逻辑与合规审查结果\n\nApple Inc.（AAPL）严格审查契约：\n\n"
+                        f"```json\n{report_contract_json}\n```\n",
+                    )
+                    return _FakeCrewOutput(
+                        [
+                            _FakeTaskOutput(
+                                "investment_report_task", json.dumps(writer_payload(inputs), ensure_ascii=False)
+                            ),
+                            _FakeTaskOutput("logic_compliance_review_task", report_contract_json),
+                        ]
+                    )
+
+            class _FixtureExecutionAdapter:
+                def configure_run(_self, **_kwargs: object) -> None:
+                    return None
+
+                def analysis_crew(_self) -> _FixtureAnalysisCrew:
+                    return _FixtureAnalysisCrew()
+
+                def report_crew(_self) -> _FixtureReportCrew:
+                    return _FixtureReportCrew()
+
+                def crew(_self) -> object:
+                    raise AssertionError("new runs must execute the runtime Flow adapter")
 
             monkeypatch.setattr(main.InvestmentResearchSettings, "from_env", lambda: settings)
             monkeypatch.setattr(main, "_workflow_inputs", lambda *_args: dict(workflow_inputs))
-            monkeypatch.setattr(main, "_ensure_run_id", lambda inputs: inputs)
-            monkeypatch.setattr(main, "_kickoff_workflow", kickoff)
+            monkeypatch.delenv("USE_FLOW_EXECUTION", raising=False)
+            monkeypatch.setattr(market_review_flow, "MultiAgent", _FixtureExecutionAdapter)
             monkeypatch.setattr(
                 main,
                 "_build_parser",
@@ -269,9 +450,21 @@ def apple_pipeline(
                 ),
             )
 
+            original_finalize = main._finalize_successful_result
+
+            def capture_flow_result(output_paths: object, result: object) -> str:
+                nonlocal captured_flow_result
+                if not isinstance(result, dict):
+                    raise AssertionError("runtime Flow must return a structured result")
+                captured_flow_result = dict(result)
+                return original_finalize(output_paths, result)
+
+            monkeypatch.setattr(main, "_finalize_successful_result", capture_flow_result)
+
             main.run()
             run_dir = runs_dir / "apple_inc__aapl" / "20260720_120000"
-            assert isinstance(self.last_result, dict)
-            return self.last_result, run_dir
+            if captured_flow_result is None:
+                raise AssertionError("runtime Flow result was not captured")
+            return captured_flow_result, run_dir
 
     return _ApplePipeline()

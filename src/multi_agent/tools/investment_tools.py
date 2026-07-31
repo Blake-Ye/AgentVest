@@ -35,7 +35,6 @@ from multi_agent.settings import InvestmentResearchSettings
 from multi_agent.tools.official_sec import (
     FatalAPIError,
     OfficialSecService,
-    _debug_report,
     _raise_for_status_with_context,
 )
 
@@ -858,14 +857,6 @@ class SecFilingSearchTool(BaseTool):
                 f"当前市场 {self._settings.company_market_label} 仅允许使用对应市场数据源，"
                 "SEC Filing Search 仅 US 市场可用。"
             )
-        # #region debug-point A:filing-tool-start
-        _debug_report(
-            "A",
-            "investment_tools.py:SecFilingSearchTool._run:start",
-            "[DEBUG] Filing tool start",
-            {"company_name": company_name, "ticker": ticker, "form_type": form_type, "limit": limit},
-        )
-        # #endregion
         try:
             filings = self._service.search_filings(
                 company_name=company_name,
@@ -876,24 +867,8 @@ class SecFilingSearchTool(BaseTool):
         except FatalAPIError:
             raise
         except Exception as exc:  # pragma: no cover - network failure path
-            # #region debug-point C:filing-tool-exception
-            _debug_report(
-                "C",
-                "investment_tools.py:SecFilingSearchTool._run:exception",
-                "[DEBUG] Filing tool exception",
-                {"ticker": ticker, "form_type": form_type, "error": repr(exc)},
-            )
-            # #endregion
             return f"SEC 文件检索失败：{exc}"
 
-        # #region debug-point B:filing-tool-finish
-        _debug_report(
-            "B",
-            "investment_tools.py:SecFilingSearchTool._run:finish",
-            "[DEBUG] Filing tool finish",
-            {"ticker": ticker, "form_type": form_type, "result_count": len(filings)},
-        )
-        # #endregion
         if not filings:
             return "未找到相关的 SEC 文件。"
 
@@ -935,39 +910,15 @@ class SecCompanyFactsTool(BaseTool):
                 f"当前市场 {self._settings.company_market_label} 仅允许使用对应市场数据源，"
                 "SEC Company Facts 仅 US 市场可用。"
             )
-        # #region debug-point D:company-facts-tool-start
-        _debug_report(
-            "D",
-            "investment_tools.py:SecCompanyFactsTool._run:start",
-            "[DEBUG] Company facts tool start",
-            {"ticker": ticker},
-        )
-        # #endregion
         try:
             company_facts = self._service.fetch_company_facts(ticker)
             snapshot, metadata = _build_financial_snapshot_with_metadata(company_facts)
         except FatalAPIError:
             raise
         except Exception as exc:  # pragma: no cover - network failure path
-            # #region debug-point E:company-facts-tool-exception
-            _debug_report(
-                "E",
-                "investment_tools.py:SecCompanyFactsTool._run:exception",
-                "[DEBUG] Company facts tool exception",
-                {"ticker": ticker, "error": repr(exc)},
-            )
-            # #endregion
             return f"获取 SEC 公司财务事实失败：{exc}"
 
         record_financial_fields(metadata)
-        # #region debug-point D:company-facts-tool-finish
-        _debug_report(
-            "D",
-            "investment_tools.py:SecCompanyFactsTool._run:finish",
-            "[DEBUG] Company facts tool finish",
-            {"ticker": ticker, "fields": sorted(metadata.keys())},
-        )
-        # #endregion
         return json.dumps(snapshot.__dict__, indent=2, ensure_ascii=False)
 
 

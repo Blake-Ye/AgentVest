@@ -5,7 +5,6 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-import urllib.request
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -28,46 +27,6 @@ class FatalAPIError(RuntimeError):
         super().__init__(message)
         self.status_code = status_code
         self.service_name = service_name
-
-
-# #region debug-point A:debug-helper
-def _debug_report(
-    hypothesis_id: str,
-    location: str,
-    msg: str,
-    data: dict[str, Any] | None = None,
-) -> None:
-    env_path = Path(".dbg/apple-filing-stall.env")
-    debug_server_url = "http://127.0.0.1:7777/event"
-    debug_session_id = "apple-filing-stall"
-    try:
-        env_content = env_path.read_text(encoding="utf-8")
-        for line in env_content.splitlines():
-            if line.startswith("DEBUG_SERVER_URL="):
-                debug_server_url = line.split("=", 1)[1].strip() or debug_server_url
-            elif line.startswith("DEBUG_SESSION_ID="):
-                debug_session_id = line.split("=", 1)[1].strip() or debug_session_id
-        payload = {
-            "sessionId": debug_session_id,
-            "runId": "pre",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "msg": msg,
-            "data": data or {},
-        }
-        urllib.request.urlopen(
-            urllib.request.Request(
-                debug_server_url,
-                data=json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            ),
-            timeout=0.8,
-        ).read()
-    except Exception:
-        pass
-
-
-# #endregion
 
 
 def _build_retry_session(max_retries: int) -> requests.Session:
@@ -118,37 +77,13 @@ def _raise_for_status_with_context(response: Any, service_name: str) -> None:
 
 
 def _perform_request(request_callable: Any, *, service_name: str) -> Any:
-    # #region debug-point A:sec-request-start
-    _debug_report(
-        "A",
-        "official_sec.py:_perform_request:start",
-        f"[DEBUG] SEC request start: {service_name}",
-        {"service_name": service_name},
-    )
-    # #endregion
     try:
         response = request_callable()
     except requests.RequestException as exc:
-        # #region debug-point C:sec-request-exception
-        _debug_report(
-            "C",
-            "official_sec.py:_perform_request:exception",
-            f"[DEBUG] SEC request exception: {service_name}",
-            {"service_name": service_name, "error": repr(exc)},
-        )
-        # #endregion
         record_api_call(service_name=service_name, success=False, status_code=None)
         raise
 
     status_code = getattr(response, "status_code", None)
-    # #region debug-point B:sec-request-finish
-    _debug_report(
-        "B",
-        "official_sec.py:_perform_request:finish",
-        f"[DEBUG] SEC request finish: {service_name}",
-        {"service_name": service_name, "status_code": status_code},
-    )
-    # #endregion
     record_api_call(
         service_name=service_name,
         success=bool(status_code is not None and 200 <= status_code < 400),

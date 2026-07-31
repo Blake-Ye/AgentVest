@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multi_agent.core.confidence_gate import ConfidenceGatePolicy
 from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
 from multi_agent.core.review_contracts import RepairAction, ReviewContract, ToolHealthSummary
+from multi_agent.evaluation import WorkflowEvaluation
 from multi_agent.tools.investment_tools import build_research_evidence_bundle
 
 
@@ -194,6 +195,121 @@ def test_gate_rejects_conflicting_formal_values_for_one_source_period(apple_bund
 
     assert result.final_decision == "blocked"
     assert "source_conflict" in result.blocking_reasons
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["cash_and_equivalents", "total_debt", "segment_revenue_services"],
+)
+def test_gate_blocks_cross_period_required_fact(apple_bundle, field_name: str) -> None:
+    bundle = _healthy_bundle(apple_bundle)
+    original = bundle.require_fact(field_name)
+    bundle.financial_facts = [
+        fact.model_copy(
+            update={
+                "fiscal_year": 2024,
+                "period_end": date(2024, 9, 28),
+                "accession": "0000320193-24-000081",
+            }
+        )
+        if fact is original
+        else fact
+        for fact in bundle.financial_facts
+    ]
+
+    result = ConfidenceGatePolicy.default().evaluate(bundle, _contract())
+
+    assert result.final_decision == "blocked"
+    assert "valuation_period_mismatch" in result.blocking_reasons
+
+
+def test_gate_blocks_duplicate_required_fact_even_when_values_match(apple_bundle) -> None:
+    bundle = _healthy_bundle(apple_bundle)
+    bundle.financial_facts.append(bundle.require_fact("revenue").model_copy(deep=True))
+
+    result = ConfidenceGatePolicy.default().evaluate(bundle, _contract())
+
+    assert result.final_decision == "blocked"
+    assert "ambiguous_financial_fact" in result.blocking_reasons
+
+
+def test_gate_blocks_quote_currency_mismatch(apple_bundle) -> None:
+    bundle = _healthy_bundle(apple_bundle)
+    bundle.market_snapshots[0] = bundle.market_snapshots[0].model_copy(
+        update={"currency": "EUR"}
+    )
+
+    result = ConfidenceGatePolicy.default().evaluate(bundle, _contract())
+
+    assert result.final_decision == "blocked"
+    assert "market_currency_mismatch" in result.blocking_reasons
+
+
+@pytest.mark.parametrize("invalid_case", ["negative_price", "invalid_source", "invalid_unit"])
+def test_gate_and_evaluation_reject_the_same_invalid_formal_evidence(
+    apple_bundle,
+    invalid_case: str,
+) -> None:
+    bundle = _healthy_bundle(apple_bundle)
+    if invalid_case == "negative_price":
+        bundle.market_snapshots[0] = bundle.market_snapshots[0].model_copy(
+            update={"price": -1.0}
+        )
+    elif invalid_case == "invalid_source":
+        bundle.market_snapshots[0] = bundle.market_snapshots[0].model_copy(
+            update={"source_url": "not-a-url"}
+        )
+    else:
+        revenue = bundle.require_fact("revenue")
+        bundle.financial_facts = [
+            fact.model_copy(update={"unit": "EUR"}) if fact is revenue else fact
+            for fact in bundle.financial_facts
+        ]
+        bundle.market_snapshots[0] = bundle.market_snapshots[0].model_copy(
+            update={"currency": "EUR"}
+        )
+
+    result = ConfidenceGatePolicy.default().evaluate(bundle, _contract())
+
+    assert result.final_decision == "blocked"
+    assert WorkflowEvaluation._formal_fact_provenance_complete(bundle) is False
+
+
+def test_gate_and_evaluation_accept_one_canonical_snapshot_among_stale_history(
+    apple_bundle,
+) -> None:
+    bundle = _healthy_bundle(apple_bundle)
+    valid_snapshot = bundle.market_snapshots[0]
+    bundle.market_snapshots.append(
+        valid_snapshot.model_copy(
+            update={
+                "currency": "EUR",
+                "diluted_shares_period_end": date(2024, 9, 28),
+            }
+        )
+    )
+
+    result = ConfidenceGatePolicy.default().evaluate(bundle, _contract())
+
+    assert result.final_decision == "passed"
+    assert WorkflowEvaluation._formal_fact_provenance_complete(bundle) is True
+
+
+def test_gate_and_evaluation_require_one_snapshot_to_meet_every_constraint(
+    apple_bundle,
+) -> None:
+    bundle = _healthy_bundle(apple_bundle)
+    valid_snapshot = bundle.market_snapshots[0]
+    bundle.market_snapshots = [
+        valid_snapshot.model_copy(update={"currency": "EUR"}),
+        valid_snapshot.model_copy(update={"source_url": "not-a-url"}),
+    ]
+
+    result = ConfidenceGatePolicy.default().evaluate(bundle, _contract())
+
+    assert result.final_decision == "blocked"
+    assert "invalid_market_snapshot" in result.blocking_reasons
+    assert WorkflowEvaluation._formal_fact_provenance_complete(bundle) is False
 
 
 def test_required_fields_remain_the_formal_gate_contract() -> None:

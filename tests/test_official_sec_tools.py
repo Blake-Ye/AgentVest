@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import pytest
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -63,6 +64,32 @@ def test_official_sec_service_matches_company_name_from_ticker_directory() -> No
     assert matches[0]["title"] == "Alibaba Group Holding Ltd"
     assert matches[0]["ticker"] == "BABA"
     assert session.requests[0][0] == "https://www.sec.gov/files/company_tickers.json"
+
+
+def test_official_sec_service_never_emits_local_debug_http(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    debug_dir = tmp_path / ".dbg"
+    debug_dir.mkdir()
+    (debug_dir / "apple-filing-stall.env").write_text(
+        "DEBUG_SERVER_URL=http://127.0.0.1:7777/event\n",
+        encoding="utf-8",
+    )
+    session = RecordingSession(
+        {
+            "https://www.sec.gov/files/company_tickers.json": {
+                "0": {"title": "Apple Inc.", "ticker": "AAPL", "cik_str": 320193}
+            }
+        }
+    )
+
+    matches = OfficialSecService(settings=build_settings(), session=session).search_companies_by_name(
+        "Apple"
+    )
+
+    assert matches[0]["ticker"] == "AAPL"
 
 
 def test_official_sec_service_builds_filings_from_official_submissions() -> None:

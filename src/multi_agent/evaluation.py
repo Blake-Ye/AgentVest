@@ -12,7 +12,10 @@ from typing import Any, Callable
 
 from multi_agent.core.delivery import DeliveryPackage, DeliveryValidator
 from multi_agent.core.evidence import ResearchEvidenceBundle
-from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
+from multi_agent.core.formal_gate import (
+    FORMAL_GATE_REQUIRED_FIELDS,
+    formal_delivery_evidence_complete,
+)
 from multi_agent.core.report_document import REQUIRED_SECTION_KEYS, ReportDocument
 from multi_agent.core.review_contracts import FinalDecisionRecord
 from multi_agent.recommendation import calculate_trust_score
@@ -460,18 +463,9 @@ class WorkflowEvaluation:
     def _formal_fact_provenance_complete(bundle: ResearchEvidenceBundle | None) -> bool:
         if bundle is None:
             return False
-        required_financial_fields = set(FORMAL_GATE_REQUIRED_FIELDS) - {"stock_price"}
-        facts_by_field = {
-            fact.field_name: fact for fact in bundle.financial_facts if fact.formal_eligible
-        }
-        return all(
-            field_name in facts_by_field
-            and bool(facts_by_field[field_name].source_url)
-            and bool(facts_by_field[field_name].period_end)
-            and bool(facts_by_field[field_name].accession)
-            and bool(facts_by_field[field_name].form)
-            and bool(facts_by_field[field_name].source_tag)
-            for field_name in required_financial_fields
+        return formal_delivery_evidence_complete(
+            bundle,
+            FORMAL_GATE_REQUIRED_FIELDS,
         )
 
     @staticmethod
