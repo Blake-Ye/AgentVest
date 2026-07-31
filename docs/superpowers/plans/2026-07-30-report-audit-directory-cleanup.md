@@ -110,7 +110,7 @@
 - Produces: an empty canonical `var/runs/` ready for new pipeline outputs and a clearly labeled legacy archive.
 
 - [x] **Step 1: Create checksummed external runtime and Git backups before moving files.**
-- [x] **Step 2: Ignore `var/`, `.dbg/`, and common Python test caches without ignoring tracked `.trae/` configuration.**
+- [x] **Step 2: Ignore `var/`, `.dbg/`, and common Python test caches.**
 - [x] **Step 3: Move old run directories into the legacy archive without changing contents.**
 - [x] **Step 4: Move debug outputs into the debug archive.**
 - [x] **Step 5: Keep the audit result in versioned `docs/`; keep runtime data untracked and ignored.**
