@@ -89,9 +89,9 @@
 - Produces: fast-forwarded `main` and no duplicate source checkout.
 
 - [x] **Step 1: Fast-forward `main` to `codex/complete-report-pipeline`.**
-- [ ] **Step 2: Remove the clean complete-report worktree.**
-- [ ] **Step 3: Delete the now-merged local feature branch.**
-- [ ] **Step 4: Verify `git worktree list` shows only the project root.**
+- [x] **Step 2: Remove the clean complete-report worktree.**
+- [x] **Step 3: Delete the now-merged local feature branch.**
+- [x] **Step 4: Verify `git worktree list` shows only the project root.**
 
 ### Task 5: Separate Runtime And Debug Artifacts
 
@@ -124,8 +124,8 @@
 - Consumes: consolidated `main` and separated runtime artifacts.
 - Produces: evidence that the source tree is clean and the canonical branch is testable.
 
-- [ ] **Step 1: Run focused report-contract and Apple pipeline tests.**
-- [ ] **Step 2: Run the full pytest suite.**
-- [ ] **Step 3: Run `git status --short --branch`.**
-- [ ] **Step 4: Run `git worktree list --porcelain`.**
-- [ ] **Step 5: Report compliance failures, archive locations, backup branch, and verification results.**
+- [x] **Step 1: Run focused report-contract and Apple pipeline tests (`49 passed`).**
+- [x] **Step 2: Run the full pytest suite (`322 passed`).**
+- [x] **Step 3: Run `git status --short --branch`.**
+- [x] **Step 4: Run `git worktree list --porcelain`.**
+- [x] **Step 5: Record compliance failures, archive locations, backup branch, and verification results.**
