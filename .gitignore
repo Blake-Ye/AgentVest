@@ -3,7 +3,16 @@
 .crewai-storage/
 .superpowers/
 .worktrees/
+.dbg/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 __pycache__/
+*.py[cod]
 .DS_Store
 artifacts/
 report.md
+var/

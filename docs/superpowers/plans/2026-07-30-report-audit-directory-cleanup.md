@@ -4,7 +4,7 @@
 
 **Goal:** Verify the latest generated reports against the complete-report contract and leave one canonical, clean source tree without losing historical code or runtime artifacts.
 
-**Architecture:** Preserve the dirty `main` workspace on a local backup branch, finish the isolated complete-report branch, then fast-forward `main` and remove the redundant worktree. Treat all existing Apple and Tesla outputs as legacy runtime data and archive them under ignored `var/archive/` rather than mixing them with future canonical runs.
+**Architecture:** Preserve the dirty `main` workspace on a local backup branch, finish the isolated complete-report branch, then fast-forward `main` and remove the redundant worktree. Treat existing Apple, Tesla, and Microsoft outputs as legacy runtime data and archive them under ignored `var/archive/` rather than mixing them with future canonical runs.
 
 **Tech Stack:** Git worktrees, Python 3.10+, pytest, CrewAI, JSON/Markdown report artifacts.
 
@@ -88,7 +88,7 @@
 - Consumes: clean `main` and clean `codex/complete-report-pipeline`.
 - Produces: fast-forwarded `main` and no duplicate source checkout.
 
-- [ ] **Step 1: Fast-forward `main` to `codex/complete-report-pipeline`.**
+- [x] **Step 1: Fast-forward `main` to `codex/complete-report-pipeline`.**
 - [ ] **Step 2: Remove the clean complete-report worktree.**
 - [ ] **Step 3: Delete the now-merged local feature branch.**
 - [ ] **Step 4: Verify `git worktree list` shows only the project root.**
@@ -109,11 +109,11 @@
 - Consumes: generated runtime files that currently appear in repository status.
 - Produces: an empty canonical `var/runs/` ready for new pipeline outputs and a clearly labeled legacy archive.
 
-- [ ] **Step 1: Create checksummed external runtime and Git backups before moving files.**
-- [ ] **Step 2: Ignore `var/`, `.dbg/`, and common Python test caches without ignoring tracked `.trae/` configuration.**
-- [ ] **Step 3: Move old run directories into the legacy archive without changing contents.**
-- [ ] **Step 4: Move debug outputs into the debug archive.**
-- [ ] **Step 5: Keep the audit result in versioned `docs/`; keep runtime data untracked and ignored.**
+- [x] **Step 1: Create checksummed external runtime and Git backups before moving files.**
+- [x] **Step 2: Ignore `var/`, `.dbg/`, and common Python test caches without ignoring tracked `.trae/` configuration.**
+- [x] **Step 3: Move old run directories into the legacy archive without changing contents.**
+- [x] **Step 4: Move debug outputs into the debug archive.**
+- [x] **Step 5: Keep the audit result in versioned `docs/`; keep runtime data untracked and ignored.**
 
 ### Task 6: Final Verification
 
