@@ -2352,6 +2352,33 @@ def test_analysis_review_guardrail_normalizes_known_reviewer_schema_drift() -> N
     assert '"description"' not in str(normalized_raw)
 
 
+def test_analysis_review_guardrail_drops_redundant_failure_flags() -> None:
+    payload = _typed_contract().model_dump(mode="json")
+    payload["failure_taxonomy"].update({
+        "research_blocked": False,
+        "pipeline_degraded": False,
+        "evidence_insufficient": False,
+        "market_mismatch": False,
+        "tool_failure": False,
+    })
+
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n```json\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n```\n"
+            "PART B: HUMAN_READABLE_MARKDOWN\n审查通过。"
+        )
+
+    accepted, normalized_raw = validate_analysis_review_output(Output())
+    contract = review_contract_from_text(str(normalized_raw), expected_stage="analysis_review")
+
+    assert accepted is True
+    assert contract is not None
+    assert contract.failure_taxonomy.primary_class == "none"
+    assert contract.failure_taxonomy.secondary_causes == []
+    assert "research_blocked" not in str(normalized_raw)
+
+
 def test_report_review_guardrail_lifts_unambiguous_fields_nested_in_decision() -> None:
     payload = _typed_report_contract().model_dump(mode="json")
     decision = payload["decision"]

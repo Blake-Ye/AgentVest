@@ -210,6 +210,13 @@ _TOOL_HEALTH_KEYS = {
     "notes",
     "tool_status",
 }
+_REDUNDANT_FAILURE_FLAGS = {
+    "research_blocked",
+    "pipeline_degraded",
+    "evidence_insufficient",
+    "market_mismatch",
+    "tool_failure",
+}
 
 
 def _tool_status(value: object) -> tuple[str, str]:
@@ -293,12 +300,15 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
             "primary_class": "none",
             "secondary_causes": [],
         }
-    elif (
-        normalized.get("stage") in {"report", "report_review"}
-        and isinstance(normalized.get("failure_taxonomy"), dict)
-    ):
+    elif isinstance(normalized.get("failure_taxonomy"), dict):
         taxonomy = dict(normalized["failure_taxonomy"])
-        if taxonomy.get("primary_class") == "minor_unbound_data_points":
+        for key in _REDUNDANT_FAILURE_FLAGS:
+            if isinstance(taxonomy.get(key), bool):
+                taxonomy.pop(key)
+        if (
+            normalized.get("stage") in {"report", "report_review"}
+            and taxonomy.get("primary_class") == "minor_unbound_data_points"
+        ):
             taxonomy["primary_class"] = "unsupported_claim"
         normalized["failure_taxonomy"] = taxonomy
 

@@ -106,6 +106,8 @@ data_quality_review_task:
     one_sentence_summary、operator_notes；repair_actions 每项仅含 target、code、fields、
     sources、instruction，禁止使用 description；artifact_refs 每项必须是对象，且对象内
     所有 value 必须是字符串，数值、布尔值或嵌套对象必须先转为字符串。
+    failure_taxonomy 仅含 primary_class、secondary_causes，禁止添加 research_blocked、
+    pipeline_degraded、evidence_insufficient、market_mismatch、tool_failure 等布尔解释字段。
     critical_conflict_count 表示检测到的冲突，只有尚未解决的关键冲突才能计入
     unresolved_critical_claim_count。针对 report_writing_analyst 的 repair action 只作为
     下游写作指令，不得要求分析阶段重跑。
