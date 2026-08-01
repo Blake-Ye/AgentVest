@@ -115,14 +115,37 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 model_tier_overrides=inputs.get("model_tier_overrides", {}),
                 rerun_targets=inputs.get("rerun_targets", []),
             )
-        targeted_crew = getattr(crew_factory, "targeted_analysis_crew", None)
         targets = inputs.get("rerun_targets", [])
-        if targets and callable(targeted_crew):
-            return targeted_crew(targets).kickoff(inputs=inputs)
+        review_crew = getattr(crew_factory, "analysis_review_crew", None)
+        targeted_crew = getattr(crew_factory, "targeted_analysis_crew", None)
         analysis_crew = getattr(crew_factory, "analysis_crew", None)
-        if callable(analysis_crew):
-            return analysis_crew().kickoff(inputs=inputs)
-        return crew_factory.crew().kickoff(inputs=inputs)
+        if not callable(review_crew):
+            if targets and callable(targeted_crew):
+                return targeted_crew(targets).kickoff(inputs=inputs)
+            if callable(analysis_crew):
+                return analysis_crew().kickoff(inputs=inputs)
+            return crew_factory.crew().kickoff(inputs=inputs)
+
+        producer_targets = [
+            target for target in targets if target in self._EVIDENCE_PRODUCER_TARGETS
+        ]
+        if producer_targets:
+            if not callable(targeted_crew):
+                raise ValueError("targeted analysis crew is unavailable")
+            producer_result = targeted_crew(producer_targets).kickoff(inputs=inputs)
+            self._ingest_typed_analysis_result(producer_result)
+        elif not targets:
+            if not callable(analysis_crew):
+                raise ValueError("analysis crew is unavailable")
+            producer_result = analysis_crew().kickoff(inputs=inputs)
+            self._ingest_typed_analysis_result(producer_result)
+
+        self._evidence_bundle_for_gate()
+        reviewer_inputs = dict(inputs)
+        reviewer_inputs["review_evidence_context_json"] = (
+            self._review_evidence_context_json()
+        )
+        return review_crew().kickoff(inputs=reviewer_inputs)
 
     def _typed_run(self) -> bool:
         return self.state.execution_mode == "new"
@@ -348,184 +371,6 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             return ReviewToolSummary.model_validate(raw_summary)
         except Exception:
             return None
-
-    @classmethod
-    def _normalized_delivery_state(cls, value: Any) -> str | None:
-        normalized = str(value or "").strip().lower()
-        if not normalized:
-            return None
-        if normalized in {"formal_report", "formal"}:
-            return "formal_report"
-        if normalized in {"evidence_limited", "evidence_limited_report", "limited"}:
-            return "evidence_limited_report"
-        if normalized in {"blocked_notice", "blocked", "block"}:
-            return "blocked_notice"
-        return None
-
-    @classmethod
-    def _normalize_machine_readable_review_contract_payload(
-        cls, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        normalized = dict(payload)
-
-        if "stage" not in normalized and "review_stage" not in normalized:
-            if any(key in normalized for key in ("report_mode_detected", "mode_consistent", "report_overreach")):
-                normalized["review_stage"] = "report"
-            else:
-                normalized["review_stage"] = "analysis_review"
-
-        raw_decision = normalized.get("decision")
-        raw_delivery = normalized.get("delivery_eligibility")
-        if not isinstance(raw_delivery, dict):
-            raw_delivery = {}
-        else:
-            formal_delivery = raw_delivery.get("formal_report")
-            limited_delivery = raw_delivery.get("evidence_limited_report")
-            blocked_delivery = raw_delivery.get("blocked_notice")
-            if any(
-                isinstance(item, dict)
-                for item in (formal_delivery, limited_delivery, blocked_delivery)
-            ):
-                flattened_delivery: dict[str, Any] = {}
-                if isinstance(formal_delivery, dict):
-                    flattened_delivery["formal_report_allowed"] = bool(
-                        formal_delivery.get("allowed")
-                    )
-                    reason = str(formal_delivery.get("reason", "")).strip()
-                    if reason:
-                        flattened_delivery["formal_block_reasons"] = [reason]
-                if isinstance(limited_delivery, dict):
-                    flattened_delivery["evidence_limited_report_allowed"] = bool(
-                        limited_delivery.get("allowed")
-                    )
-                    reason = str(limited_delivery.get("reason", "")).strip()
-                    if reason:
-                        flattened_delivery["evidence_limited_rationale"] = reason
-                if isinstance(blocked_delivery, dict):
-                    flattened_delivery["blocked_notice_required"] = bool(
-                        blocked_delivery.get("required")
-                    )
-                    reason = str(blocked_delivery.get("reason", "")).strip()
-                    if reason:
-                        flattened_delivery["blocked_notice_reason"] = reason
-                raw_delivery = flattened_delivery
-
-        if isinstance(raw_decision, dict):
-            if not raw_delivery:
-                raw_delivery = {
-                    key: raw_decision[key]
-                    for key in (
-                        "formal_report_allowed",
-                        "evidence_limited_report_allowed",
-                        "blocked_notice_required",
-                        "recommended_delivery_state",
-                    )
-                    if key in raw_decision
-                }
-            if "primary_class" in raw_decision and "failure_taxonomy" not in normalized:
-                normalized["failure_taxonomy"] = {"primary_class": raw_decision["primary_class"]}
-            gate_outcome = raw_decision.get("gate_outcome")
-        elif isinstance(raw_decision, str):
-            gate_outcome = raw_decision
-        else:
-            gate_outcome = None
-
-        raw_failure_taxonomy = normalized.get("failure_taxonomy")
-        if isinstance(raw_failure_taxonomy, dict) and not any(
-            key in raw_failure_taxonomy for key in ("primary_class", "primary_code")
-        ):
-            secondary_causes = [
-                key
-                for key, value in raw_failure_taxonomy.items()
-                if isinstance(value, bool) and value and key != "research_blocked"
-            ]
-            if raw_failure_taxonomy.get("research_blocked") is True:
-                primary_class = "research_blocked"
-            elif any(
-                raw_failure_taxonomy.get(key) is True
-                for key in ("tool_failure", "financial_data_incomplete")
-            ):
-                primary_class = "pipeline_degraded"
-            elif raw_failure_taxonomy.get("critical_conflict") is True:
-                primary_class = "critical_conflict"
-            elif raw_failure_taxonomy.get("market_policy_violation") is True:
-                primary_class = "policy_violation"
-            elif raw_failure_taxonomy.get("unsupported_critical_claim") is True:
-                primary_class = "unsupported_claim"
-            else:
-                primary_class = "none"
-            normalized["failure_taxonomy"] = {
-                "primary_class": primary_class,
-                "secondary_causes": secondary_causes,
-            }
-
-        recommended_delivery_state = cls._normalized_delivery_state(
-            raw_delivery.get("recommended_delivery_state")
-        )
-        if recommended_delivery_state is None:
-            recommended_delivery_state = cls._normalized_delivery_state(
-                raw_decision.get("recommended_delivery_state") if isinstance(raw_decision, dict) else None
-            )
-        if recommended_delivery_state is not None:
-            raw_delivery["recommended_delivery_state"] = recommended_delivery_state
-        if raw_delivery:
-            normalized["delivery_eligibility"] = raw_delivery
-
-        normalized_gate_outcome = str(gate_outcome or "").strip().lower()
-        if normalized_gate_outcome in {"pass", "passed"}:
-            normalized["decision"] = {"gate_outcome": "pass", "decision_confidence": "medium"}
-        elif normalized_gate_outcome in {"block", "blocked"}:
-            normalized["decision"] = {"gate_outcome": "block", "decision_confidence": "medium"}
-        elif normalized_gate_outcome == "rerun":
-            normalized["decision"] = {"gate_outcome": "rerun", "decision_confidence": "medium"}
-        else:
-            normalized["decision"] = {"gate_outcome": "rerun", "decision_confidence": "medium"}
-
-        raw_review_summary = normalized.get("review_summary")
-        if isinstance(raw_review_summary, str):
-            normalized["review_summary"] = {
-                "one_sentence_summary": raw_review_summary,
-                "operator_notes": "",
-            }
-
-        artifact_refs = normalized.get("artifact_refs")
-        if isinstance(artifact_refs, list) and artifact_refs and all(
-            isinstance(item, str) for item in artifact_refs
-        ):
-            normalized["artifact_refs"] = [{"artifact": item} for item in artifact_refs]
-
-        rerun_reasons = normalized.get("rerun_reasons")
-        if isinstance(rerun_reasons, list) and rerun_reasons:
-            normalized["rerun_reasons"] = [
-                item.get("action", str(item)).strip() if isinstance(item, dict) else str(item).strip()
-                for item in rerun_reasons
-                if str(item).strip()
-            ]
-
-        tool_health = normalized.get("tool_health")
-        if isinstance(tool_health, dict) and "overall_status" not in tool_health:
-            failed_tools = sorted(
-                tool_name
-                for tool_name, status in tool_health.items()
-                if str(status).strip().lower() == "failed"
-            )
-            degraded_tools = sorted(
-                tool_name
-                for tool_name, status in tool_health.items()
-                if str(status).strip().lower() == "degraded"
-            )
-            overall_status = "failed" if failed_tools else "degraded" if degraded_tools else "healthy"
-            normalized["tool_health"] = {
-                "overall_status": overall_status,
-                "failed_tools": failed_tools,
-                "degraded_tools": degraded_tools,
-                "tool_status": [
-                    {"tool_name": str(tool_name), "status": str(status)}
-                    for tool_name, status in tool_health.items()
-                ],
-            }
-
-        return normalized
 
     @classmethod
     def _machine_readable_review_contract_from_text(
@@ -1089,7 +934,11 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 blocking_reasons=["report_review_contract_invalid"],
             )
         self.state.report_review_contract = contract
-        if contract.decision.gate_outcome == "block":
+        if (
+            contract.decision.gate_outcome == "block"
+            or contract.delivery_eligibility.blocked_notice_required
+            or contract.blocking_reasons
+        ):
             self.state.report_document = None
             return GateDecision(
                 passed=False,
@@ -1097,7 +946,11 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 trust_score=0,
                 blocking_reasons=["logic_reviewer_requested_block", *contract.blocking_reasons],
             )
-        if contract.decision.gate_outcome == "rerun":
+        if (
+            contract.decision.gate_outcome == "rerun"
+            or contract.rerun_reasons
+            or contract.repair_actions
+        ):
             return GateDecision(
                 passed=False,
                 final_decision="rerun",
@@ -1246,13 +1099,23 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         actionable_gaps: list[dict[str, object]] = []
         seen_gaps: set[tuple[object, ...]] = set()
         for gap in bundle.gaps:
-            if gap.code == "rejected_financial_fact":
-                continue
             key = (gap.code, gap.target, tuple(gap.fields), tuple(gap.sources))
             if key in seen_gaps:
                 continue
             seen_gaps.add(key)
             actionable_gaps.append(gap.model_dump(mode="json"))
+        analysis_artifacts = self._materialized_analysis_artifacts()
+        valid_evidence_refs = sorted({
+            *(f"claim:{fact.field_name}" for fact in bundle.financial_facts),
+            *(fact.source_url for fact in bundle.financial_facts if fact.source_url),
+            *(f"market:{index}" for index, _ in enumerate(bundle.market_snapshots)),
+            *(snapshot.source_url for snapshot in bundle.market_snapshots),
+            *(f"event:{event.event_id}" for event in bundle.events),
+            *(event.source_url for event in bundle.events),
+            *bundle.raw_artifact_refs,
+            *analysis_artifacts,
+            "10_research_evidence.json",
+        })
         payload = {
             "company_name": bundle.company_name,
             "ticker": bundle.ticker,
@@ -1267,7 +1130,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             "tool_health": [item.model_dump(mode="json") for item in bundle.tool_health],
             "actionable_gaps": actionable_gaps,
             "artifact_refs": list(bundle.raw_artifact_refs),
-            "analysis_artifacts": self._materialized_analysis_artifacts(),
+            "analysis_artifacts": analysis_artifacts,
+            "valid_evidence_refs": valid_evidence_refs,
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -1759,4 +1623,4 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
 
     @listen(review_blocked_report)
     def finalize_blocked_report_delivery(self, report_gate: GateDecision) -> Any:
-        return self._finalize(report_gate)
+        return self.finalize_delivery(report_gate)

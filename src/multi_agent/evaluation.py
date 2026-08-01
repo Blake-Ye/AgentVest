@@ -273,6 +273,9 @@ class WorkflowEvaluation:
             effective_success = success and limited_delivery_complete
         else:
             effective_success = False
+        if not effective_success:
+            report_generated = False
+            report_complete = False
         semantic_error = (
             "formal_delivery_semantic_validation_failed"
             if success and final_decision == "passed" and not formal_delivery_complete

@@ -98,12 +98,12 @@ class FailureTaxonomy(BaseModel):
 class CoverageSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    evidence_coverage_ratio: float = 0.0
-    financial_coverage_score: float = 0.0
-    claim_binding_ratio: float = 1.0
-    gate_financial_coverage_score: float | None = None
-    critical_conflict_count: int = 0
-    unresolved_critical_claim_count: int = 0
+    evidence_coverage_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
+    financial_coverage_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    claim_binding_ratio: float = Field(default=1.0, ge=0.0, le=1.0)
+    gate_financial_coverage_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    critical_conflict_count: int = Field(default=0, ge=0)
+    unresolved_critical_claim_count: int = Field(default=0, ge=0)
     market_policy_violations: list[str] = Field(default_factory=list)
     unsupported_critical_claims: list[str] = Field(default_factory=list)
     blocking_reasons: list[str] = Field(default_factory=list)
@@ -175,6 +175,25 @@ class ReviewContract(BaseModel):
     artifact_refs: list[dict[str, str]] = Field(default_factory=list)
     findings: list[dict[str, object]] = Field(default_factory=list)
     repair_actions: list[RepairAction] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_repair_targets_for_stage(self) -> "ReviewContract":
+        analysis_targets = {
+            "market_validation_analyst",
+            "event_guidance_analyst",
+            "fundamental_analyst",
+            "quant_valuation_analyst",
+            "report_writing_analyst",
+            "data_quality_reviewer",
+        }
+        report_targets = {"report_writing_analyst"}
+        allowed = report_targets if self.stage in {"report", "report_review"} else analysis_targets
+        invalid = sorted({action.target for action in self.repair_actions} - allowed)
+        if invalid:
+            raise ValueError(
+                f"repair target is invalid for stage {self.stage}: {', '.join(invalid)}"
+            )
+        return self
 
     def to_review_tool_summary(self) -> ReviewToolSummary:
         return self.coverage_summary.to_review_tool_summary()

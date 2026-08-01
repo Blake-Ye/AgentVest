@@ -57,6 +57,7 @@ def test_multi_agent_crew_has_three_specialists(
 
     event_agent = next(agent for agent in crew.agents if "事件与指引分析师" in agent.role)
     tavily_tool = next(tool for tool in event_agent.tools if tool.name == "Tavily Search Intelligence")
+    assert "SEC Filing Content" in [tool.name for tool in event_agent.tools]
     assert tavily_tool.args_schema is TavilySearchInput
     assert {"query", "topic", "market_label", "company_name"}.issubset(
         tavily_tool.args_schema.model_fields.keys()
@@ -70,6 +71,7 @@ def test_multi_agent_crew_has_three_specialists(
     fundamental_agent = next(agent for agent in crew.agents if "基本面分析师" in agent.role)
     fundamental_tool_names = [tool.name for tool in fundamental_agent.tools]
     assert "SEC Filing Search" in fundamental_tool_names
+    assert "SEC Filing Content" in fundamental_tool_names
     assert "SEC Company Facts" in fundamental_tool_names
 
     quant_agent = next(agent for agent in crew.agents if "估值分析师" in agent.role)
@@ -160,11 +162,22 @@ def test_evidence_coverage_tool_flags_unsupported_claims() -> None:
         claims=[
             {"claim": "营收增速改善", "evidence_refs": ["news-1"]},
             {"claim": "利润率显著扩张", "evidence_refs": []},
-        ]
+        ],
+        valid_evidence_refs=["news-1"],
     )
 
     assert result["evidence_coverage_ratio"] == 0.5
     assert result["unsupported_claims"] == ["利润率显著扩张"]
+
+
+def test_evidence_coverage_tool_rejects_unknown_references() -> None:
+    result = EvidenceCoverageTool()._run(
+        claims=[{"claim": "无来源结论", "evidence_refs": ["invented-ref"]}],
+        valid_evidence_refs=["claim:revenue"],
+    )
+
+    assert result["evidence_coverage_ratio"] == 0.0
+    assert result["unsupported_claims"] == ["无来源结论"]
 
 
 def test_evidence_coverage_tool_schema_requires_explicit_claim_fields() -> None:
@@ -243,10 +256,11 @@ def test_flow_crews_preserve_seven_agent_topology_and_allow_targeted_override(
         rerun_targets=["quant_valuation_analyst"],
     )
 
-    assert len(workflow.analysis_crew().tasks) == 5
+    assert len(workflow.analysis_crew().tasks) == 4
+    assert len(workflow.analysis_review_crew().tasks) == 1
     assert len(workflow.report_crew().tasks) == 2
     assert len(workflow.crew().tasks) == 7
-    assert len(workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks) == 2
+    assert len(workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks) == 1
     assert workflow.quant_valuation_analyst().llm.model == "deep-model"
 
 
@@ -264,13 +278,10 @@ def test_targeted_financial_repair_preserves_current_task_context_chain(
     targeted_tasks = MultiAgent().targeted_analysis_crew(["quant_valuation_analyst"]).tasks
     tasks_by_output = {Path(task.output_file).name: task for task in targeted_tasks}
     financial = tasks_by_output["03_financial_analysis.md"]
-    reviewer = tasks_by_output["08_data_quality_review.md"]
-
     assert financial.context == []
-    assert reviewer.context == [financial]
 
 
-def test_targeted_reviewer_context_excludes_prior_analysis_task_instances(
+def test_analysis_reviewer_runs_in_a_separate_context_free_crew(
     monkeypatch: pytest.MonkeyPatch, writable_crewai_storage: Path
 ) -> None:
     monkeypatch.setenv("FAST_MODEL", "fast-model")
@@ -282,14 +293,16 @@ def test_targeted_reviewer_context_excludes_prior_analysis_task_instances(
     monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
 
     workflow = MultiAgent()
-    prior_analysis_tasks = workflow.analysis_crew().tasks
-    targeted_tasks = workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks
-    financial = next(task for task in targeted_tasks if Path(task.output_file).name == "03_financial_analysis.md")
-    reviewer = next(task for task in targeted_tasks if Path(task.output_file).name == "08_data_quality_review.md")
+    producer_tasks = workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks
+    reviewer_tasks = workflow.analysis_review_crew().tasks
 
-    assert reviewer.context == [financial]
-    assert all(context in targeted_tasks for context in reviewer.context)
-    assert all(context not in prior_analysis_tasks for context in reviewer.context)
+    assert [Path(task.output_file).name for task in producer_tasks] == [
+        "03_financial_analysis.md"
+    ]
+    assert [Path(task.output_file).name for task in reviewer_tasks] == [
+        "08_data_quality_review.md"
+    ]
+    assert reviewer_tasks[0].context == []
 
 
 def test_targeted_reviewer_has_stable_task_name_for_metrics(
@@ -313,13 +326,13 @@ def test_targeted_reviewer_has_stable_task_name_for_metrics(
 @pytest.mark.parametrize(
     ("target", "expected_outputs"),
     (
-        ("market_validation_analyst", ("00_market_validation.md", "08_data_quality_review.md")),
-        ("event_guidance_analyst", ("01_market_intelligence.md", "08_data_quality_review.md")),
-        ("fundamental_analyst", ("02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
-        ("quant_valuation_analyst", ("03_financial_analysis.md", "08_data_quality_review.md")),
+        ("market_validation_analyst", ("00_market_validation.md",)),
+        ("event_guidance_analyst", ("01_market_intelligence.md",)),
+        ("fundamental_analyst", ("02_filing_review.md", "03_financial_analysis.md")),
+        ("quant_valuation_analyst", ("03_financial_analysis.md",)),
     ),
 )
-def test_targeted_evidence_repairs_include_producers_and_current_reviewer(
+def test_targeted_evidence_repairs_run_only_required_producers(
     target: str,
     expected_outputs: tuple[str, ...],
     monkeypatch: pytest.MonkeyPatch,
@@ -336,8 +349,6 @@ def test_targeted_evidence_repairs_include_producers_and_current_reviewer(
     tasks = MultiAgent().targeted_analysis_crew([target]).tasks
 
     assert tuple(Path(task.output_file).name for task in tasks) == expected_outputs
-    reviewer = tasks[-1]
-    assert reviewer.context == tasks[:-1]
     if target in {"fundamental_analyst", "quant_valuation_analyst"}:
         quant_task = next(task for task in tasks if Path(task.output_file).name == "03_financial_analysis.md")
         assert "Financial Metrics Calculator" in [tool.name for tool in quant_task.agent.tools]

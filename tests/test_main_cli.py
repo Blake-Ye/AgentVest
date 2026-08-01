@@ -758,8 +758,9 @@ def test_run_backfills_standard_output_files_when_crew_does_not_write_files(
     assert "数据质量审查" in (run_dir / "08_data_quality_review.md").read_text(encoding="utf-8")
     assert "逻辑与合规审查" in (run_dir / "09_logic_compliance_review.md").read_text(encoding="utf-8")
     latest_metrics = (run_dir / "latest_run_metrics.json").read_text(encoding="utf-8")
-    assert '"report_generated": true' in latest_metrics
-    assert '"report_complete": true' in latest_metrics
+    assert '"report_generated": false' in latest_metrics
+    assert '"report_complete": false' in latest_metrics
+    assert '"error_message": "formal_delivery_semantic_validation_failed"' in latest_metrics
 
 
 def test_run_writes_blocked_outputs_when_gate_fails(

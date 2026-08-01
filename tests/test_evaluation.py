@@ -294,6 +294,28 @@ def test_blocked_notice_is_not_counted_as_successful_complete_report(tmp_path: P
     assert metrics["report_complete"] is False
 
 
+def test_failed_run_placeholder_is_not_a_complete_high_trust_report(tmp_path: Path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    report = artifacts_dir / "04_investment_report.md"
+    report.write_text("# 投资备忘录\n\n状态：运行失败。", encoding="utf-8")
+    evaluator = WorkflowEvaluation(
+        artifacts_dir=artifacts_dir,
+        final_report_path=report,
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        time_source=StepClock([0.0, 1.0]),
+    )
+
+    evaluator.start()
+    metrics = evaluator.finalize(success=False, error_message="workflow failed")
+
+    assert metrics["report_generated"] is False
+    assert metrics["report_complete"] is False
+    assert metrics["trust_score"]["score"] == 0.0
+
+
 def test_formal_fact_provenance_requires_auditable_stock_price_snapshot() -> None:
     common = {
         "unit": "USD",

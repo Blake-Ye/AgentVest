@@ -2437,6 +2437,32 @@ def test_typed_flow_blocks_malformed_or_rejecting_logic_review() -> None:
     assert "logic_reviewer_requested_block" in result["blocking_reasons"]
 
 
+def test_typed_report_gate_does_not_ignore_blockers_on_pass_contract() -> None:
+    bundle = _typed_bundle()
+    review = _typed_report_contract().model_dump(mode="json")
+    review["blocking_reasons"] = ["claim_binding_incomplete"]
+    flow = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": _typed_contract().model_dump(mode="json"),
+        },
+        report_writer=lambda _context: _typed_writer_payload(),
+        report_reviewer=lambda _document: review,
+        initial_state=MarketReviewFlowState(
+            request_id="typed-pass-with-blocker",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            execution_mode="new",
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "blocked"
+    assert "claim_binding_incomplete" in result["blocking_reasons"]
+
+
 def test_typed_report_rework_passes_strict_feedback_to_second_writer() -> None:
     bundle = _typed_bundle()
     writer_inputs: list[dict[str, object]] = []
@@ -2488,6 +2514,47 @@ def test_typed_report_rework_passes_strict_feedback_to_second_writer() -> None:
     assert len(reviewed_documents) == 2
     assert reviewed_documents[0].executive_summary != reviewed_documents[1].executive_summary
     assert reviewed_documents[1].executive_summary == "已根据逻辑审查反馈重新绑定收入来源。"
+
+
+def test_blocked_notice_report_uses_the_same_repair_loop() -> None:
+    bundle = _typed_bundle()
+    writer_calls = 0
+    reviews = iter([
+        _typed_report_contract(outcome="rerun").model_dump(mode="json"),
+        _typed_report_contract().model_dump(mode="json"),
+    ])
+
+    def writer(_inputs: dict[str, object]) -> dict[str, object]:
+        nonlocal writer_calls
+        writer_calls += 1
+        payload = _typed_writer_payload()
+        payload.update({
+            "stance": "blocked",
+            "executive_summary": "当前证据存在阻断，不能形成投资建议。",
+            "catalysts": [],
+            "risks": ["关键证据仍待补齐。"],
+        })
+        return payload
+
+    result = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": _typed_contract(outcome="block").model_dump(mode="json"),
+        },
+        report_writer=writer,
+        report_reviewer=lambda _document: next(reviews),
+        initial_state=MarketReviewFlowState(
+            request_id="typed-blocked-rework",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            execution_mode="new",
+            rerun_budget={"report_writing_analyst": 1},
+        ),
+    ).kickoff()
+
+    assert result["status"] == "blocked"
+    assert writer_calls == 2
 
 
 def test_analysis_review_defers_report_writer_action_to_report_generation() -> None:
@@ -2642,6 +2709,51 @@ def test_evidence_producer_rerun_reloads_fresh_bundle_for_next_gate(
     assert ResearchEvidenceBundle.model_validate_json(evidence_path.read_text(encoding="utf-8")) == fresh_bundle
 
 
+def test_real_crew_reviews_the_bundle_created_by_the_producer_phase(tmp_path: Path) -> None:
+    bundle = _typed_bundle()
+    evidence_path = tmp_path / "10_research_evidence.json"
+    reviewer_inputs: list[dict[str, object]] = []
+
+    class FakeCrew:
+        def __init__(self, phase: str) -> None:
+            self.phase = phase
+
+        def kickoff(self, *, inputs: dict[str, object]) -> object:
+            if self.phase == "producer":
+                evidence_path.write_text(bundle.model_dump_json(), encoding="utf-8")
+            else:
+                reviewer_inputs.append(dict(inputs))
+            return object()
+
+    class FakeCrewFactory:
+        def configure_run(self, **_kwargs: object) -> None:
+            pass
+
+        def analysis_crew(self) -> FakeCrew:
+            return FakeCrew("producer")
+
+        def analysis_review_crew(self) -> FakeCrew:
+            return FakeCrew("reviewer")
+
+    flow = MarketReviewFlow(
+        crew_factory=FakeCrewFactory(),
+        initial_state=MarketReviewFlowState(
+            request_id="split-review-context",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            execution_mode="new",
+            artifacts_dir=str(tmp_path),
+        ),
+    )
+
+    flow._execute_existing_crew({"rerun_targets": [], "review_evidence_context_json": "{}"})
+
+    context = json.loads(str(reviewer_inputs[0]["review_evidence_context_json"]))
+    assert context["ticker"] == "AAPL"
+    assert context["financial_facts"]
+    assert "claim:revenue" in context["valid_evidence_refs"]
+
+
 def test_event_rerun_reloads_fresh_canonical_bundle_from_crewai_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -2794,22 +2906,14 @@ def test_reviewer_only_context_keeps_materialized_analysis_artifacts(tmp_path: P
     assert context["analysis_artifacts"]["03_financial_analysis.md"] == "FY2026 H1 data extracted"
 
 
-@pytest.mark.parametrize(
-    ("target", "reason"),
-    (
-        ("logic_compliance_reviewer", "invalid_repair_phase:logic_compliance_reviewer"),
-    ),
-)
-def test_analysis_rerun_rejects_non_analysis_repair_targets(target: str, reason: str) -> None:
+def test_analysis_contract_rejects_non_analysis_target_after_reviewer_retry() -> None:
     bundle = _typed_bundle()
-    contract = _typed_contract(
-        outcome="rerun",
-        actions=[{
-            "target": target,
-            "code": "wrong_phase",
-            "instruction": "不应由分析 rerun 执行。",
-        }],
-    )
+    contract = _typed_contract(outcome="rerun").model_dump(mode="json")
+    contract["repair_actions"] = [{
+        "target": "logic_compliance_reviewer",
+        "code": "wrong_phase",
+        "instruction": "不应由分析 rerun 执行。",
+    }]
     executor_calls = 0
 
     def executor(_inputs: dict[str, object]) -> dict[str, object]:
@@ -2817,20 +2921,20 @@ def test_analysis_rerun_rejects_non_analysis_repair_targets(target: str, reason:
         executor_calls += 1
         return {
             "evidence_bundle": bundle.model_dump(mode="json"),
-            "analysis_review_contract": contract.model_dump(mode="json"),
+            "analysis_review_contract": contract,
         }
 
     result = MarketReviewFlow(
         analysis_executor=executor,
         initial_state=MarketReviewFlowState(
-            request_id=f"invalid-{target}", company_name="Apple Inc.", input_ticker="AAPL",
-            execution_mode="new", rerun_budget={target: 1},
+            request_id="invalid-review-phase", company_name="Apple Inc.", input_ticker="AAPL",
+            execution_mode="new", rerun_budget={"analysis": 1},
         ),
     ).kickoff()
 
     assert result["status"] == "blocked"
-    assert reason in result["blocking_reasons"]
-    assert executor_calls == 1
+    assert "invalid_review_contract" in result["blocking_reasons"]
+    assert executor_calls == 2
 
 
 def test_analysis_rerun_rejects_unknown_repair_target_before_executor() -> None:

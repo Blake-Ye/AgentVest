@@ -4,6 +4,7 @@ from multi_agent.tools.investment_tools import (
     FinancialMetricsTool,
     PDFTextExtractTool,
     SecCompanyFactsTool,
+    SecFilingContentTool,
     SecFilingSearchTool,
 )
 from multi_agent.tools.official_sec import FatalAPIError, OfficialSecService
@@ -17,6 +18,7 @@ __all__ = [
     "OfficialSecService",
     "PDFTextExtractTool",
     "SecCompanyFactsTool",
+    "SecFilingContentTool",
     "SecFilingSearchTool",
     "TavilySearchTool",
 ]

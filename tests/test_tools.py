@@ -14,6 +14,7 @@ from multi_agent.tools.investment_tools import (
     FileWriteTool,
     FinancialMetricsTool,
     SecCompanyFactsTool,
+    SecFilingContentTool,
     SecFilingSearchTool,
     build_research_evidence_bundle,
     _extract_latest_fact,
@@ -185,6 +186,33 @@ def test_tavily_does_not_confirm_unrelated_events_across_domains(
     assert any(gap.code == "independent_event_sources_insufficient" for gap in bundle.gaps)
 
 
+def test_tavily_uses_query_as_fallback_corroboration_key(
+    apple_sources: dict[str, object],
+) -> None:
+    sources = deepcopy(apple_sources)
+    sources["tavily_payloads"] = [{
+        "status": "ok",
+        "query": "Apple CEO succession official confirmation",
+        "results": [
+            {
+                "title": "Apple names its next chief executive",
+                "url": "https://news.example.com/apple-ceo",
+                "source_type": "news",
+            },
+            {
+                "title": "Leadership transition announced at Apple",
+                "url": "https://wire.example.net/apple-leadership",
+                "source_type": "news",
+            },
+        ],
+    }]
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    assert bundle.tool_status("tavily") == "healthy"
+    assert all(event.independently_confirmed for event in bundle.events)
+
+
 def test_tavily_subdomains_of_one_publisher_do_not_confirm_event(
     apple_sources: dict[str, object],
 ) -> None:
@@ -346,6 +374,24 @@ def test_tool_metadata_can_remain_english() -> None:
     assert "Search Tavily" in tavily_tool.description
     assert filing_tool.name == "SEC Filing Search"
     assert "official SEC endpoints" in filing_tool.description
+
+
+def test_sec_filing_content_tool_returns_compact_source_bound_text() -> None:
+    class StubFilingContentService:
+        def fetch_filing_html(self, _url: str) -> str:
+            return "<html><script>ignore()</script><body><h1>Item 5.02</h1><p>CEO transition announced.</p></body></html>"
+
+    tool = SecFilingContentTool(
+        settings=build_settings(), service=StubFilingContentService()
+    )
+    result = json.loads(tool._run(
+        "https://www.sec.gov/Archives/edgar/data/320193/example.htm",
+        max_chars=200,
+    ))
+
+    assert result["source_url"].startswith("https://www.sec.gov/Archives/")
+    assert "Item 5.02 CEO transition announced." in result["text"]
+    assert "ignore" not in result["text"]
 
 
 def test_file_write_tool_persists_artifact(tmp_path: Path) -> None:

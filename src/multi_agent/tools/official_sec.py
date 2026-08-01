@@ -5,6 +5,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -227,6 +228,25 @@ class OfficialSecService:
 
         return normalized_results
 
+    def fetch_filing_html(self, filing_url: str) -> str:
+        parsed = urlparse(filing_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "www.sec.gov"
+            or not parsed.path.startswith("/Archives/edgar/data/")
+        ):
+            raise ValueError("filing_url must be an official SEC EDGAR archive document")
+        response = _perform_request(
+            lambda: self.session.get(
+                filing_url,
+                headers=self._sec_headers(),
+                timeout=self.settings.http_timeout_seconds,
+            ),
+            service_name="SEC Filing HTML",
+        )
+        _raise_for_status_with_context(response, service_name="SEC Filing HTML")
+        return str(response.text)
+
     def _fetch_latest_report(
         self, ticker: str, *, form_types: tuple[str, ...]
     ) -> dict[str, str]:
@@ -243,17 +263,8 @@ class OfficialSecService:
             key=lambda item: (item.get("report_date", ""), item.get("filed_at", "")),
         )
         filing_url = filing["filing_url"]
-        response = _perform_request(
-            lambda: self.session.get(
-                filing_url,
-                headers=self._sec_headers(),
-                timeout=self.settings.http_timeout_seconds,
-            ),
-            service_name="SEC Filing HTML",
-        )
-        _raise_for_status_with_context(response, service_name="SEC Filing HTML")
         return {
-            "html": response.text,
+            "html": self.fetch_filing_html(filing_url),
             "source_url": filing_url,
             "accession": filing.get("accession_no", ""),
             "filed_at": filing.get("filed_at", ""),

@@ -45,6 +45,17 @@ def test_financial_field_completeness_uses_canonical_gate_required_fields() -> N
     assert result["gate_missing_fields"] == ["stock_price"]
 
 
+def test_financial_field_completeness_cannot_return_full_gate_score_for_empty_input() -> None:
+    result = FinancialFieldCompletenessTool()._run(
+        required_fields=[],
+        extracted_fields={},
+    )
+
+    assert result["gate_required_field_count"] == len(FORMAL_GATE_REQUIRED_FIELDS)
+    assert result["gate_financial_coverage_score"] == 0.0
+    assert result["gate_missing_fields"] == list(FORMAL_GATE_REQUIRED_FIELDS)
+
+
 def test_legacy_review_contract_requires_explicit_adapter() -> None:
     contract = parse_legacy_review_contract(
         {

@@ -76,6 +76,8 @@ data_quality_review_task:
     使用当前 Crew 的上游 task context：{review_evidence_context_json}。
     不得自行构造 claims、evidence_refs、工具名称或财务字段；所有 reviewer tool 参数必须
     逐项来自该 JSON 或当前 Crew 的上游 task context。
+    调用 evidence_coverage_tool 时，valid_evidence_refs 必须完整复制该 JSON 的
+    valid_evidence_refs；任何不在注册表内的 evidence_ref 都视为未覆盖。
     禁止事项：不要重写研究结论；不要替分析师补证据；不要仅凭语气、标题、P0、Blockers、
     Gate 风险等 prose 风格直接给出 blocker；不要因为“看起来像专业报告”就默认
     formal_report 可放行；不要把工具失败与研究失败混为一谈；不要输出没有 evidence ref

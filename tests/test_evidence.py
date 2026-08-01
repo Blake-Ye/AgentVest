@@ -357,7 +357,7 @@ def test_financial_fact_rejects_non_finite_claim_value(value):
         )
 
 
-def test_normalizer_selects_newest_filed_fact_in_the_newest_fiscal_period_and_records_rejections(
+def test_normalizer_selects_newest_filed_fact_without_turning_history_into_gaps(
     apple_companyfacts,
 ):
     bundle = EvidenceNormalizer().normalize_company_facts(
@@ -368,13 +368,10 @@ def test_normalizer_selects_newest_filed_fact_in_the_newest_fiscal_period_and_re
 
     assert revenue.value == 416_161_000_000
     assert revenue.filed_at == date(2025, 10, 31)
-    assert any(
-        gap.code == "rejected_financial_fact" and gap.fields == ["revenue"]
-        for gap in bundle.gaps
-    )
+    assert not any(gap.code == "rejected_financial_fact" for gap in bundle.gaps)
 
 
-def test_normalizer_records_every_rejected_duplicate_candidate(apple_companyfacts):
+def test_normalizer_ignores_rejected_duplicate_candidates(apple_companyfacts):
     entries = apple_companyfacts["facts"]["us-gaap"][
         "RevenueFromContractWithCustomerExcludingAssessedTax"
     ]["units"]["USD"]
@@ -384,12 +381,8 @@ def test_normalizer_records_every_rejected_duplicate_candidate(apple_companyfact
         company_name="Apple Inc.", ticker="AAPL", payload=apple_companyfacts
     )
 
-    rejected_revenue_candidates = [
-        gap
-        for gap in bundle.gaps
-        if gap.code == "rejected_financial_fact" and gap.fields == ["revenue"]
-    ]
-    assert len(rejected_revenue_candidates) == 3
+    assert bundle.require_fact("revenue").value == 416_161_000_000
+    assert not any(gap.code == "rejected_financial_fact" for gap in bundle.gaps)
 
 
 def test_research_run_state_keeps_typed_evidence_bundle(apple_companyfacts):

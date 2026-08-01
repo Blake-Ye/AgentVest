@@ -232,14 +232,15 @@ class ReportDocument(BaseModel):
                     f"claim {claim.claim_id} references unknown source IDs: "
                     f"{sorted(unknown_source_ids)}"
                 )
-            if claim.critical:
-                if claim.claim_id not in self.allowed_claim_ids:
-                    raise ValueError(
-                        f"critical claim {claim.claim_id} is not in allowed_claim_ids"
-                    )
+            if self.report_mode in {"formal_report", "evidence_limited_report"}:
+                claim_label = "critical claim" if claim.critical else "claim"
                 if not claim.source_ids:
                     raise ValueError(
-                        f"critical claim {claim.claim_id} must bind at least one source"
+                        f"{claim_label} {claim.claim_id} must bind at least one source"
+                    )
+                if claim.claim_id not in self.allowed_claim_ids:
+                    raise ValueError(
+                        f"{claim_label} {claim.claim_id} is not in allowed_claim_ids"
                     )
 
         for section in self.sections.values():

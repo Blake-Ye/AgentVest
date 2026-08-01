@@ -267,6 +267,22 @@ def test_claim_source_ids_are_deduplicated_before_rendering(
     ).count("[sec-10k](")
 
 
+def test_formal_document_rejects_unbound_noncritical_claim(
+    formal_apple_document: ReportDocument,
+) -> None:
+    payload = formal_apple_document.model_dump()
+    payload["claims"].append({
+        "claim_id": "claim:unsupported",
+        "text": "未经来源支持的普通结论。",
+        "critical": False,
+        "source_ids": [],
+    })
+    payload["sections"]["business_overview"]["claim_ids"].append("claim:unsupported")
+
+    with pytest.raises(ValidationError, match="must bind at least one source"):
+        ReportDocument.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("mode", "stance", "field", "value"),
     [

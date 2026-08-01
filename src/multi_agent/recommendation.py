@@ -15,6 +15,13 @@ def _round_score(value: float) -> float:
 
 
 def calculate_trust_score(metrics: dict[str, Any]) -> dict[str, Any]:
+    if metrics.get("success") is False:
+        return {
+            "score": 0.0,
+            "level": "low",
+            "summary": "运行未成功完成，不能形成可信投资结论。",
+            "breakdown": {},
+        }
     citation_count = min(int(metrics.get("citation_count", 0) or 0), 4)
     financial_rate = float(metrics.get("financial_fields_success_rate", 0.0) or 0.0)
     failure_rate = float(metrics.get("api_calls", {}).get("failure_rate", 0.0) or 0.0)

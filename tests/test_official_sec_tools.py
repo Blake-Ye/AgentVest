@@ -66,6 +66,18 @@ def test_official_sec_service_matches_company_name_from_ticker_directory() -> No
     assert session.requests[0][0] == "https://www.sec.gov/files/company_tickers.json"
 
 
+def test_official_sec_service_fetches_only_edgar_archive_documents() -> None:
+    filing_url = (
+        "https://www.sec.gov/Archives/edgar/data/320193/000032019326000001/aapl-8k.htm"
+    )
+    session = RecordingSession({filing_url: "<html><body>CEO transition</body></html>"})
+    service = OfficialSecService(settings=build_settings(), session=session)
+
+    assert "CEO transition" in service.fetch_filing_html(filing_url)
+    with pytest.raises(ValueError, match="SEC EDGAR archive"):
+        service.fetch_filing_html("https://example.com/not-sec.html")
+
+
 def test_official_sec_service_never_emits_local_debug_http(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

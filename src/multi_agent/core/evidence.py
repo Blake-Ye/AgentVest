@@ -265,22 +265,6 @@ class EvidenceNormalizer:
                     )
                 )
             bundle.financial_facts.append(winner.fact)
-            for candidate in candidates:
-                if candidate is not winner:
-                    bundle.gaps.append(
-                        EvidenceGap(
-                            code="rejected_financial_fact",
-                            target="fundamental_analyst",
-                            fields=[field_name],
-                            sources=[candidate.fact.source_url]
-                            if candidate.fact.source_url
-                            else [],
-                            message=(
-                                "SEC Company Facts candidate was not selected for the newest "
-                                "compatible fiscal period."
-                            ),
-                        )
-                    )
         return bundle
 
     def _candidates_for_field(

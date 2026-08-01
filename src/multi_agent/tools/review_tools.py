@@ -34,6 +34,10 @@ class EvidenceCoverageInput(BaseModel):
         default_factory=list,
         description="Claim review items with explicit claim text and evidence references.",
     )
+    valid_evidence_refs: list[str] = Field(
+        default_factory=list,
+        description="Canonical claim, event, source, and artifact references available to the reviewer.",
+    )
 
 
 class EvidenceCoverageTool(BaseTool):
@@ -41,13 +45,18 @@ class EvidenceCoverageTool(BaseTool):
     description: str = "根据 claim 与 evidence_refs 计算证据覆盖率和无证据结论。"
     args_schema: Type[BaseModel] = EvidenceCoverageInput
 
-    def _run(self, claims: list[ReviewClaim | dict[str, object]]) -> dict[str, object]:
+    def _run(
+        self,
+        claims: list[ReviewClaim | dict[str, object]],
+        valid_evidence_refs: list[str],
+    ) -> dict[str, object]:
         normalized_claims = [self._normalize_claim(item) for item in claims]
+        valid_refs = set(self._normalize_refs(valid_evidence_refs))
         total_claims = len(normalized_claims)
         unsupported_claims = [
             item.claim.strip()
             for item in normalized_claims
-            if not self._normalize_refs(item.evidence_refs)
+            if not valid_refs.intersection(self._normalize_refs(item.evidence_refs))
         ]
         covered_claims = total_claims - len(unsupported_claims)
         coverage_ratio = 0.0 if total_claims == 0 else covered_claims / total_claims
@@ -175,22 +184,17 @@ class FinancialFieldCompletenessTool(BaseTool):
         extracted_fields: dict[str, Any],
         gate_required_fields: list[str] | None = None,
     ) -> dict[str, object]:
-        if not required_fields:
-            return {
-                "financial_coverage_score": 1.0,
-                "missing_fields": [],
-                "required_field_count": 0,
-                "gate_financial_coverage_score": 1.0,
-                "gate_missing_fields": [],
-            }
-
         missing_fields = [
             field_name
             for field_name in required_fields
             if field_name not in extracted_fields
             or _is_missing_extracted_value(extracted_fields[field_name])
         ]
-        coverage_score = (len(required_fields) - len(missing_fields)) / len(required_fields)
+        coverage_score = (
+            1.0
+            if not required_fields
+            else (len(required_fields) - len(missing_fields)) / len(required_fields)
+        )
         gate_required_fields = list(FORMAL_GATE_REQUIRED_FIELDS)
         gate_missing_fields = [
             field_name

@@ -590,6 +590,7 @@ def _add_tavily_events(
     event_group_urls: dict[str, list[str]] = {}
     for payload_index, payload in enumerate(tavily_payloads):
         status = str(payload.get("status", "ok")).lower()
+        query = str(payload.get("query", "")).strip()
         results = payload.get("results", [])
         if status != "ok" or not isinstance(results, list):
             degraded = True
@@ -611,7 +612,7 @@ def _add_tavily_events(
                 degraded_reasons.append("Tavily returned an invalid event source URL or title.")
                 continue
             event_count += 1
-            corroboration_key = _event_corroboration_key(raw_result, title)
+            corroboration_key = _event_corroboration_key(raw_result, title, query=query)
             publisher_domain = _registrable_publisher_domain(url)
             bundle.raw_artifact_refs.append(url)
             event_group_indexes.setdefault(corroboration_key, []).append(len(bundle.events))
@@ -665,12 +666,17 @@ def _is_valid_http_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def _event_corroboration_key(raw_result: dict[str, object], title: str) -> str:
+def _event_corroboration_key(
+    raw_result: dict[str, object], title: str, *, query: str = ""
+) -> str:
     explicit_key = str(
         raw_result.get("event_key", raw_result.get("corroboration_key", ""))
     ).strip()
     if explicit_key:
         return explicit_key.lower()
+    normalized_query = re.sub(r"[^a-z0-9]+", " ", query.lower()).strip()
+    if normalized_query:
+        return f"query:{normalized_query}"
     normalized_title = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
     return normalized_title or "unclassified-event"
 
@@ -941,6 +947,65 @@ class SecFilingSearchTool(BaseTool):
                 ]
             )
         return "\n".join(lines)
+
+
+class SecFilingContentInput(BaseModel):
+    filing_url: str = Field(..., description="Official SEC EDGAR filing document URL.")
+    max_chars: int = Field(
+        default=12_000,
+        ge=100,
+        le=50_000,
+        description="Maximum number of cleaned filing-text characters to return.",
+    )
+
+
+class SecFilingContentTool(BaseTool):
+    name: str = "SEC Filing Content"
+    description: str = "Fetch and clean a specific official SEC EDGAR filing document."
+    args_schema: Type[BaseModel] = SecFilingContentInput
+
+    def __init__(
+        self,
+        settings: InvestmentResearchSettings | None = None,
+        service: OfficialSecService | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._settings = settings or InvestmentResearchSettings.from_env()
+        self._service = service or OfficialSecService(self._settings)
+
+    def _run(self, filing_url: str, max_chars: int = 12_000) -> str:
+        if self._settings.company_market_label and self._settings.company_market_label != "US":
+            return json.dumps(
+                {"status": "unavailable", "reason": "SEC filings are US-market only."}
+            )
+        try:
+            raw_html = self._service.fetch_filing_html(filing_url)
+        except FatalAPIError:
+            raise
+        except Exception as exc:
+            return json.dumps(
+                {"status": "failed", "source_url": filing_url, "reason": str(exc)},
+                ensure_ascii=False,
+            )
+        clean_html = re.sub(
+            r"<(?:script|style)\b[^>]*>[\s\S]*?</(?:script|style)>",
+            " ",
+            raw_html,
+            flags=re.IGNORECASE,
+        )
+        clean_html = re.sub(r"<!--[\s\S]*?-->", " ", clean_html)
+        text = html_module.unescape(re.sub(r"<[^>]+>", " ", clean_html))
+        text = re.sub(r"\s+", " ", text).strip()
+        return json.dumps(
+            {
+                "status": "ok",
+                "source_url": filing_url,
+                "text": text[:max_chars],
+                "truncated": len(text) > max_chars,
+            },
+            ensure_ascii=False,
+        )
 
 
 class SecCompanyFactsInput(BaseModel):

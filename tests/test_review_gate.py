@@ -185,6 +185,38 @@ def test_new_contract_rejects_legacy_or_unknown_fields() -> None:
         ReviewContract.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("evidence_coverage_ratio", 80),
+        ("financial_coverage_score", -0.1),
+        ("claim_binding_ratio", 1.1),
+        ("critical_conflict_count", -1),
+    ),
+)
+def test_review_contract_rejects_out_of_range_coverage_values(
+    field_name: str, value: float
+) -> None:
+    payload = _contract().model_dump()
+    payload["coverage_summary"][field_name] = value
+
+    with pytest.raises(ValidationError, match=field_name):
+        ReviewContract.model_validate(payload)
+
+
+def test_analysis_contract_rejects_report_reviewer_repair_target() -> None:
+    payload = _contract().model_dump()
+    payload["decision"]["gate_outcome"] = "rerun"
+    payload["repair_actions"] = [{
+        "target": "logic_compliance_reviewer",
+        "code": "wrong_phase",
+        "instruction": "不应进入分析重跑。",
+    }]
+
+    with pytest.raises(ValidationError, match="repair target"):
+        ReviewContract.model_validate(payload)
+
+
 def test_gate_at_exact_formal_thresholds_passes_without_prose_override(apple_bundle) -> None:
     bundle = _healthy_bundle(apple_bundle)
     threshold_contract = _contract(
@@ -219,7 +251,6 @@ def test_degraded_tool_health_requires_repair_at_threshold_boundary(apple_bundle
     assert {action.code for action in result.repair_actions} == {
         "coverage_below_formal_threshold",
         "degraded_tool_health",
-        "tool_health_disagreement",
     }
 
 
@@ -420,7 +451,6 @@ def test_degraded_raw_tool_health_cannot_pass_even_when_reviewer_says_healthy(ap
     assert result.final_decision == "rerun"
     assert {action.code for action in result.repair_actions} == {
         "degraded_tool_health",
-        "tool_health_disagreement",
     }
     degraded_action = next(
         action for action in result.repair_actions if action.code == "degraded_tool_health"
@@ -538,14 +568,12 @@ def test_contract_rejects_inconsistent_tool_health_summary(
         _contract(tool_health_summary=tool_health_summary)
 
 
-def test_gate_reruns_for_nonhealthy_summary_that_bypasses_model_validation(apple_bundle) -> None:
+def test_gate_uses_raw_tool_health_when_reviewer_summary_bypasses_validation(apple_bundle) -> None:
     contract = _contract().model_copy(
         update={"tool_health_summary": ToolHealthSummary.model_construct(overall_status="failed")}
     )
 
     result = ConfidenceGatePolicy.default().evaluate(_healthy_bundle(apple_bundle), contract)
 
-    assert result.final_decision == "rerun"
-    assert [action.code for action in result.repair_actions] == [
-        "tool_health_contract_inconsistent"
-    ]
+    assert result.final_decision == "passed"
+    assert result.repair_actions == []

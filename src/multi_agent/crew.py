@@ -16,6 +16,7 @@ from multi_agent.tools.investment_tools import (
     FinancialMetricsTool,
     PDFTextExtractTool,
     SecCompanyFactsTool,
+    SecFilingContentTool,
     SecFilingSearchTool,
 )
 from multi_agent.tools.market_validation import MarketValidationTool
@@ -126,6 +127,7 @@ class MultiAgent:
             llm=self._llm_for_tier(self._tier_for_agent("event_guidance_analyst", "fast")),
             tools=[
                 TavilySearchTool(settings=self._settings()),
+                SecFilingContentTool(settings=self._settings()),
             ],
             max_retry_limit=3,
             verbose=True,
@@ -135,6 +137,7 @@ class MultiAgent:
     def fundamental_analyst(self) -> Agent:
         tools = [
             SecFilingSearchTool(settings=self._settings()),
+            SecFilingContentTool(settings=self._settings()),
             SecCompanyFactsTool(settings=self._settings()),
         ]
         if self._local_pdf_path() is not None:
@@ -293,35 +296,42 @@ class MultiAgent:
         ]
 
     def analysis_crew(self) -> Crew:
-        """First five agents: research evidence and the strict data-quality contract."""
+        """Build the research artifacts and canonical evidence bundle."""
         return self._make_crew(
             tasks=[
                 self.market_validation_task(),
                 self.market_intelligence_task(),
                 self.filing_review_task(),
                 self.financial_analysis_task(),
-                self.data_quality_review_task(),
             ]
         )
+
+    def analysis_review_crew(self) -> Crew:
+        """Review only after Flow reloads the newly materialized evidence bundle."""
+        reviewer = Task(
+            name="data_quality_review_task",
+            config=self.tasks_config["data_quality_review_task"],  # type: ignore[index]
+            agent=self.data_quality_reviewer(),
+            context=[],
+            output_file=self._task_output_file(self._artifact_path("08_data_quality_review.md")),
+            guardrail=validate_analysis_review_output,
+            guardrail_max_retries=2,
+            callback=record_task_completion_callback,
+        )
+        return self._make_crew(tasks=[reviewer])
 
     def targeted_analysis_crew(self, targets: list[str]) -> Crew:
         """Rerun only the agent tasks named by typed RepairAction targets."""
         expanded_targets = list(dict.fromkeys(targets))
         if "fundamental_analyst" in expanded_targets:
             expanded_targets.append("quant_valuation_analyst")
-        if {
-            "market_validation_analyst",
-            "event_guidance_analyst",
-            "fundamental_analyst",
-            "quant_valuation_analyst",
-        }.intersection(expanded_targets):
-            expanded_targets.append("data_quality_reviewer")
+        if expanded_targets == ["data_quality_reviewer"]:
+            return self.analysis_review_crew()
         target_order = (
             "market_validation_analyst",
             "event_guidance_analyst",
             "fundamental_analyst",
             "quant_valuation_analyst",
-            "data_quality_reviewer",
         )
         expanded_target_set = set(expanded_targets)
         expanded_targets = [target for target in target_order if target in expanded_target_set]
@@ -342,10 +352,6 @@ class MultiAgent:
                 "financial_analysis_task", self.quant_valuation_analyst,
                 "03_financial_analysis.md",
             ),
-            "data_quality_reviewer": (
-                "data_quality_review_task", self.data_quality_reviewer,
-                "08_data_quality_review.md",
-            ),
         }
         context_targets = {
             "event_guidance_analyst": ("market_validation_analyst",),
@@ -357,12 +363,6 @@ class MultiAgent:
                 "market_validation_analyst",
                 "event_guidance_analyst",
                 "fundamental_analyst",
-            ),
-            "data_quality_reviewer": (
-                "market_validation_analyst",
-                "event_guidance_analyst",
-                "fundamental_analyst",
-                "quant_valuation_analyst",
             ),
         }
         tasks_by_target: dict[str, Task] = {}
@@ -382,11 +382,6 @@ class MultiAgent:
                 agent=agent_factory(),
                 context=context,
                 output_file=self._task_output_file(self._artifact_path(output_name)),
-                guardrail=(
-                    validate_analysis_review_output
-                    if target == "data_quality_reviewer"
-                    else None
-                ),
                 guardrail_max_retries=2,
                 callback=record_task_completion_callback,
             )
