@@ -183,16 +183,21 @@ def test_formal_document_rejects_unbound_or_unknown_critical_claim(
 
 
 @pytest.mark.parametrize("field", ["url", "title"])
-def test_writer_cannot_forge_or_invent_canonical_sources(field: str) -> None:
+def test_writer_source_metadata_is_discarded_in_favor_of_canonical_source(
+    field: str,
+) -> None:
     payload = _formal_payload()
     payload["sources"][0][field] = "https://evil.example/forged"  # type: ignore[index]
-    with pytest.raises(ValueError, match="forged canonical source"):
-        ReportDocument.from_writer_payload(
-            context=_formal_context(), writer_payload=payload, trust_score=91
-        )
+    context = _formal_context()
+
+    document = ReportDocument.from_writer_payload(
+        context=context, writer_payload=payload, trust_score=91
+    )
+
+    assert document.sources == list(context.canonical_sources())
 
 
-def test_canonical_event_source_is_accepted_and_forgery_is_rejected() -> None:
+def test_canonical_event_source_metadata_always_wins() -> None:
     context = _formal_context().model_copy(update={
         "allowed_claim_ids": ("event:launch",),
         "canonical_sources_json": (SourceReference(
@@ -207,8 +212,10 @@ def test_canonical_event_source_is_accepted_and_forgery_is_rejected() -> None:
     payload["sources"] = [{"source_id": "event:launch", "title": "Launch event", "url": "https://example.com/launch", "source_tag": "news"}]
     assert ReportDocument.from_writer_payload(context=context, writer_payload=payload, trust_score=91).sources[0].source_id == "event:launch"
     payload["sources"][0]["url"] = "https://evil.example/launch"
-    with pytest.raises(ValueError, match="forged canonical source"):
-        ReportDocument.from_writer_payload(context=context, writer_payload=payload, trust_score=91)
+    document = ReportDocument.from_writer_payload(
+        context=context, writer_payload=payload, trust_score=91
+    )
+    assert document.sources[0].url == "https://example.com/launch"
 
 
 
@@ -318,7 +325,9 @@ def test_writer_guardrail_accepts_canonical_payload() -> None:
     accepted, normalized = report_document_module.validate_report_writer_output(Output())
 
     assert accepted is True
-    assert json.loads(str(normalized))["stance"] == "buy"
+    normalized_payload = json.loads(str(normalized))
+    assert normalized_payload["stance"] == "buy"
+    assert normalized_payload["sources"] == [{"source_id": "sec-10k"}]
 
 
 @pytest.mark.parametrize(

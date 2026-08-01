@@ -2456,6 +2456,10 @@ def test_typed_flow_blocks_malformed_writer_payload(payload: dict[str, object]) 
 
     assert result["status"] == "blocked"
     assert "writer_payload_invalid" in result["blocking_reasons"]
+    assert any(
+        reason.startswith("writer_payload_invalid:")
+        for reason in result["blocking_reasons"]
+    )
 
 
 def test_real_report_crews_validate_writer_before_starting_reviewer() -> None:
@@ -2534,7 +2538,8 @@ def test_writer_guardrail_exhaustion_becomes_controlled_block() -> None:
     ).kickoff()
 
     assert result["status"] == "blocked"
-    assert result["blocking_reasons"] == ["writer_payload_invalid"]
+    assert result["blocking_reasons"][0] == "writer_payload_invalid"
+    assert "Task failed guardrail validation" in result["blocking_reasons"][1]
 
 
 def test_real_report_reviewer_receives_validated_report_document() -> None:

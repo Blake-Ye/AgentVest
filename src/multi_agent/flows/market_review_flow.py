@@ -326,7 +326,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         try:
             result = report_crew().kickoff(inputs=writer_input)
         except Exception as error:
-            raise ValueError("writer_payload_invalid") from error
+            detail = " ".join(str(error).split())[:500]
+            raise ValueError(f"writer_payload_invalid:{detail}") from error
         self._typed_report_execution = result
         raw = self._task_output_raw(result, "investment_report_task", fallback_index=0)
         return raw
@@ -901,10 +902,10 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         )
         payload = self._strict_contract_payload(raw_payload)
         if payload is None:
-            raise ValueError("writer_payload_invalid")
+            raise ValueError("writer_payload_invalid:writer JSON object is missing")
         gate = self.state.analysis_gate_decision or self.state.gate_decision
         if gate is None:
-            raise ValueError("writer_payload_invalid")
+            raise ValueError("writer_payload_invalid:analysis gate is missing")
         try:
             return ReportDocument.from_writer_payload(
                 context=context,
@@ -912,7 +913,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 trust_score=gate.trust_score,
             )
         except Exception as error:
-            raise ValueError("writer_payload_invalid") from error
+            detail = " ".join(str(error).split())[:500]
+            raise ValueError(f"writer_payload_invalid:{detail}") from error
 
     def _analysis_report_revision_instructions(self) -> tuple[str, ...]:
         return tuple(
@@ -923,11 +925,16 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
 
     def _typed_report_gate(self, report: Any) -> GateDecision:
         if not isinstance(report, ReportDocument):
+            details = []
+            if isinstance(report, dict):
+                detail = str(report.get("typed_error", "")).strip()
+                if detail and detail != "writer_payload_invalid":
+                    details.append(detail)
             return GateDecision(
                 passed=False,
                 final_decision="blocked",
                 trust_score=0,
-                blocking_reasons=["writer_payload_invalid"],
+                blocking_reasons=["writer_payload_invalid", *details],
             )
         raw_contract = (
             self._report_reviewer(report)

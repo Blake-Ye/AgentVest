@@ -135,13 +135,9 @@ class ReportWriterSection(BaseModel):
 
 
 class ReportWriterSource(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     source_id: str = Field(min_length=1)
-    title: str | None = None
-    url: str | None = None
-    source_tag: str | None = None
-    field_name: str | None = None
 
 
 class ReportWriterPayload(BaseModel):
@@ -249,11 +245,6 @@ class ReportDocument(BaseModel):
                 canonical = canonical_sources.get(source_id)
                 if canonical is None:
                     raise ValueError(f"unknown canonical source: {source_id}")
-                if any(
-                    raw_source.get(key) not in (None, getattr(canonical, key))
-                    for key in ("title", "url", "source_tag", "field_name")
-                ):
-                    raise ValueError(f"forged canonical source: {source_id}")
                 requested_ids.append(source_id)
             payload["sources"] = [
                 canonical_sources[source_id].model_dump()

@@ -238,6 +238,7 @@ def test_writer_prompt_requires_revision_instructions_to_be_applied() -> None:
     assert "每一条 rerun reason" in writer_prompt
     assert "不得忽略 revision_instructions" in writer_prompt
     assert "实质性修订" in writer_prompt
+    assert "source 只能包含 source_id" in writer_prompt
 
 
 def test_flow_crews_preserve_seven_agent_topology_and_allow_targeted_override(

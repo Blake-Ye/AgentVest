@@ -141,7 +141,7 @@ investment_report_task:
     禁止事项：不要根据文稿完整性自行补全缺失事实；不要写任何无法绑定到上游 artifact
     的关键数字、关键判断、重大风险提示、催化剂或建议；不要在 formal_report 不允许时
     伪装成正式报告；不要在 blocked_notice 模式下输出完整研究报告；不要读取 control-plane
-    之外的额外文件。
+    之外的额外文件。sources 中的每个 source 只能包含 source_id，不得复制或改写来源元数据。
     写作步骤：
     Step 1. 锁定证据边界，读取 REPORT_CONTEXT_JSON 与 analysis review contract 中的
     delivery_eligibility、blocking_reasons、rerun_reasons。若
@@ -171,7 +171,8 @@ investment_report_task:
     financial_analysis、key_risks、investment_conclusion、source_index 七个 key，且每个值
     必须是包含 heading、content、claim_ids 的对象。stance 只能是 buy、hold、sell、watch、
     blocked 之一。每个 claim 必须包含 claim_id、text、critical、source_ids；每个 source
-    至少包含 source_id。claim_id 和 source_id 必须来自 REPORT_CONTEXT_JSON 中的
+    只能包含 source_id，不得复制或改写 title、url、source_tag、field_name；这些字段由 Flow
+    从 canonical registry 注入。claim_id 和 source_id 必须来自 REPORT_CONTEXT_JSON 中的
     allowed_claim_ids 与 canonical_sources_json。不得输出 markdown，不得输出 final_decision、
     report_mode、company_name、ticker 或 trust_score，也不得自行选择终态。
   agent: report_writing_analyst
