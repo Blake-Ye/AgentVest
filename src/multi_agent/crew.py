@@ -411,6 +411,38 @@ class MultiAgent:
         )
         return self._make_crew(tasks=[writer, reviewer])
 
+    def report_writer_crew(self) -> Crew:
+        """Generate one writer payload for Flow-side validation."""
+        writer = Task(
+            name="investment_report_task",
+            config=self.tasks_config["investment_report_task"],  # type: ignore[index]
+            agent=self.report_writing_analyst(),
+            output_file=self._task_output_file(self._artifact_path("04_writer_payload.json")),
+            callback=record_task_completion_callback,
+        )
+        return self._make_crew(tasks=[writer])
+
+    def report_review_crew(self) -> Crew:
+        """Review only the ReportDocument already validated by Flow."""
+        config = dict(self.tasks_config["logic_compliance_review_task"])  # type: ignore[index]
+        config["description"] = (
+            f"{config['description']}\n"
+            "以下 REPORT_DOCUMENT_JSON 已通过 Flow 的 ReportDocument 校验，"
+            "它是本次逻辑审查唯一允许使用的 writer 输出：\n"
+            "{REPORT_DOCUMENT_JSON}"
+        )
+        reviewer = Task(
+            name="logic_compliance_review_task",
+            config=config,
+            agent=self.logic_compliance_reviewer(),
+            context=[],
+            output_file=self._task_output_file(self._artifact_path("09_logic_compliance_review.md")),
+            guardrail=validate_report_review_output,
+            guardrail_max_retries=2,
+            callback=record_task_completion_callback,
+        )
+        return self._make_crew(tasks=[reviewer])
+
     @crew
     def crew(self) -> Crew:
         """创建顺序执行的投研工作流。"""

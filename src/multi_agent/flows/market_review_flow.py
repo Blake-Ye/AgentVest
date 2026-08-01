@@ -318,13 +318,42 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         configure = getattr(crew_factory, "configure_run", None)
         if callable(configure):
             configure(model_tier_overrides=dict(self.state.model_tier_overrides))
-        report_crew = getattr(crew_factory, "report_crew", None)
+        report_crew = getattr(crew_factory, "report_writer_crew", None)
+        if not callable(report_crew):
+            report_crew = getattr(crew_factory, "report_crew", None)
         if not callable(report_crew):
             raise ValueError("writer_payload_invalid")
         result = report_crew().kickoff(inputs=writer_input)
         self._typed_report_execution = result
         raw = self._task_output_raw(result, "investment_report_task", fallback_index=0)
         return raw
+
+    def _execute_existing_report_review(self, report: ReportDocument) -> str:
+        crew_factory = self._crew_factory or MultiAgent()
+        configure = getattr(crew_factory, "configure_run", None)
+        if callable(configure):
+            configure(model_tier_overrides=dict(self.state.model_tier_overrides))
+        review_crew = getattr(crew_factory, "report_review_crew", None)
+        if not callable(review_crew):
+            return self._task_output_raw(
+                self._typed_report_execution,
+                "logic_compliance_review_task",
+                fallback_index=-1,
+            )
+        context = self.state.report_context
+        result = review_crew().kickoff(inputs={
+            "company_name": self.state.company_name,
+            "company_ticker": self.state.input_ticker,
+            "run_id": self.state.request_id,
+            "REPORT_CONTEXT_JSON": context.model_dump_json() if context is not None else "{}",
+            "REPORT_DOCUMENT_JSON": report.model_dump_json(),
+        })
+        self._typed_report_execution = result
+        return self._task_output_raw(
+            result,
+            "logic_compliance_review_task",
+            fallback_index=0,
+        )
 
     def _materialized_analysis_review_content(self) -> str:
         artifacts_dir = self.state.artifacts_dir.strip()
@@ -900,11 +929,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         raw_contract = (
             self._report_reviewer(report)
             if self._report_reviewer_injected
-            else self._task_output_raw(
-                self._typed_report_execution,
-                "logic_compliance_review_task",
-                fallback_index=-1,
-            )
+            else self._execute_existing_report_review(report)
         )
         if isinstance(raw_contract, str):
             contract_from_text, text_error = self._machine_readable_review_contract_from_text(

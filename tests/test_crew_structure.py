@@ -258,6 +258,8 @@ def test_flow_crews_preserve_seven_agent_topology_and_allow_targeted_override(
 
     assert len(workflow.analysis_crew().tasks) == 4
     assert len(workflow.analysis_review_crew().tasks) == 1
+    assert len(workflow.report_writer_crew().tasks) == 1
+    assert len(workflow.report_review_crew().tasks) == 1
     assert len(workflow.report_crew().tasks) == 2
     assert len(workflow.crew().tasks) == 7
     assert len(workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks) == 1

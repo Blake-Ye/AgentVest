@@ -2458,6 +2458,108 @@ def test_typed_flow_blocks_malformed_writer_payload(payload: dict[str, object]) 
     assert "writer_payload_invalid" in result["blocking_reasons"]
 
 
+def test_real_report_crews_validate_writer_before_starting_reviewer() -> None:
+    bundle = _typed_bundle()
+    calls = {"writer": 0, "reviewer": 0}
+
+    class FakeWriterOutput:
+        tasks_output = [_StubTaskOutput("investment_report_task", '{"title":"bad"}')]
+
+    class FakeWriterCrew:
+        def kickoff(self, *, inputs: dict[str, object]) -> FakeWriterOutput:
+            calls["writer"] += 1
+            return FakeWriterOutput()
+
+    class FakeReviewCrew:
+        def kickoff(self, *, inputs: dict[str, object]) -> object:
+            calls["reviewer"] += 1
+            return object()
+
+    class FakeCrewFactory:
+        def configure_run(self, **_kwargs: object) -> None:
+            pass
+
+        def report_writer_crew(self) -> FakeWriterCrew:
+            return FakeWriterCrew()
+
+        def report_review_crew(self) -> FakeReviewCrew:
+            return FakeReviewCrew()
+
+    result = MarketReviewFlow(
+        crew_factory=FakeCrewFactory(),
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": _typed_contract().model_dump(mode="json"),
+        },
+        initial_state=MarketReviewFlowState(
+            request_id="real-invalid-writer",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            execution_mode="new",
+        ),
+    ).kickoff()
+
+    assert result["status"] == "blocked"
+    assert calls == {"writer": 1, "reviewer": 0}
+
+
+def test_real_report_reviewer_receives_validated_report_document() -> None:
+    bundle = _typed_bundle()
+    reviewer_inputs: list[dict[str, object]] = []
+
+    class FakeWriterCrew:
+        def kickoff(self, *, inputs: dict[str, object]) -> object:
+            return type("Output", (), {
+                "tasks_output": [_StubTaskOutput(
+                    "investment_report_task",
+                    json.dumps(_typed_writer_payload(), ensure_ascii=False),
+                )]
+            })()
+
+    class FakeReviewCrew:
+        def kickoff(self, *, inputs: dict[str, object]) -> object:
+            reviewer_inputs.append(dict(inputs))
+            contract = _typed_report_contract().model_dump(mode="json")
+            raw = (
+                "PART A: MACHINE_READABLE_JSON\n```json\n"
+                f"{json.dumps(contract, ensure_ascii=False)}\n```"
+            )
+            return type("Output", (), {
+                "tasks_output": [_StubTaskOutput("logic_compliance_review_task", raw)]
+            })()
+
+    class FakeCrewFactory:
+        def configure_run(self, **_kwargs: object) -> None:
+            pass
+
+        def report_writer_crew(self) -> FakeWriterCrew:
+            return FakeWriterCrew()
+
+        def report_review_crew(self) -> FakeReviewCrew:
+            return FakeReviewCrew()
+
+    result = MarketReviewFlow(
+        crew_factory=FakeCrewFactory(),
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": _typed_contract().model_dump(mode="json"),
+        },
+        initial_state=MarketReviewFlowState(
+            request_id="validated-writer-review",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            execution_mode="new",
+        ),
+    ).kickoff()
+
+    report_document = json.loads(str(reviewer_inputs[0]["REPORT_DOCUMENT_JSON"]))
+    assert result["status"] == "passed"
+    assert report_document["company_name"] == "Apple Inc."
+    assert report_document["report_mode"] == "formal_report"
+
+
 def test_typed_flow_blocks_malformed_or_rejecting_logic_review() -> None:
     bundle = _typed_bundle()
     flow = MarketReviewFlow(
