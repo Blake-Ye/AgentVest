@@ -52,4 +52,4 @@
 - [x] Add failing tests for failed-run placeholders, blocked notices, and trust-score consistency.
 - [x] Derive report completeness and displayed trust from `FinalDecisionRecord`; failed runs without a decision cannot be complete or high trust.
 - [x] Delete the unused review normalizer and keep legacy prose/metrics fallbacks isolated from new runs.
-- [ ] Run the complete suite, replay the Apple artifacts through the typed gate, commit, and push.
+- [x] Run the complete suite, replay the Apple artifacts through the typed gate, commit, and push.
