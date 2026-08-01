@@ -916,6 +916,28 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             detail = " ".join(str(error).split())[:500]
             raise ValueError(f"writer_payload_invalid:{detail}") from error
 
+    def _typed_writer_document_with_repair(
+        self,
+        revision_instructions: tuple[str, ...] = (),
+    ) -> ReportDocument:
+        feedback = list(revision_instructions)
+        while True:
+            try:
+                return self._typed_writer_document(tuple(feedback))
+            except Exception as error:
+                detail = " ".join(str(error).split())[:500]
+                failure = detail if detail.startswith("writer_payload_invalid:") else (
+                    f"writer_payload_invalid:{detail}"
+                )
+                remaining = self.state.rerun_budget.get("report_writing_analyst", 0)
+                if remaining <= 0:
+                    raise ValueError(
+                        f"{failure};rerun_budget_exhausted:report_writing_analyst"
+                    ) from error
+                self.state.rerun_budget["report_writing_analyst"] = remaining - 1
+                self.state.model_tier_overrides = {"report_writing_analyst": "deep"}
+                feedback.append(f"修复 ReportDocument 校验错误并重新生成完整 JSON：{failure}")
+
     def _analysis_report_revision_instructions(self) -> tuple[str, ...]:
         return tuple(
             action.instruction
@@ -1513,7 +1535,9 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         self._record_stage("write_report")
         if self._typed_run():
             try:
-                report = self._typed_writer_document(self._analysis_report_revision_instructions())
+                report = self._typed_writer_document_with_repair(
+                    self._analysis_report_revision_instructions()
+                )
                 self.state.report_document = report
             except ValueError as error:
                 report = {"typed_error": str(error)}
@@ -1528,7 +1552,9 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         self._record_stage("write_report")
         if self._typed_run():
             try:
-                report = self._typed_writer_document(self._analysis_report_revision_instructions())
+                report = self._typed_writer_document_with_repair(
+                    self._analysis_report_revision_instructions()
+                )
                 self.state.report_document = report
             except ValueError as error:
                 report = {"typed_error": str(error)}
@@ -1542,7 +1568,9 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     def write_blocked_report(self) -> Any:
         self._record_stage("write_report")
         try:
-            report = self._typed_writer_document(self._analysis_report_revision_instructions())
+            report = self._typed_writer_document_with_repair(
+                self._analysis_report_revision_instructions()
+            )
             self.state.report_document = report
         except ValueError as error:
             report = {"typed_error": str(error)}
@@ -1609,14 +1637,14 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                     *(action.instruction for action in self.state.report_review_contract.repair_actions),
                 ]) if self.state.report_review_contract is not None else tuple(report_gate.blocking_reasons)
                 try:
-                    report = self._typed_writer_document(feedback)
+                    report = self._typed_writer_document_with_repair(feedback)
                     self.state.report_document = report
-                except ValueError:
+                except ValueError as error:
                     report_gate = GateDecision(
                         passed=False,
                         final_decision="blocked",
                         trust_score=0,
-                        blocking_reasons=["writer_payload_invalid"],
+                        blocking_reasons=["writer_payload_invalid", str(error)],
                     )
                     break
                 self.state.report_result = report

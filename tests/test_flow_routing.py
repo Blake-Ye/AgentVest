@@ -2505,14 +2505,53 @@ def test_real_report_crews_validate_writer_before_starting_reviewer() -> None:
     ).kickoff()
 
     assert result["status"] == "blocked"
-    assert calls == {"writer": 1, "reviewer": 0}
+    assert calls == {"writer": 4, "reviewer": 0}
+
+
+def test_writer_semantic_validation_failure_triggers_targeted_repair() -> None:
+    bundle = _typed_bundle()
+    writer_contexts: list[dict[str, object]] = []
+
+    def writer(inputs: dict[str, object]) -> dict[str, object]:
+        writer_contexts.append(json.loads(str(inputs["REPORT_CONTEXT_JSON"])))
+        payload = _typed_writer_payload()
+        if len(writer_contexts) == 1:
+            payload["sections"]["investment_conclusion"]["claim_ids"] = []  # type: ignore[index]
+        return payload
+
+    result = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": _typed_contract().model_dump(mode="json"),
+        },
+        report_writer=writer,
+        report_reviewer=lambda _document: _typed_report_contract().model_dump(mode="json"),
+        initial_state=MarketReviewFlowState(
+            request_id="writer-semantic-repair",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            execution_mode="new",
+            rerun_budget={"report_writing_analyst": 1},
+        ),
+    ).kickoff()
+
+    assert result["status"] == "passed"
+    assert len(writer_contexts) == 2
+    assert any(
+        "investment_conclusion requires a critical claim" in instruction
+        for instruction in writer_contexts[1]["revision_instructions"]
+    )
 
 
 def test_writer_guardrail_exhaustion_becomes_controlled_block() -> None:
     bundle = _typed_bundle()
+    writer_calls = 0
 
     class FakeWriterCrew:
         def kickoff(self, *, inputs: dict[str, object]) -> object:
+            nonlocal writer_calls
+            writer_calls += 1
             raise RuntimeError("Task failed guardrail validation after 2 retries")
 
     class FakeCrewFactory:
@@ -2534,12 +2573,15 @@ def test_writer_guardrail_exhaustion_becomes_controlled_block() -> None:
             input_ticker="AAPL",
             evidence_bundle=bundle,
             execution_mode="new",
+            rerun_budget={"report_writing_analyst": 2},
         ),
     ).kickoff()
 
     assert result["status"] == "blocked"
+    assert writer_calls == 3
     assert result["blocking_reasons"][0] == "writer_payload_invalid"
     assert "Task failed guardrail validation" in result["blocking_reasons"][1]
+    assert "rerun_budget_exhausted:report_writing_analyst" in result["blocking_reasons"][1]
 
 
 def test_real_report_reviewer_receives_validated_report_document() -> None:

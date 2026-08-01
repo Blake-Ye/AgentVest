@@ -174,7 +174,9 @@ investment_report_task:
     只能包含 source_id，不得复制或改写 title、url、source_tag、field_name；这些字段由 Flow
     从 canonical registry 注入。claim_id 和 source_id 必须来自 REPORT_CONTEXT_JSON 中的
     allowed_claim_ids 与 canonical_sources_json。不得输出 markdown，不得输出 final_decision、
-    report_mode、company_name、ticker 或 trust_score，也不得自行选择终态。
+    report_mode、company_name、ticker 或 trust_score，也不得自行选择终态。formal_report
+    下 executive_summary、financial_analysis、investment_conclusion 三个核心章节的
+    claim_ids 都必须至少包含一个 critical=true 的 claim_id。
   agent: report_writing_analyst
 
 logic_compliance_review_task:

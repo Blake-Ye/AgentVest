@@ -30,6 +30,8 @@ def test_investment_report_prompt_restricts_writing_to_report_mode() -> None:
     assert "08_data_quality_review.json" in content
     assert "09_logic_compliance_review.json" in content
     assert "executive_summary、business_overview、recent_events" in content
+    compact = re.sub(r"\s+", "", content)
+    assert "三个核心章节的claim_ids都必须至少包含一个critical=true的claim_id" in compact
     assert "不得输出 final_decision" in content
 
 
