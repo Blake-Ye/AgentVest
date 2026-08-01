@@ -244,6 +244,30 @@ def _tool_status(value: object) -> tuple[str, str]:
 def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, object]:
     """Canonicalize known reviewer aliases without weakening strict validation."""
     normalized = dict(payload)
+    raw_decision = normalized.get("decision")
+    if isinstance(raw_decision, dict):
+        decision = dict(raw_decision)
+        for key in ("delivery_eligibility", "failure_taxonomy"):
+            nested_value = decision.get(key)
+            if key not in normalized and isinstance(nested_value, dict):
+                normalized[key] = decision.pop(key)
+            elif key in normalized and normalized[key] == nested_value:
+                decision.pop(key)
+        stage_decision = decision.get("stage_decision")
+        canonical_stage_decision = {
+            "pass": "pass",
+            "passed": "pass",
+            "rerun": "rerun",
+            "block": "block",
+            "blocked": "block",
+        }.get(str(stage_decision).strip().lower())
+        if "gate_outcome" not in decision and canonical_stage_decision is not None:
+            decision["gate_outcome"] = canonical_stage_decision
+            decision.pop("stage_decision")
+        elif decision.get("gate_outcome") == canonical_stage_decision:
+            decision.pop("stage_decision", None)
+        normalized["decision"] = decision
+
     summary = normalized.get("review_summary")
     if isinstance(summary, str):
         normalized["review_summary"] = {

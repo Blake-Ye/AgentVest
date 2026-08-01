@@ -2326,6 +2326,51 @@ def test_analysis_review_guardrail_normalizes_known_reviewer_schema_drift() -> N
     assert '"description"' not in str(normalized_raw)
 
 
+def test_report_review_guardrail_lifts_unambiguous_fields_nested_in_decision() -> None:
+    payload = _typed_report_contract().model_dump(mode="json")
+    decision = payload["decision"]
+    decision["stage_decision"] = decision.pop("gate_outcome")
+    decision["delivery_eligibility"] = payload.pop("delivery_eligibility")
+    decision["failure_taxonomy"] = payload.pop("failure_taxonomy")
+
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n```json\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n```\n"
+            "PART B: HUMAN_READABLE_MARKDOWN\n审查完成。"
+        )
+
+    accepted, normalized_raw = validate_report_review_output(Output())
+    contract = review_contract_from_text(str(normalized_raw), expected_stage="report_review")
+
+    assert accepted is True
+    assert contract is not None
+    assert contract.decision.gate_outcome == "pass"
+    assert contract.delivery_eligibility.formal_report_allowed is True
+    assert contract.failure_taxonomy.primary_class == "none"
+    assert "stage_decision" not in str(normalized_raw)
+
+
+def test_review_guardrail_rejects_conflicting_nested_delivery_eligibility() -> None:
+    payload = _typed_report_contract().model_dump(mode="json")
+    payload["decision"]["delivery_eligibility"] = {
+        "formal_report_allowed": False,
+        "evidence_limited_report_allowed": True,
+        "blocked_notice_required": False,
+    }
+
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n```json\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n```"
+        )
+
+    accepted, feedback = validate_report_review_output(Output())
+
+    assert accepted is False
+    assert "decision.delivery_eligibility" in str(feedback)
+
+
 @pytest.mark.parametrize(
     ("validator", "model_stage", "expected_stage"),
     (
