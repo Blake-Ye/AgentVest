@@ -23,6 +23,8 @@ from multi_agent.core.review_contracts import (
     RepairAction,
     ReviewContract,
     ReviewToolSummary,
+    review_contract_from_payload,
+    review_contract_from_text,
 )
 from multi_agent.core.state import ResearchRunState
 from multi_agent.crew import MultiAgent
@@ -52,6 +54,7 @@ class MarketReviewFlowState(ResearchRunState):
 
 class MarketReviewFlow(Flow[MarketReviewFlowState]):
     ANALYSIS_RERUN_KEY = "analysis"
+    MAX_REPAIR_ROUNDS = 3
     ANALYSIS_RERUN_MODEL_OVERRIDES = {
         "event_guidance_analyst": "deep",
         "fundamental_analyst": "deep",
@@ -95,6 +98,10 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             snapshot = initial_state.model_copy(deep=True)
             for key in type(snapshot).model_fields:
                 setattr(self.state, key, getattr(snapshot, key))
+        if self._typed_run():
+            for key in (self.ANALYSIS_RERUN_KEY, "report_writing_analyst"):
+                remaining = self.state.rerun_budget.get(key, self.MAX_REPAIR_ROUNDS)
+                self.state.rerun_budget[key] = min(max(remaining, 0), self.MAX_REPAIR_ROUNDS)
 
     def _record_stage(self, stage_name: str) -> None:
         self.state.current_stage = stage_name
@@ -208,7 +215,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         if payload is None:
             return None, "missing"
         try:
-            contract = ReviewContract.model_validate(payload)
+            contract = review_contract_from_payload(payload)  # type: ignore[arg-type]
         except Exception:
             return None, "invalid"
         if contract.stage != expected_stage:
@@ -526,18 +533,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     ) -> tuple[ReviewContract | None, str | None]:
         if not review_text.strip():
             return None, None
-        match = re.search(
-            r"PART A:\s*MACHINE_READABLE_JSON[\s\S]*?```(?:json)?\s*([\s\S]*?)\s*```",
-            review_text,
-            re.IGNORECASE,
-        )
-        if match is None:
-            return None, None
-        raw_contract = match.group(1).strip()
-        if not raw_contract:
-            return None, "invalid_review_contract"
         try:
-            return ReviewContract.model_validate_json(raw_contract), None
+            return review_contract_from_text(review_text), None
         except Exception:
             return None, "invalid_review_contract"
 
@@ -1015,6 +1012,9 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         context = self._build_report_context(revision_instructions)
         self.state.report_context = context
         writer_input = {
+            "company_name": self.state.company_name,
+            "company_ticker": self.state.input_ticker,
+            "run_id": self.state.request_id,
             "REPORT_CONTEXT_JSON": context.model_dump_json(),
         }
         raw_payload = (
@@ -1036,6 +1036,13 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             )
         except Exception as error:
             raise ValueError("writer_payload_invalid") from error
+
+    def _analysis_report_revision_instructions(self) -> tuple[str, ...]:
+        return tuple(
+            action.instruction
+            for action in self.state.last_repair_actions
+            if action.target == "report_writing_analyst" and action.instruction
+        )
 
     def _typed_report_gate(self, report: Any) -> GateDecision:
         if not isinstance(report, ReportDocument):
@@ -1228,6 +1235,57 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             "local_filing_pdf_available": self.state.local_filing_pdf_available,
             "model_tier_overrides": dict(self.state.model_tier_overrides),
             "rerun_targets": list(self._active_rerun_targets),
+            "review_evidence_context_json": self._review_evidence_context_json(),
+        }
+
+    def _review_evidence_context_json(self) -> str:
+        """Provide reviewer-only reruns with compact, canonical evidence."""
+        bundle = self.state.evidence_bundle
+        if bundle is None:
+            return "{}"
+        actionable_gaps: list[dict[str, object]] = []
+        seen_gaps: set[tuple[object, ...]] = set()
+        for gap in bundle.gaps:
+            if gap.code == "rejected_financial_fact":
+                continue
+            key = (gap.code, gap.target, tuple(gap.fields), tuple(gap.sources))
+            if key in seen_gaps:
+                continue
+            seen_gaps.add(key)
+            actionable_gaps.append(gap.model_dump(mode="json"))
+        payload = {
+            "company_name": bundle.company_name,
+            "ticker": bundle.ticker,
+            "market_label": bundle.market_label,
+            "financial_facts": [
+                fact.model_dump(mode="json") for fact in bundle.financial_facts
+            ],
+            "market_snapshots": [
+                snapshot.model_dump(mode="json") for snapshot in bundle.market_snapshots
+            ],
+            "events": [event.model_dump(mode="json") for event in bundle.events],
+            "tool_health": [item.model_dump(mode="json") for item in bundle.tool_health],
+            "actionable_gaps": actionable_gaps,
+            "artifact_refs": list(bundle.raw_artifact_refs),
+            "analysis_artifacts": self._materialized_analysis_artifacts(),
+        }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _materialized_analysis_artifacts(self) -> dict[str, str]:
+        artifacts_dir = self.state.artifacts_dir.strip()
+        if not artifacts_dir:
+            return {}
+        root = Path(artifacts_dir)
+        names = (
+            "00_market_validation.md",
+            "01_market_intelligence.md",
+            "02_filing_review.md",
+            "03_financial_analysis.md",
+        )
+        return {
+            name: (root / name).read_text(encoding="utf-8")
+            for name in names
+            if (root / name).exists()
         }
 
     def _review_analysis(self, analysis_result: Any) -> Any:
@@ -1260,6 +1318,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         runnable: list[str] = []
         invalid: list[str] = []
         for target in targets:
+            if target == "report_writing_analyst":
+                continue
             if target not in self._ANALYSIS_REPAIR_TARGETS:
                 prefix = (
                     "invalid_repair_phase"
@@ -1268,11 +1328,37 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 )
                 invalid.append(f"{prefix}:{target}")
                 continue
-            if self.state.rerun_budget.get(target, 0) > 0:
+            if self.state.rerun_budget.get(self.ANALYSIS_RERUN_KEY, 0) > 0:
                 runnable.append(target)
             else:
                 exhausted.append(target)
         return runnable, exhausted, invalid
+
+    def _gate_after_analysis_repair_exhaustion(self, gate: GateDecision) -> GateDecision:
+        reasons = list(dict.fromkeys([
+            *gate.blocking_reasons,
+            f"rerun_budget_exhausted:{self.ANALYSIS_RERUN_KEY}",
+        ]))
+        contract = self.state.analysis_review_contract
+        if (
+            gate.final_decision == "rerun"
+            and contract is not None
+            and contract.delivery_eligibility.evidence_limited_report_allowed
+        ):
+            return GateDecision(
+                passed=False,
+                final_decision="evidence_limited",
+                trust_score=gate.trust_score,
+                blocking_reasons=reasons,
+                repair_actions=list(gate.repair_actions),
+            )
+        return GateDecision(
+            passed=False,
+            final_decision="blocked",
+            trust_score=gate.trust_score,
+            blocking_reasons=reasons,
+            repair_actions=list(gate.repair_actions),
+        )
 
     def _route_after_analysis_gate(self, gate: GateDecision) -> str:
         if gate.final_decision == "passed":
@@ -1281,7 +1367,11 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         if self._typed_run() and gate.final_decision == "evidence_limited":
             self._record_stage("analysis_evidence_limited")
             return "analysis_evidence_limited"
-        if self._typed_run() and gate.final_decision == "rerun":
+        if (
+            self._typed_run()
+            and gate.final_decision in {"rerun", "blocked"}
+            and gate.repair_actions
+        ):
             targets, exhausted, invalid = self._typed_rerun_targets_for_gate(gate)
             if invalid:
                 self.state.analysis_gate_decision = GateDecision(
@@ -1294,21 +1384,42 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 self.state.gate_decision = self.state.analysis_gate_decision
                 self._record_stage("analysis_blocked")
                 return "analysis_blocked"
+            report_repairs = [
+                action
+                for action in gate.repair_actions
+                if action.target == "report_writing_analyst"
+            ]
+            if report_repairs and not targets and not exhausted and not gate.blocking_reasons:
+                contract = self.state.analysis_review_contract
+                outcome = (
+                    "passed"
+                    if contract is not None
+                    and contract.delivery_eligibility.formal_report_allowed
+                    else "evidence_limited"
+                )
+                self.state.analysis_gate_decision = GateDecision(
+                    passed=outcome == "passed",
+                    final_decision=outcome,
+                    trust_score=gate.trust_score,
+                    repair_actions=list(gate.repair_actions),
+                )
+                self.state.gate_decision = self.state.analysis_gate_decision
+                route = "analysis_passed" if outcome == "passed" else "analysis_evidence_limited"
+                self._record_stage(route)
+                return route
             if targets and not exhausted:
                 self._active_rerun_targets = targets
                 self._record_stage("analysis_needs_rerun")
                 return "analysis_needs_rerun"
-            self.state.analysis_gate_decision = GateDecision(
-                passed=False,
-                final_decision="blocked",
-                trust_score=gate.trust_score,
-                blocking_reasons=[
-                    *gate.blocking_reasons,
-                    *(f"rerun_budget_exhausted:{target}" for target in exhausted),
-                ],
-                repair_actions=list(gate.repair_actions),
-            )
+            self.state.analysis_gate_decision = self._gate_after_analysis_repair_exhaustion(gate)
             self.state.gate_decision = self.state.analysis_gate_decision
+            if self.state.analysis_gate_decision.final_decision == "evidence_limited":
+                self._record_stage("analysis_evidence_limited")
+                return "analysis_evidence_limited"
+            contract = self.state.analysis_review_contract
+            if contract is not None and contract.delivery_eligibility.blocked_notice_required:
+                self._record_stage("analysis_blocked_write")
+                return "analysis_blocked_write"
             self._record_stage("analysis_blocked")
             return "analysis_blocked"
         if self._typed_run() and gate.final_decision == "blocked" and self.state.analysis_review_contract is not None:
@@ -1467,8 +1578,8 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         self._record_stage("rerun_analysis_if_needed")
         if self._typed_run():
             targets = list(self._active_rerun_targets)
-            for target in targets:
-                self.state.rerun_budget[target] = max(self.state.rerun_budget.get(target, 0) - 1, 0)
+            remaining_budget = self.state.rerun_budget.get(self.ANALYSIS_RERUN_KEY, 0)
+            self.state.rerun_budget[self.ANALYSIS_RERUN_KEY] = max(remaining_budget - 1, 0)
             self.state.model_tier_overrides = {
                 target: self._model_tier_for_target(target)  # type: ignore[dict-item]
                 for target in targets
@@ -1503,7 +1614,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         self._record_stage("write_report")
         if self._typed_run():
             try:
-                report = self._typed_writer_document()
+                report = self._typed_writer_document(self._analysis_report_revision_instructions())
                 self.state.report_document = report
             except ValueError as error:
                 report = {"typed_error": str(error)}
@@ -1518,7 +1629,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         self._record_stage("write_report")
         if self._typed_run():
             try:
-                report = self._typed_writer_document()
+                report = self._typed_writer_document(self._analysis_report_revision_instructions())
                 self.state.report_document = report
             except ValueError as error:
                 report = {"typed_error": str(error)}
@@ -1532,7 +1643,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     def write_blocked_report(self) -> Any:
         self._record_stage("write_report")
         try:
-            report = self._typed_writer_document()
+            report = self._typed_writer_document(self._analysis_report_revision_instructions())
             self.state.report_document = report
         except ValueError as error:
             report = {"typed_error": str(error)}

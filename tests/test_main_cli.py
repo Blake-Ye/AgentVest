@@ -825,7 +825,9 @@ def test_run_writes_blocked_outputs_when_gate_fails(
     assert recommendation["stance_label"] == "阻断"
     assert structured_report["status"] == "blocked"
     assert structured_report["final_decision"] == "blocked"
-    assert '"status": "completed"' in latest_metrics
+    assert '"status": "blocked"' in latest_metrics
+    assert '"success": false' in latest_metrics
+    assert '"report_complete": false' in latest_metrics
 
 
 def test_run_overwrites_existing_formal_report_when_gate_fails(
@@ -1255,7 +1257,7 @@ def test_run_treats_sigterm_like_keyboard_interrupt(
     assert "运行被中断" in (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
 
 
-def test_run_overwrites_existing_formal_markdown_outputs_on_unexpected_error(
+def test_run_preserves_intermediate_markdown_but_invalidates_report_on_unexpected_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1317,14 +1319,15 @@ def test_run_overwrites_existing_formal_markdown_outputs_on_unexpected_error(
         "01_market_intelligence.md",
         "02_filing_review.md",
         "03_financial_analysis.md",
-        "04_investment_report.md",
         "08_data_quality_review.md",
         "09_logic_compliance_review.md",
     ):
         content = (run_dir / name).read_text(encoding="utf-8")
-        assert "运行投研工作流时发生未预期错误：模拟未预期错误" in content
-        assert "这是失败前写出的正式内容" not in content
-        assert "这是失败前写出的正式报告，不应在异常后保留" not in content
+        assert "这是失败前写出的正式内容" in content
+        assert "运行投研工作流时发生未预期错误：模拟未预期错误" not in content
+    final_report = (run_dir / "04_investment_report.md").read_text(encoding="utf-8")
+    assert "运行投研工作流时发生未预期错误：模拟未预期错误" in final_report
+    assert "这是失败前写出的正式报告" not in final_report
 
 
 def test_run_with_trigger_uses_flow_when_enabled(
@@ -1505,6 +1508,61 @@ def test_failed_rerun_invalidates_stale_terminal_delivery_truth(
     assert not output_paths.final_decision_path.exists()
     assert json.loads(output_paths.structured_recommendation_path.read_text(encoding="utf-8"))["status"] == "failed"
     assert json.loads(output_paths.structured_report_path.read_text(encoding="utf-8"))["status"] == "failed"
+
+
+def test_pre_delivery_failure_preserves_completed_intermediate_artifacts(tmp_path: Path) -> None:
+    from multi_agent import main
+
+    output_paths = _build_run_output_paths(
+        base_artifacts_dir=tmp_path / "artifacts",
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        run_time=datetime(2026, 6, 15, 10, 30, 45),
+    )
+    output_paths.run_dir.mkdir(parents=True)
+    main._initialize_standard_output_files(
+        output_paths, company_name="Apple Inc.", company_ticker="AAPL"
+    )
+    completed = "# 财务分析结果\n\n这是失败前已经完成的真实分析。\n"
+    output_paths.financial_analysis_path.write_text(completed, encoding="utf-8")
+
+    main._write_pre_delivery_failure(
+        output_paths,
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        error_message="复核阶段失败",
+    )
+
+    assert output_paths.financial_analysis_path.read_text(encoding="utf-8") == completed
+    assert "复核阶段失败" in output_paths.logic_compliance_review_path.read_text(encoding="utf-8")
+
+
+def test_materialize_outputs_explains_skipped_logic_review_for_analysis_block(tmp_path: Path) -> None:
+    from multi_agent import main
+
+    output_paths = _build_run_output_paths(
+        base_artifacts_dir=tmp_path / "artifacts",
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        run_time=datetime(2026, 6, 15, 10, 30, 45),
+    )
+    output_paths.run_dir.mkdir(parents=True)
+    main._initialize_standard_output_files(
+        output_paths, company_name="Apple Inc.", company_ticker="AAPL"
+    )
+
+    main._materialize_standard_outputs(
+        output_paths,
+        {
+            "status": "blocked",
+            "blocking_reasons": ["rerun_budget_exhausted:fundamental_analyst"],
+        },
+    )
+
+    content = output_paths.logic_compliance_review_path.read_text(encoding="utf-8")
+    assert "分析阶段已阻断" in content
+    assert "rerun_budget_exhausted:fundamental_analyst" in content
+    assert "PLACEHOLDER" not in content
 
 
 def test_post_delivery_failure_preserves_committed_terminal_package(

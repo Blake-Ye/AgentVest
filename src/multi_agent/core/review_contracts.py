@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+import json
+import re
+from typing import Any, Literal, Tuple
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from multi_agent.core.evidence import EvidenceTarget
 
@@ -176,6 +178,184 @@ class ReviewContract(BaseModel):
 
     def to_review_tool_summary(self) -> ReviewToolSummary:
         return self.coverage_summary.to_review_tool_summary()
+
+
+_MACHINE_READABLE_JSON = re.compile(
+    r"PART A:\s*MACHINE_READABLE_JSON[\s\S]*?```(?:json)?\s*([\s\S]*?)\s*```",
+    re.IGNORECASE,
+)
+_TOOL_HEALTH_KEYS = {
+    "overall_status",
+    "failed_tools",
+    "degraded_tools",
+    "notes",
+    "tool_status",
+}
+
+
+def _tool_status(value: object) -> tuple[str, str]:
+    if isinstance(value, dict):
+        raw_status = value.get("status", value.get("overall_status", "degraded"))
+        raw_note = value.get("notes", value.get("note", ""))
+    else:
+        raw_status, raw_note = value, ""
+    status = str(raw_status).strip().lower()
+    status = {
+        "ok": "healthy",
+        "pass": "healthy",
+        "passed": "healthy",
+        "success": "healthy",
+        "warning": "degraded",
+        "partial": "degraded",
+        "error": "failed",
+        "failure": "failed",
+        "skipped": "not_used",
+        "unused": "not_used",
+    }.get(status, status)
+    if status not in {"healthy", "degraded", "failed", "not_used"}:
+        status = "degraded"
+    note = (
+        "; ".join(map(str, raw_note))
+        if isinstance(raw_note, list)
+        else str(raw_note).strip()
+    )
+    return status, note
+
+
+def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, object]:
+    """Canonicalize known reviewer aliases without weakening strict validation."""
+    normalized = dict(payload)
+    summary = normalized.get("review_summary")
+    if isinstance(summary, str):
+        normalized["review_summary"] = {
+            "one_sentence_summary": summary,
+            "operator_notes": "",
+        }
+
+    actions = normalized.get("repair_actions")
+    if isinstance(actions, list):
+        normalized_actions: list[object] = []
+        for action in actions:
+            if not isinstance(action, dict):
+                normalized_actions.append(action)
+                continue
+            item = dict(action)
+            description = item.pop("description", None)
+            if not item.get("instruction") and description is not None:
+                item["instruction"] = str(description)
+            normalized_actions.append(item)
+        normalized["repair_actions"] = normalized_actions
+
+    health = normalized.get("tool_health_summary")
+    if isinstance(health, dict):
+        named_tools = {
+            str(name): value
+            for name, value in health.items()
+            if name not in _TOOL_HEALTH_KEYS and str(name).endswith("_tool")
+        }
+        if named_tools:
+            canonical_health = dict(health)
+            tool_status = (
+                list(health.get("tool_status", []))
+                if isinstance(health.get("tool_status"), list)
+                else []
+            )
+            failed = (
+                list(health.get("failed_tools", []))
+                if isinstance(health.get("failed_tools"), list)
+                else []
+            )
+            degraded = (
+                list(health.get("degraded_tools", []))
+                if isinstance(health.get("degraded_tools"), list)
+                else []
+            )
+            notes = (
+                list(health.get("notes", []))
+                if isinstance(health.get("notes"), list)
+                else []
+            )
+            for name, value in named_tools.items():
+                status, note = _tool_status(value)
+                tool_status.append({"tool_name": name, "status": status})
+                if status == "failed":
+                    failed.append(name)
+                elif status == "degraded":
+                    degraded.append(name)
+                if note:
+                    notes.append(f"{name}: {note}")
+                canonical_health.pop(name, None)
+            failed = list(dict.fromkeys(map(str, failed)))
+            degraded = list(dict.fromkeys(map(str, degraded)))
+            declared = str(health.get("overall_status", "healthy")).strip().lower()
+            if declared == "failed" or failed:
+                overall = "failed"
+            elif declared == "degraded" or degraded:
+                overall = "degraded"
+            else:
+                overall = "healthy"
+            canonical_health.update(
+                {
+                    "overall_status": overall,
+                    "failed_tools": failed,
+                    "degraded_tools": degraded,
+                    "notes": notes,
+                    "tool_status": tool_status,
+                }
+            )
+            normalized["tool_health_summary"] = canonical_health
+    return normalized
+
+
+def review_contract_from_payload(
+    payload: dict[str, object], *, expected_stage: ReviewStage | None = None
+) -> ReviewContract:
+    contract = ReviewContract.model_validate(normalize_review_contract_payload(payload))
+    if expected_stage is not None and contract.stage != expected_stage:
+        raise ValueError(f"stage must be {expected_stage!r}, got {contract.stage!r}")
+    return contract
+
+
+def review_contract_from_text(
+    review_text: str, *, expected_stage: ReviewStage | None = None
+) -> ReviewContract | None:
+    match = _MACHINE_READABLE_JSON.search(review_text)
+    if match is None:
+        return None
+    payload = json.loads(match.group(1).strip())
+    if not isinstance(payload, dict):
+        raise ValueError("ReviewContract JSON must be an object")
+    return review_contract_from_payload(payload, expected_stage=expected_stage)
+
+
+def _validate_review_output(task_output: Any, expected_stage: ReviewStage) -> Tuple[bool, Any]:
+    raw = str(getattr(task_output, "raw", "")).strip()
+    match = _MACHINE_READABLE_JSON.search(raw)
+    if match is None:
+        return False, "ReviewContract validation failed: PART A JSON block is missing"
+    try:
+        payload = json.loads(match.group(1).strip())
+        if not isinstance(payload, dict):
+            raise ValueError("ReviewContract JSON must be an object")
+        payload["stage"] = expected_stage
+        contract = review_contract_from_payload(payload, expected_stage=expected_stage)
+    except ValidationError as exc:
+        errors = "; ".join(
+            f"{'.'.join(map(str, error['loc']))}: {error['msg']}" for error in exc.errors()
+        )
+        return False, f"ReviewContract validation failed: {errors}"
+    except ValueError as exc:
+        return False, f"ReviewContract validation failed: {exc}"
+    canonical = contract.model_dump_json(indent=2)
+    return True, f"{raw[:match.start(1)]}{canonical}{raw[match.end(1):]}"
+
+
+def validate_analysis_review_output(task_output: Any):
+    return _validate_review_output(task_output, "analysis_review")
+
+
+def validate_report_review_output(task_output: Any):
+    return _validate_review_output(task_output, "report_review")
 
 
 class GateDecision(BaseModel):

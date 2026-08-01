@@ -70,6 +70,12 @@ data_quality_review_task:
     03_financial_analysis.md、10_research_evidence.json、reviewer tools 的结构化输出，以及显式传入的
     company_name、company_ticker、run_id。不得读取未明确提供的本地文件、网页缓存、
     额外 PDF、额外 HTML 或任何外部上下文。
+    reviewer-only 重跑时，以下 REVIEW_EVIDENCE_CONTEXT_JSON 是 Flow 从
+    10_research_evidence.json 生成的紧凑 canonical 证据，并在 analysis_artifacts 中保留
+    00-03 原始分析快照；必须同时检查 canonical 事实与分析文稿是否一致。值为 {} 时才允许
+    使用当前 Crew 的上游 task context：{review_evidence_context_json}。
+    不得自行构造 claims、evidence_refs、工具名称或财务字段；所有 reviewer tool 参数必须
+    逐项来自该 JSON 或当前 Crew 的上游 task context。
     禁止事项：不要重写研究结论；不要替分析师补证据；不要仅凭语气、标题、P0、Blockers、
     Gate 风险等 prose 风格直接给出 blocker；不要因为“看起来像专业报告”就默认
     formal_report 可放行；不要把工具失败与研究失败混为一谈；不要输出没有 evidence ref
@@ -78,18 +84,27 @@ data_quality_review_task:
     Step 1. 确认证据池边界，列出实际使用的 artifact 与 reviewer tools 结构化结果。
     Step 2. 评估研究证据质量，填写 evidence_coverage_ratio、financial_coverage_score、
     gate_financial_coverage_score，并识别 critical_conflict、unsupported_critical_claim、
-    market_policy_violation。
+    market_policy_violation。financial_field_completeness_tool 的 gate_required_fields 固定为
+    revenue、cash_and_equivalents、total_debt、diluted_shares、stock_price、
+    segment_revenue_services，禁止自行增删或改变分母；值为 false 表示未提取。
     Step 3. 评估工具健康状态，对每个 reviewer tool 标记 healthy、degraded、failed
     或 not_used，并判断 primary_class 是 none、research_blocked 还是 pipeline_degraded。
     Step 4. 评估交付资格，判断 formal_report_allowed、evidence_limited_report_allowed、
     blocked_notice_required，并确定 recommended_delivery_state。
-    Step 5. 先输出 JSON code block，必须引用 reviewer tools 的结构化结果；JSON 必须严格符合 AgentVest ReviewContract：
-    stage、reviewer_name、decision（gate_outcome、decision_confidence）、
+    Step 5. 先输出 JSON code block，必须引用 reviewer tools 的结构化结果；JSON 必须严格符合 AgentVest ReviewContract，
+    stage 必须为 analysis_review，并包含 reviewer_name、decision（gate_outcome、decision_confidence）、
     delivery_eligibility、failure_taxonomy、coverage_summary（含
     evidence_coverage_ratio、financial_coverage_score、claim_binding_ratio）、
     tool_health_summary、blocking_reasons、rerun_reasons、allow_limited_delivery、
     review_summary、artifact_refs、findings、repair_actions。不得使用 coverage、
     tool_health、review_stage 或未定义字段；未知字段会阻断本次交付。
+    嵌套结构固定：tool_health_summary 仅含 overall_status、failed_tools、degraded_tools、
+    notes、tool_status，tool_status 每项仅含 tool_name、status；review_summary 仅含
+    one_sentence_summary、operator_notes；repair_actions 每项仅含 target、code、fields、
+    sources、instruction，禁止使用 description。
+    critical_conflict_count 表示检测到的冲突，只有尚未解决的关键冲突才能计入
+    unresolved_critical_claim_count。针对 report_writing_analyst 的 repair action 只作为
+    下游写作指令，不得要求分析阶段重跑。
     Step 6. 再输出 markdown 审查说明，只解释机器判定，不得新增机器判定。
     Flow 会将 PART A 严格校验后持久化为 08_data_quality_review.json；输出格式必须严格按顺序输出：
     PART A: MACHINE_READABLE_JSON
@@ -176,6 +191,10 @@ logic_compliance_review_task:
     Step 4. 先输出 JSON code block，JSON 必须严格符合 AgentVest ReviewContract，
     stage 必须为 report_review，且使用 coverage_summary、tool_health_summary 和
     repair_actions；decision 仅表示审查建议，不是最终真值。
+    嵌套结构固定：tool_health_summary 仅含 overall_status、failed_tools、degraded_tools、
+    notes、tool_status，tool_status 每项仅含 tool_name、status；review_summary 仅含
+    one_sentence_summary、operator_notes；repair_actions 每项仅含 target、code、fields、
+    sources、instruction，禁止使用 description。
     Step 5. 再输出 markdown 审查说明，只解释 JSON，不得新增机器判定。
     Flow 会将 PART A 严格校验后持久化为 09_logic_compliance_review.json；输出格式必须严格按顺序输出：
     PART A: MACHINE_READABLE_JSON

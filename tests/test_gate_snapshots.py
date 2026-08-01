@@ -3,6 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
 from multi_agent.tools.investment_tools import build_fcf_snapshot, build_market_snapshot
 from multi_agent.tools.review_tools import FinancialFieldCompletenessTool
 from multi_agent.core.review_contracts import parse_legacy_review_contract
@@ -25,17 +26,23 @@ def test_market_snapshot_requires_price_and_diluted_shares_for_market_cap() -> N
     assert snapshot["ready_for_formal_report"] is False
 
 
-def test_financial_field_completeness_supports_gate_required_fields() -> None:
+def test_financial_field_completeness_uses_canonical_gate_required_fields() -> None:
     tool = FinancialFieldCompletenessTool()
+    extracted_fields = {field_name: 1 for field_name in FORMAL_GATE_REQUIRED_FIELDS}
+    extracted_fields["cash_and_equivalents"] = 0
+    extracted_fields["stock_price"] = False
 
     result = tool._run(
-        required_fields=["Revenue", "CashAndEquivalents"],
-        extracted_fields={"Revenue": 1},
-        gate_required_fields=["Revenue", "CashAndEquivalents"],
+        required_fields=list(FORMAL_GATE_REQUIRED_FIELDS),
+        extracted_fields=extracted_fields,
+        gate_required_fields=["revenue"],
     )
 
-    assert result["gate_financial_coverage_score"] == 0.5
-    assert result["gate_missing_fields"] == ["CashAndEquivalents"]
+    assert result["gate_required_field_count"] == len(FORMAL_GATE_REQUIRED_FIELDS)
+    assert result["gate_financial_coverage_score"] == (
+        len(FORMAL_GATE_REQUIRED_FIELDS) - 1
+    ) / len(FORMAL_GATE_REQUIRED_FIELDS)
+    assert result["gate_missing_fields"] == ["stock_price"]
 
 
 def test_legacy_review_contract_requires_explicit_adapter() -> None:

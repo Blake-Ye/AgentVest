@@ -217,7 +217,13 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
-def _extract_services_revenue_from_filing_html(filing_html: str) -> FinancialFieldExtraction:
+def _extract_services_revenue_from_filing_html(
+    filing_html: str,
+    *,
+    form: str | None = None,
+    period_start: date | None = None,
+    period_end: date | None = None,
+) -> FinancialFieldExtraction:
     compact_html = re.sub(r"\s+", " ", filing_html)
     lowered_html = compact_html.lower()
     section_start = lowered_html.find("products and services performance")
@@ -228,7 +234,11 @@ def _extract_services_revenue_from_filing_html(filing_html: str) -> FinancialFie
         ]
     section_text = html_module.unescape(re.sub(r"<[^>]+>", " ", compact_html))
     section_text = re.sub(r"\s+", " ", section_text)
-    match = re.search(r"Services\s*(?:\(\d+\))?\s*([0-9][0-9,]{3,})\b", section_text, re.IGNORECASE)
+    match = re.search(
+        r"Services\s*(?:\(\d+\))?\s*(?=[0-9])",
+        section_text,
+        re.IGNORECASE,
+    )
     if match is None:
         return FinancialFieldExtraction(
             value=0.0,
@@ -236,7 +246,24 @@ def _extract_services_revenue_from_filing_html(filing_html: str) -> FinancialFie
             extracted=False,
             source_tag=None,
         )
-    value_millions = float(match.group(1).replace(",", ""))
+    values = re.findall(r"\b[0-9][0-9,]{3,}\b", section_text[match.end() : match.end() + 300])
+    if not values:
+        return FinancialFieldExtraction(
+            value=0.0,
+            normalized_value=0.0,
+            extracted=False,
+            source_tag=None,
+        )
+    use_ytd_column = (
+        form == "10-Q"
+        and period_start is not None
+        and period_end is not None
+        and (period_end - period_start).days >= 120
+        and len(values) >= 3
+    )
+    # ponytail: Apple 10-Q tables list current quarter before YTD; parse XBRL contexts if layouts vary.
+    selected = values[2] if use_ytd_column else values[0]
+    value_millions = float(selected.replace(",", ""))
     normalized_value = value_millions * 1_000_000
     return FinancialFieldExtraction(
         value=normalized_value,
@@ -365,9 +392,42 @@ def _add_services_revenue_from_filing(
     filing_html: str,
     filing_metadata: dict[str, object] | None,
 ) -> None:
-    if any(fact.field_name == "segment_revenue_services" for fact in bundle.financial_facts):
+    existing = [
+        fact
+        for fact in bundle.financial_facts
+        if fact.field_name == "segment_revenue_services"
+    ]
+    revenue = next(
+        (fact for fact in bundle.financial_facts if fact.field_name == "revenue"),
+        None,
+    )
+    if existing and revenue is not None and any(
+        fact.formal_eligible and periods_are_compatible(revenue, fact) for fact in existing
+    ):
         return
-    extracted = _extract_services_revenue_from_filing_html(filing_html)
+    if existing:
+        bundle.financial_facts = [
+            fact
+            for fact in bundle.financial_facts
+            if fact.field_name != "segment_revenue_services"
+        ]
+        bundle.gaps.append(
+            _evidence_gap(
+                code="stale_services_company_fact",
+                target="fundamental_analyst",
+                fields=["segment_revenue_services"],
+                sources=[fact.source_url for fact in existing if fact.source_url],
+                message="Company Facts Services value is not compatible with the current revenue period; filing extraction is required.",
+            )
+        )
+    metadata = dict(filing_metadata or {})
+    _complete_filing_period_from_revenue(bundle, metadata)
+    extracted = _extract_services_revenue_from_filing_html(
+        filing_html,
+        form=str(metadata.get("form", "")).strip() or None,
+        period_start=_optional_date(metadata.get("period_start")),
+        period_end=_optional_date(metadata.get("period_end")),
+    )
     if not extracted.extracted:
         bundle.tool_health.append(
             ToolHealthRecord(
@@ -385,8 +445,6 @@ def _add_services_revenue_from_filing(
             )
         )
         return
-    metadata = dict(filing_metadata or {})
-    _complete_filing_period_from_revenue(bundle, metadata)
     services_fact = FinancialFact(
         field_name="segment_revenue_services",
         value=extracted.normalized_value,
@@ -962,24 +1020,25 @@ class FinancialMetricsTool(BaseTool):
         }
         filing_html = ""
         filing_metadata: dict[str, object] | None = None
+        fetch_financial_report = getattr(
+            self._service, "fetch_latest_financial_report", None
+        )
         fetch_annual_report = getattr(self._service, "fetch_latest_annual_report", None)
         fetch_filing_html = getattr(self._service, "fetch_latest_annual_report_html", None)
-        if callable(fetch_annual_report):
+        fetch_report = (
+            fetch_financial_report
+            if callable(fetch_financial_report)
+            else fetch_annual_report
+        )
+        if callable(fetch_report):
             try:
-                annual_report = fetch_annual_report(ticker)
-                filing_html = str(annual_report.get("html", ""))
+                financial_report = fetch_report(ticker)
+                filing_html = str(financial_report.get("html", ""))
                 filing_metadata = {
                     key: value
-                    for key, value in annual_report.items()
+                    for key, value in financial_report.items()
                     if key != "html"
                 }
-                services_revenue = _extract_services_revenue_from_filing_html(filing_html)
-                if services_revenue.extracted:
-                    metadata["segment_revenue_services"] = services_revenue.as_dict()
-                    segment_snapshot = {
-                        "services_revenue": services_revenue.normalized_value,
-                        "source_refs": [str(filing_metadata.get("source_url", "SEC annual filing"))],
-                    }
             except FatalAPIError:
                 raise
             except Exception:
@@ -988,13 +1047,6 @@ class FinancialMetricsTool(BaseTool):
         elif callable(fetch_filing_html):
             try:
                 filing_html = fetch_filing_html(ticker)
-                services_revenue = _extract_services_revenue_from_filing_html(filing_html)
-                if services_revenue.extracted:
-                    metadata["segment_revenue_services"] = services_revenue.as_dict()
-                    segment_snapshot = {
-                        "services_revenue": services_revenue.normalized_value,
-                        "source_refs": ["10-K Products and Services Performance"],
-                    }
             except FatalAPIError:
                 raise
             except Exception:
@@ -1051,6 +1103,25 @@ class FinancialMetricsTool(BaseTool):
             tavily_payloads=recorded_tavily_payloads(),
             filing_metadata=filing_metadata,
         )
+        services_fact = next(
+            (
+                fact
+                for fact in evidence_bundle.financial_facts
+                if fact.field_name == "segment_revenue_services"
+            ),
+            None,
+        )
+        if services_fact is not None:
+            metadata["segment_revenue_services"] = FinancialFieldExtraction(
+                value=services_fact.value,
+                normalized_value=services_fact.value,
+                extracted=True,
+                source_tag=services_fact.source_tag,
+            ).as_dict()
+            segment_snapshot = {
+                "services_revenue": services_fact.value,
+                "source_refs": [services_fact.source_url or services_fact.source_tag or "SEC filing"],
+            }
         formal_gate_snapshot = _formal_gate_snapshot_from_evidence(evidence_bundle)
         market_snapshot["ready_for_formal_report"] = formal_gate_snapshot[
             "ready_for_formal_report"

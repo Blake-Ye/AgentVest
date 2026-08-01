@@ -211,6 +211,42 @@ def test_official_sec_service_returns_annual_filing_identity_with_html() -> None
     }
 
 
+def test_official_sec_service_selects_latest_quarterly_or_annual_report() -> None:
+    quarterly_url = "https://www.sec.gov/Archives/edgar/data/320193/000032019326000013/aapl-20260328.htm"
+    session = RecordingSession(
+        {
+            "https://www.sec.gov/files/company_tickers.json": {
+                "0": {"title": "Apple Inc.", "ticker": "AAPL", "cik_str": 320193}
+            },
+            "https://data.sec.gov/submissions/CIK0000320193.json": {
+                "filings": {
+                    "recent": {
+                        "form": ["10-Q", "10-K"],
+                        "filingDate": ["2026-05-01", "2025-10-31"],
+                        "reportDate": ["2026-03-28", "2025-09-27"],
+                        "accessionNumber": [
+                            "0000320193-26-000013",
+                            "0000320193-25-000079",
+                        ],
+                        "primaryDocument": ["aapl-20260328.htm", "aapl-20250927.htm"],
+                        "primaryDocDescription": ["Quarterly report", "Annual report"],
+                    }
+                }
+            },
+            quarterly_url: "<html>quarterly filing</html>",
+        }
+    )
+
+    report = OfficialSecService(
+        settings=build_settings(), session=session
+    ).fetch_latest_financial_report("AAPL")
+
+    assert report["form"] == "10-Q"
+    assert report["report_date"] == "2026-03-28"
+    assert report["source_url"] == quarterly_url
+    assert report["html"] == "<html>quarterly filing</html>"
+
+
 def test_official_sec_service_falls_back_to_cached_ticker_directory_when_request_fails(
     tmp_path: Path,
 ) -> None:
@@ -303,3 +339,78 @@ def test_official_sec_service_falls_back_to_stockanalysis_quote_when_nasdaq_time
     assert payload["data"]["primaryData"]["lastTradeTimestamp"] == "Jul 17, 2026, 4:00 PM EDT"
     assert session.requests[0][0] == "https://api.nasdaq.com/api/quote/AAPL/info?assetclass=stocks"
     assert session.requests[1][0] == "https://stockanalysis.com/stocks/aapl/"
+
+
+def test_nasdaq_quote_does_not_reuse_sec_contact_user_agent() -> None:
+    url = "https://api.nasdaq.com/api/quote/AAPL/info?assetclass=stocks"
+    session = RecordingSession(
+        {
+            url: {
+                "data": {
+                    "primaryData": {
+                        "lastSalePrice": "$302.49",
+                        "lastTradeTimestamp": "Jul 31, 2026 10:52 AM ET",
+                    }
+                }
+            }
+        }
+    )
+
+    payload = OfficialSecService(settings=build_settings(), session=session).fetch_market_quote("AAPL")
+
+    assert payload["data"]["primaryData"]["lastSalePrice"] == "$302.49"
+    user_agent = str(session.requests[0][1]["headers"]["User-Agent"])
+    assert "analyst@example.com" not in user_agent
+
+
+def test_stockanalysis_quote_parser_supports_current_market_open_markup() -> None:
+    payload = OfficialSecService._parse_stockanalysis_quote_payload(
+        """
+        <div class="mb-5 flex flex-row items-end">
+          <div>
+            <div class="text-4xl font-bold transition-colors inline-block">303.02</div>
+            <div class="font-semibold inline-block text-2xl text-red-vivid">-30.41 (-9.12%)</div>
+            <div class="mt-1 flex items-center text-sm text-faded">
+              Jul 31, 2026, 11:00 AM EDT - Market open
+            </div>
+          </div>
+        </div>
+        """
+    )
+
+    assert payload["data"]["primaryData"]["lastSalePrice"] == "$303.02"
+    assert (
+        payload["data"]["primaryData"]["lastTradeTimestamp"]
+        == "Jul 31, 2026, 11:00 AM EDT - Market open"
+    )
+
+
+def test_quote_metrics_treat_http_200_without_price_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, bool, int | None]] = []
+    monkeypatch.setattr(
+        "multi_agent.tools.official_sec.record_api_call",
+        lambda service_name, success, status_code=None: calls.append(
+            (service_name, success, status_code)
+        ),
+    )
+    session = RecordingSession(
+        {
+            "https://api.nasdaq.com/api/quote/AAPL/info?assetclass=stocks": {
+                "data": {"primaryData": {}}
+            },
+            "https://stockanalysis.com/stocks/aapl/": """
+                <div class="text-4xl font-bold inline-block">303.02</div>
+                <div class="text-sm text-faded">Jul 31, 2026, 11:00 AM EDT - Market open</div>
+            """,
+        }
+    )
+
+    payload = OfficialSecService(settings=build_settings(), session=session).fetch_market_quote("AAPL")
+
+    assert payload["data"]["primaryData"]["lastSalePrice"] == "$303.02"
+    assert calls == [
+        ("Nasdaq Quote Info", False, 200),
+        ("StockAnalysis Quote Page", True, 200),
+    ]

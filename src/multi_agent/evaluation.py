@@ -249,11 +249,30 @@ class WorkflowEvaluation:
         artifact_inventory = self._build_artifact_inventory()
         report_generated, report_complete, citation_count = self._inspect_report()
         financial_fields_success_rate = self._calculate_financial_fields_success_rate()
-        semantic_metrics, final_decision = self._semantic_delivery_metrics()
+        semantic_metrics, decision = self._semantic_delivery_metrics()
+        final_decision = decision.final_decision if decision is not None else None
+        final_delivery_state = decision.final_delivery_state if decision is not None else None
+        if final_delivery_state == "blocked_notice":
+            report_generated = False
+            report_complete = False
         formal_delivery_complete = all(semantic_metrics.values())
-        effective_success = success and (
-            final_decision != "passed" or formal_delivery_complete
+        limited_delivery_complete = all(
+            semantic_metrics[name]
+            for name in (
+                "report_sections_complete",
+                "structured_outputs_complete",
+                "decision_projection_consistent",
+                "delivery_validation_passed",
+            )
         )
+        if decision is None:
+            effective_success = success
+        elif final_decision == "passed":
+            effective_success = success and formal_delivery_complete
+        elif final_decision == "evidence_limited":
+            effective_success = success and limited_delivery_complete
+        else:
+            effective_success = False
         semantic_error = (
             "formal_delivery_semantic_validation_failed"
             if success and final_decision == "passed" and not formal_delivery_complete
@@ -262,7 +281,11 @@ class WorkflowEvaluation:
         metrics = {
             "started_at": self.started_at_iso,
             "finished_at": _utc_now_iso(),
-            "status": "completed" if effective_success else "failed",
+            "status": (
+                "completed"
+                if effective_success
+                else "blocked" if final_decision == "blocked" else "failed"
+            ),
             "success": effective_success,
             "error_message": error_message or semantic_error,
             "company_name": self.company_name,
@@ -353,7 +376,9 @@ class WorkflowEvaluation:
         )
         return _round_metric(extracted_count / len(self._financial_fields))
 
-    def _semantic_delivery_metrics(self) -> tuple[dict[str, bool], str | None]:
+    def _semantic_delivery_metrics(
+        self,
+    ) -> tuple[dict[str, bool], FinalDecisionRecord | None]:
         """Validate persisted formal-delivery truth after the CLI has written it."""
         names = {
             "decision": "final_decision.json",
@@ -394,7 +419,7 @@ class WorkflowEvaluation:
                 "decision_projection_consistent": decision_projection_consistent,
                 "delivery_validation_passed": delivery_validation_passed,
             },
-            decision.final_decision if decision is not None else None,
+            decision,
         )
 
     @staticmethod

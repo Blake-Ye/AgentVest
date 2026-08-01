@@ -287,6 +287,25 @@ def _materialize_standard_outputs(output_paths: RunOutputPaths, result: object) 
             content = _final_report_content_from_result(result)
         if content:
             path.write_text(content + "\n", encoding="utf-8")
+    final_status = str(_workflow_result_value(result, "status", "")).strip().lower()
+    if final_status == "blocked" and _is_placeholder_file(
+        output_paths.logic_compliance_review_path
+    ):
+        reasons = _blocking_reasons_from_result(result)
+        body = [
+            "状态：分析阶段已阻断，未进入最终报告逻辑与合规审查。",
+            "",
+            "阻断原因：",
+            *(f"- {reason}" for reason in reasons),
+        ]
+        if not reasons:
+            body.append("- 分析门控未放行。")
+        _write_markdown_file(
+            output_paths.logic_compliance_review_path,
+            "逻辑与合规审查结果",
+            "\n".join(body),
+            placeholder=False,
+        )
 
 
 def _workflow_result_value(result: object, key: str, default: object = "") -> object:
@@ -425,6 +444,13 @@ def _write_evidence_limited_report(output_paths: RunOutputPaths, result: object)
 def _write_failure_outputs(output_paths: RunOutputPaths, *, error_message: str) -> None:
     failure_message = f"状态：运行失败。\n\n原因：{error_message}"
     for path, title in _standard_markdown_outputs(output_paths):
+        if (
+            path != output_paths.final_report_path
+            and path.exists()
+            and path.read_text(encoding="utf-8").strip()
+            and not _is_placeholder_file(path)
+        ):
+            continue
         _write_markdown_file(path, title, failure_message, placeholder=False)
 
 

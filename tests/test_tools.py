@@ -262,6 +262,34 @@ def test_services_revenue_retains_actual_filing_metadata(apple_sources: dict[str
     assert services.accession == "0000320193-25-000079"
 
 
+def test_stale_company_facts_services_value_is_replaced_by_current_filing(
+    apple_sources: dict[str, object],
+) -> None:
+    sources = deepcopy(apple_sources)
+    sources["company_facts"]["facts"]["us-gaap"]["SalesRevenueServicesGross"] = {
+        "units": {
+            "USD": [{
+                "val": 640_000_000,
+                "start": "2017-07-02",
+                "end": "2017-09-30",
+                "fy": 2017,
+                "fp": "FY",
+                "form": "10-K",
+                "filed": "2017-11-03",
+                "accn": "0000320193-17-000070",
+            }]
+        }
+    }
+
+    bundle = build_research_evidence_bundle(**sources)
+
+    services = bundle.require_fact("segment_revenue_services")
+    assert services.value == 109_158_000_000
+    assert services.period_end.isoformat() == "2025-09-27"
+    assert services.source_tag == "10k_products_services_table"
+    assert any(gap.code == "stale_services_company_fact" for gap in bundle.gaps)
+
+
 def test_sec_company_facts_without_formal_facts_is_degraded(apple_sources: dict[str, object]) -> None:
     sources = deepcopy(apple_sources)
     for concept in sources["company_facts"]["facts"]["us-gaap"].values():
@@ -569,6 +597,33 @@ class StubFormalReportInputsService(StubFormalFieldCompanyFactsService):
             }
         }
 
+
+class StubLatestFinancialReportService(StubFormalReportInputsService):
+    def fetch_latest_financial_report(self, _ticker: str) -> dict:
+        return {
+            "html": """
+            <h2>Products and Services Performance</h2>
+            <table><tr><td>Services</td><td>63,000</td></tr></table>
+            """,
+            "source_url": "https://www.sec.gov/Archives/current-quarterly.htm",
+            "accession": "0000320193-26-000013",
+            "filed_at": "2026-05-01",
+            "form": "10-Q",
+            "report_date": "2026-03-28",
+        }
+
+
+def test_financial_metrics_prefers_latest_financial_report_over_annual_fallback() -> None:
+    payload = json.loads(
+        FinancialMetricsTool(
+            settings=build_settings(), service=StubLatestFinancialReportService()
+        )._run("AAPL")
+    )
+
+    assert payload["segment_snapshot"]["services_revenue"] == 63_000_000_000
+    assert payload["segment_snapshot"]["source_refs"] == [
+        "https://www.sec.gov/Archives/current-quarterly.htm"
+    ]
 
 class StubFallbackMarketQuoteService(StubFormalReportInputsService):
     def fetch_market_quote(self, _ticker: str) -> dict:
@@ -994,6 +1049,25 @@ def test_extract_services_revenue_from_inline_xbrl_products_services_table() -> 
     assert extracted.extracted is True
     assert extracted.normalized_value == 109158000000.0
     assert extracted.source_tag == "10k_products_services_table"
+
+
+def test_extract_services_revenue_uses_ytd_column_for_six_month_10q() -> None:
+    filing_html = """
+    <div>Products and Services Performance</div>
+    <table>
+      <tr><td>Services</td><td>30,976</td><td>26,645</td><td>60,989</td><td>52,985</td></tr>
+    </table>
+    <div>Geographic Segments Performance</div>
+    """
+
+    extracted = _extract_services_revenue_from_filing_html(
+        filing_html,
+        form="10-Q",
+        period_start=date(2025, 9, 28),
+        period_end=date(2026, 3, 28),
+    )
+
+    assert extracted.normalized_value == 60_989_000_000.0
 
 
 class FailIfCalledSecService:

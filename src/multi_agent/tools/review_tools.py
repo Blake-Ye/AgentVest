@@ -6,6 +6,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from crewai.tools import BaseTool
 
+from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
+
+
+def _is_missing_extracted_value(value: Any) -> bool:
+    return value is None or value == "" or value is False
+
 
 class ReviewClaim(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -181,14 +187,16 @@ class FinancialFieldCompletenessTool(BaseTool):
         missing_fields = [
             field_name
             for field_name in required_fields
-            if field_name not in extracted_fields or extracted_fields[field_name] in (None, "")
+            if field_name not in extracted_fields
+            or _is_missing_extracted_value(extracted_fields[field_name])
         ]
         coverage_score = (len(required_fields) - len(missing_fields)) / len(required_fields)
-        gate_required_fields = gate_required_fields or required_fields
+        gate_required_fields = list(FORMAL_GATE_REQUIRED_FIELDS)
         gate_missing_fields = [
             field_name
             for field_name in gate_required_fields
-            if field_name not in extracted_fields or extracted_fields[field_name] in (None, "")
+            if field_name not in extracted_fields
+            or _is_missing_extracted_value(extracted_fields[field_name])
         ]
         gate_coverage_score = (
             1.0
@@ -201,4 +209,5 @@ class FinancialFieldCompletenessTool(BaseTool):
             "required_field_count": len(required_fields),
             "gate_financial_coverage_score": gate_coverage_score,
             "gate_missing_fields": gate_missing_fields,
+            "gate_required_field_count": len(gate_required_fields),
         }

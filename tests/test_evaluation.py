@@ -258,6 +258,42 @@ def test_formal_delivery_success_requires_all_semantic_completion_metrics(tmp_pa
     assert metrics["delivery_validation_passed"] is False
 
 
+def test_blocked_notice_is_not_counted_as_successful_complete_report(tmp_path: Path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    (artifacts_dir / "final_decision.json").write_text(
+        json.dumps(
+            {
+                "company_name": "Apple Inc.",
+                "company_ticker": "AAPL",
+                "final_decision": "blocked",
+                "final_delivery_state": "blocked_notice",
+                "trust_score": 77,
+                "blocking_reasons": ["quote_unavailable"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = artifacts_dir / "04_investment_report.md"
+    report.write_text("# 投资研究阻断通知\n\n报价不可用。", encoding="utf-8")
+    evaluator = WorkflowEvaluation(
+        artifacts_dir=artifacts_dir,
+        final_report_path=report,
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        time_source=StepClock([0.0, 1.0]),
+    )
+
+    evaluator.start()
+    metrics = evaluator.finalize(success=True)
+
+    assert metrics["success"] is False
+    assert metrics["status"] == "blocked"
+    assert metrics["report_generated"] is False
+    assert metrics["report_complete"] is False
+
+
 def test_formal_fact_provenance_requires_auditable_stock_price_snapshot() -> None:
     common = {
         "unit": "USD",

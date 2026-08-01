@@ -73,3 +73,18 @@ def test_build_flow_constructs_complete_market_validation_state() -> None:
     assert flow.state.market_validation.resolution_status == "confirmed"
     assert flow.state.market_validation.confidence > 0
     assert flow.state.market_validation.tool_policy.sec_allowed is True
+    assert flow.state.rerun_budget["analysis"] == 3
+    assert flow.state.rerun_budget["report_writing_analyst"] == 3
+
+
+def test_build_flow_caps_repair_rounds_at_three() -> None:
+    flow = runtime.build_flow(
+        {
+            "company_name": "Apple Inc.",
+            "company_ticker": "AAPL",
+            "rerun_budget_json": '{"analysis": 99, "report_writing_analyst": 99}',
+        }
+    )
+
+    assert flow.state.rerun_budget["analysis"] == 3
+    assert flow.state.rerun_budget["report_writing_analyst"] == 3

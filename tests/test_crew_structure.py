@@ -246,7 +246,7 @@ def test_flow_crews_preserve_seven_agent_topology_and_allow_targeted_override(
     assert len(workflow.analysis_crew().tasks) == 5
     assert len(workflow.report_crew().tasks) == 2
     assert len(workflow.crew().tasks) == 7
-    assert len(workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks) == 3
+    assert len(workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks) == 2
     assert workflow.quant_valuation_analyst().llm.model == "deep-model"
 
 
@@ -263,12 +263,11 @@ def test_targeted_financial_repair_preserves_current_task_context_chain(
 
     targeted_tasks = MultiAgent().targeted_analysis_crew(["quant_valuation_analyst"]).tasks
     tasks_by_output = {Path(task.output_file).name: task for task in targeted_tasks}
-    filing = tasks_by_output["02_filing_review.md"]
     financial = tasks_by_output["03_financial_analysis.md"]
     reviewer = tasks_by_output["08_data_quality_review.md"]
 
-    assert financial.context == [filing]
-    assert reviewer.context == [filing, financial]
+    assert financial.context == []
+    assert reviewer.context == [financial]
 
 
 def test_targeted_reviewer_context_excludes_prior_analysis_task_instances(
@@ -285,22 +284,39 @@ def test_targeted_reviewer_context_excludes_prior_analysis_task_instances(
     workflow = MultiAgent()
     prior_analysis_tasks = workflow.analysis_crew().tasks
     targeted_tasks = workflow.targeted_analysis_crew(["quant_valuation_analyst"]).tasks
-    filing = next(task for task in targeted_tasks if Path(task.output_file).name == "02_filing_review.md")
     financial = next(task for task in targeted_tasks if Path(task.output_file).name == "03_financial_analysis.md")
     reviewer = next(task for task in targeted_tasks if Path(task.output_file).name == "08_data_quality_review.md")
 
-    assert reviewer.context == [filing, financial]
+    assert reviewer.context == [financial]
     assert all(context in targeted_tasks for context in reviewer.context)
     assert all(context not in prior_analysis_tasks for context in reviewer.context)
+
+
+def test_targeted_reviewer_has_stable_task_name_for_metrics(
+    monkeypatch: pytest.MonkeyPatch, writable_crewai_storage: Path
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+
+    task = MultiAgent().targeted_analysis_crew(["data_quality_reviewer"]).tasks[0]
+    report_tasks = MultiAgent().report_crew().tasks
+
+    assert task.name == "data_quality_review_task"
+    assert [item.name for item in report_tasks] == [
+        "investment_report_task",
+        "logic_compliance_review_task",
+    ]
 
 
 @pytest.mark.parametrize(
     ("target", "expected_outputs"),
     (
-        ("market_validation_analyst", ("00_market_validation.md", "02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
-        ("event_guidance_analyst", ("00_market_validation.md", "01_market_intelligence.md", "02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
+        ("market_validation_analyst", ("00_market_validation.md", "08_data_quality_review.md")),
+        ("event_guidance_analyst", ("01_market_intelligence.md", "08_data_quality_review.md")),
         ("fundamental_analyst", ("02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
-        ("quant_valuation_analyst", ("02_filing_review.md", "03_financial_analysis.md", "08_data_quality_review.md")),
+        ("quant_valuation_analyst", ("03_financial_analysis.md", "08_data_quality_review.md")),
     ),
 )
 def test_targeted_evidence_repairs_include_producers_and_current_reviewer(
@@ -322,8 +338,6 @@ def test_targeted_evidence_repairs_include_producers_and_current_reviewer(
     assert tuple(Path(task.output_file).name for task in tasks) == expected_outputs
     reviewer = tasks[-1]
     assert reviewer.context == tasks[:-1]
-    quant_task = next(task for task in tasks if Path(task.output_file).name == "03_financial_analysis.md")
-    assert "Financial Metrics Calculator" in [tool.name for tool in quant_task.agent.tools]
-    if target == "event_guidance_analyst":
-        event_task = next(task for task in tasks if Path(task.output_file).name == "01_market_intelligence.md")
-        assert event_task in quant_task.context
+    if target in {"fundamental_analyst", "quant_valuation_analyst"}:
+        quant_task = next(task for task in tasks if Path(task.output_file).name == "03_financial_analysis.md")
+        assert "Financial Metrics Calculator" in [tool.name for tool in quant_task.agent.tools]

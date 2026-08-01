@@ -87,7 +87,7 @@ def _contract(**overrides: object) -> ReviewContract:
     return ReviewContract.model_validate(payload)
 
 
-def test_gate_blocks_cross_period_valuation(apple_bundle) -> None:
+def test_gate_requests_targeted_rerun_for_cross_period_valuation(apple_bundle) -> None:
     mixed = apple_bundle.model_copy(deep=True)
     shares = mixed.require_fact("diluted_shares")
     mixed.financial_facts = [
@@ -105,8 +105,14 @@ def test_gate_blocks_cross_period_valuation(apple_bundle) -> None:
 
     result = ConfidenceGatePolicy.default().evaluate(mixed, _contract())
 
-    assert result.final_decision == "blocked"
-    assert "valuation_period_mismatch" in result.blocking_reasons
+    assert result.final_decision == "rerun"
+    assert result.blocking_reasons == []
+    assert any(
+        action.target == "fundamental_analyst"
+        and action.code == "valuation_period_mismatch"
+        and action.fields == ["diluted_shares"]
+        for action in result.repair_actions
+    )
 
 
 def test_gate_requests_targeted_rerun_for_missing_services_fact(apple_bundle) -> None:
@@ -138,6 +144,37 @@ def test_gate_does_not_pass_when_reviewer_disallows_formal(apple_bundle) -> None
 
     assert result.final_decision == "evidence_limited"
     assert result.passed is False
+
+
+def test_formal_only_blocker_requests_repair_without_blocking_limited_delivery(
+    apple_bundle,
+) -> None:
+    bundle = _healthy_bundle(apple_bundle)
+    bundle.market_snapshots = []
+    contract = _contract(
+        decision={"gate_outcome": "rerun", "decision_confidence": "high"},
+        delivery_eligibility={
+            "formal_report_allowed": False,
+            "evidence_limited_report_allowed": True,
+            "blocked_notice_required": False,
+            "recommended_delivery_state": "evidence_limited_report",
+        },
+        failure_taxonomy={"primary_class": "pipeline_degraded"},
+        blocking_reasons=["stock_price_unavailable"],
+        repair_actions=[
+            {
+                "target": "quant_valuation_analyst",
+                "code": "missing_market_snapshot",
+                "fields": ["stock_price"],
+                "instruction": "重新获取报价。",
+            }
+        ],
+    )
+
+    result = ConfidenceGatePolicy.default().evaluate(bundle, contract)
+
+    assert result.final_decision == "rerun"
+    assert "stock_price_unavailable" in result.blocking_reasons
 
 
 def test_new_contract_rejects_legacy_or_unknown_fields() -> None:
@@ -219,8 +256,11 @@ def test_gate_blocks_cross_period_required_fact(apple_bundle, field_name: str) -
 
     result = ConfidenceGatePolicy.default().evaluate(bundle, _contract())
 
-    assert result.final_decision == "blocked"
-    assert "valuation_period_mismatch" in result.blocking_reasons
+    assert result.final_decision == "rerun"
+    assert any(
+        action.code == "valuation_period_mismatch" and action.fields == [field_name]
+        for action in result.repair_actions
+    )
 
 
 def test_gate_blocks_duplicate_required_fact_even_when_values_match(apple_bundle) -> None:
@@ -336,6 +376,23 @@ def test_explicit_reviewer_block_has_precedence_over_complete_evidence(apple_bun
     assert "reviewer_requested_block" in result.blocking_reasons
 
 
+def test_resolved_critical_conflict_does_not_block_delivery(apple_bundle) -> None:
+    contract = _contract(
+        coverage_summary={
+            "evidence_coverage_ratio": 1.0,
+            "financial_coverage_score": 1.0,
+            "claim_binding_ratio": 1.0,
+            "critical_conflict_count": 1,
+            "unresolved_critical_claim_count": 0,
+        }
+    )
+
+    result = ConfidenceGatePolicy.default().evaluate(_healthy_bundle(apple_bundle), contract)
+
+    assert result.final_decision == "passed"
+    assert "critical_conflict_count>0" not in result.blocking_reasons
+
+
 def test_explicit_reviewer_rerun_has_targeted_repair_action(apple_bundle) -> None:
     contract = _contract(
         decision={"gate_outcome": "rerun", "decision_confidence": "high"},
@@ -365,6 +422,29 @@ def test_degraded_raw_tool_health_cannot_pass_even_when_reviewer_says_healthy(ap
         "degraded_tool_health",
         "tool_health_disagreement",
     }
+    degraded_action = next(
+        action for action in result.repair_actions if action.code == "degraded_tool_health"
+    )
+    assert degraded_action.target == "fundamental_analyst"
+
+
+def test_degraded_tavily_routes_repair_to_event_research(apple_bundle) -> None:
+    bundle = _healthy_bundle(apple_bundle)
+    tavily_index = next(
+        index for index, item in enumerate(bundle.tool_health) if item.tool_name == "tavily"
+    )
+    bundle.tool_health[tavily_index] = bundle.tool_health[tavily_index].model_copy(
+        update={"status": "degraded"}
+    )
+
+    result = ConfidenceGatePolicy.default().evaluate(bundle, _contract())
+
+    assert any(
+        action.target == "event_guidance_analyst"
+        and action.code == "degraded_tool_health"
+        and action.sources == ["tavily"]
+        for action in result.repair_actions
+    )
 
 
 def test_failed_formal_tool_has_targeted_repair_action(apple_bundle) -> None:

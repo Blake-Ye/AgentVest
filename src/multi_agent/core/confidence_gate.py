@@ -27,21 +27,23 @@ class ConfidenceGatePolicy:
         """Evaluate only typed evidence and the strict reviewer contract for new runs."""
         diagnostics = diagnose_formal_delivery(bundle, FORMAL_GATE_REQUIRED_FIELDS)
         coverage = contract.coverage_summary
-        blocking_reasons = [
-            *diagnostics.blocking_reasons,
+        formal_blocking_reasons = [
             *contract.blocking_reasons,
             *coverage.blocking_reasons,
+        ]
+        terminal_blocking_reasons = [
+            *diagnostics.blocking_reasons,
             *coverage.market_policy_violations,
             *coverage.unsupported_critical_claims,
         ]
-        if coverage.critical_conflict_count > 0:
-            blocking_reasons.append("critical_conflict_count>0")
         if coverage.unresolved_critical_claim_count > 0:
-            blocking_reasons.append("unresolved_critical_claims>0")
+            terminal_blocking_reasons.append("unresolved_critical_claims>0")
         if contract.delivery_eligibility.blocked_notice_required:
-            blocking_reasons.append("delivery_blocked")
+            terminal_blocking_reasons.append("delivery_blocked")
         if contract.decision.gate_outcome == "block":
-            blocking_reasons.append("reviewer_requested_block")
+            terminal_blocking_reasons.append("reviewer_requested_block")
+        if not contract.delivery_eligibility.evidence_limited_report_allowed:
+            terminal_blocking_reasons.extend(formal_blocking_reasons)
 
         repair_actions = [
             *contract.repair_actions,
@@ -74,11 +76,11 @@ class ConfidenceGatePolicy:
                 )
             )
 
-        if blocking_reasons:
+        if terminal_blocking_reasons:
             outcome = "blocked"
         elif repair_actions:
             outcome = "rerun"
-        elif not contract.delivery_eligibility.formal_report_allowed:
+        elif formal_blocking_reasons or not contract.delivery_eligibility.formal_report_allowed:
             outcome = (
                 "evidence_limited"
                 if contract.delivery_eligibility.evidence_limited_report_allowed
@@ -90,7 +92,10 @@ class ConfidenceGatePolicy:
             passed=outcome == "passed",
             final_decision=outcome,
             trust_score=trust_score,
-            blocking_reasons=sorted(set(blocking_reasons)),
+            blocking_reasons=sorted(set([
+                *terminal_blocking_reasons,
+                *formal_blocking_reasons,
+            ])),
             repair_actions=_deduplicate_actions(repair_actions),
         )
 
@@ -109,20 +114,22 @@ class ConfidenceGatePolicy:
         reviewed_failed = set(contract.tool_health_summary.failed_tools)
         reviewed_status = contract.tool_health_summary.overall_status
         actions: list[RepairAction] = []
-        if raw_degraded:
-            actions.append(
-                RepairAction(
-                    target="data_quality_reviewer",
-                    code="degraded_tool_health",
-                    sources=raw_degraded,
-                    instruction="修复或复核降级工具的数据后重新审查。",
-                )
-            )
         critical_targets = {
             "sec_company_facts": "fundamental_analyst",
             "sec_filing": "fundamental_analyst",
+            "sec_filing_html": "fundamental_analyst",
             "quote": "market_validation_analyst",
+            "tavily": "event_guidance_analyst",
         }
+        for tool_name in raw_degraded:
+            actions.append(
+                RepairAction(
+                    target=critical_targets.get(tool_name, "data_quality_reviewer"),
+                    code="degraded_tool_health",
+                    sources=[tool_name],
+                    instruction="修复或复核降级工具的数据后重新审查。",
+                )
+            )
         for tool_name in raw_failed:
             target = critical_targets.get(tool_name, "data_quality_reviewer")
             actions.append(

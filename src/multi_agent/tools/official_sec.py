@@ -4,7 +4,7 @@ import json
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -76,7 +76,12 @@ def _raise_for_status_with_context(response: Any, service_name: str) -> None:
     )
 
 
-def _perform_request(request_callable: Any, *, service_name: str) -> Any:
+def _perform_request(
+    request_callable: Any,
+    *,
+    service_name: str,
+    response_validator: Callable[[Any], bool] | None = None,
+) -> Any:
     try:
         response = request_callable()
     except requests.RequestException as exc:
@@ -84,9 +89,15 @@ def _perform_request(request_callable: Any, *, service_name: str) -> Any:
         raise
 
     status_code = getattr(response, "status_code", None)
+    success = bool(status_code is not None and 200 <= status_code < 400)
+    if success and response_validator is not None:
+        try:
+            success = bool(response_validator(response))
+        except Exception:
+            success = False
     record_api_call(
         service_name=service_name,
-        success=bool(status_code is not None and 200 <= status_code < 400),
+        success=success,
         status_code=status_code,
     )
     return response
@@ -100,6 +111,10 @@ class OfficialSecService:
     SEC_COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
     NASDAQ_QUOTE_INFO_URL = "https://api.nasdaq.com/api/quote/{ticker}/info?assetclass=stocks"
     STOCK_ANALYSIS_QUOTE_URL = "https://stockanalysis.com/stocks/{ticker}/"
+    MARKET_DATA_USER_AGENT = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 AgentVest/1.0"
+    )
 
     def __init__(
         self,
@@ -181,9 +196,12 @@ class OfficialSecService:
         primary_documents = recent_filings.get("primaryDocument", [])
         descriptions = recent_filings.get("primaryDocDescription", [])
 
+        accepted_forms = {
+            item.strip().upper() for item in form_type.split("|") if item.strip()
+        }
         normalized_results: list[dict[str, str]] = []
         for index, form in enumerate(forms):
-            if str(form).upper() != form_type.upper():
+            if str(form).upper() not in accepted_forms:
                 continue
 
             accession_number = str(accession_numbers[index])
@@ -209,11 +227,21 @@ class OfficialSecService:
 
         return normalized_results
 
-    def fetch_latest_annual_report(self, ticker: str) -> dict[str, str]:
-        filings = self.search_filings(company_name="", ticker=ticker, form_type="10-K", limit=1)
+    def _fetch_latest_report(
+        self, ticker: str, *, form_types: tuple[str, ...]
+    ) -> dict[str, str]:
+        filings = self.search_filings(
+            company_name="",
+            ticker=ticker,
+            form_type="|".join(form_types),
+            limit=len(form_types),
+        )
         if not filings:
             return {}
-        filing = filings[0]
+        filing = max(
+            filings,
+            key=lambda item: (item.get("report_date", ""), item.get("filed_at", "")),
+        )
         filing_url = filing["filing_url"]
         response = _perform_request(
             lambda: self.session.get(
@@ -233,6 +261,13 @@ class OfficialSecService:
             "report_date": filing.get("report_date", ""),
         }
 
+    def fetch_latest_financial_report(self, ticker: str) -> dict[str, str]:
+        """Fetch the newest report period across quarterly and annual filings."""
+        return self._fetch_latest_report(ticker, form_types=("10-Q", "10-K"))
+
+    def fetch_latest_annual_report(self, ticker: str) -> dict[str, str]:
+        return self._fetch_latest_report(ticker, form_types=("10-K",))
+
     def fetch_latest_annual_report_html(self, ticker: str) -> str:
         """Backward-compatible HTML-only projection for legacy callers."""
         return self.fetch_latest_annual_report(ticker).get("html", "")
@@ -243,13 +278,14 @@ class OfficialSecService:
                 lambda: self.session.get(
                     self.NASDAQ_QUOTE_INFO_URL.format(ticker=ticker.upper()),
                     headers={
-                        "User-Agent": f"multi-agent-investment-research {self.settings.sec_api_email}",
+                        "User-Agent": self.MARKET_DATA_USER_AGENT,
                         "Accept": "application/json, text/plain, */*",
                         "Referer": "https://www.nasdaq.com/",
                     },
                     timeout=self.settings.http_timeout_seconds,
                 ),
                 service_name="Nasdaq Quote Info",
+                response_validator=lambda item: self._payload_has_last_sale_price(item.json()),
             )
         except requests.RequestException:
             return self._fetch_market_quote_fallback(ticker)
@@ -269,13 +305,16 @@ class OfficialSecService:
                 lambda: self.session.get(
                     self.STOCK_ANALYSIS_QUOTE_URL.format(ticker=ticker.lower()),
                     headers={
-                        "User-Agent": f"multi-agent-investment-research {self.settings.sec_api_email}",
+                        "User-Agent": self.MARKET_DATA_USER_AGENT,
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                         "Referer": "https://stockanalysis.com/",
                     },
                     timeout=self.settings.http_timeout_seconds,
                 ),
                 service_name="StockAnalysis Quote Page",
+                response_validator=lambda item: bool(
+                    self._parse_stockanalysis_quote_payload(getattr(item, "text", ""))
+                ),
             )
         except requests.RequestException:
             return {}
@@ -291,14 +330,23 @@ class OfficialSecService:
     @staticmethod
     def _parse_stockanalysis_quote_payload(page_html: str) -> dict[str, Any]:
         compact_html = re.sub(r"\s+", " ", page_html)
-        match = re.search(
-            r'text-4xl[^"]*">([0-9]+(?:\.[0-9]+)?)</div>.*?At close:</span>\s*([^<]+)</div>',
+        price_match = re.search(
+            r'<div[^>]*class="[^"]*\btext-4xl\b[^"]*"[^>]*>\s*\$?([0-9][0-9,]*(?:\.[0-9]+)?)\s*</div>',
             compact_html,
             re.IGNORECASE,
         )
-        if match is None:
+        if price_match is None:
             return {}
-        stock_price, timestamp = match.groups()
+        quote_context = compact_html[price_match.end() : price_match.end() + 1500]
+        timestamp_match = re.search(
+            r'At close:</span>\s*([^<]+)</div>|<div[^>]*class="[^"]*\btext-faded\b[^"]*"[^>]*>\s*([^<]+)</div>',
+            quote_context,
+            re.IGNORECASE,
+        )
+        if timestamp_match is None:
+            return {}
+        stock_price = price_match.group(1).replace(",", "")
+        timestamp = next(value for value in timestamp_match.groups() if value is not None)
         return {
             "source": "stockanalysis_quote_page",
             "data": {

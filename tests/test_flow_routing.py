@@ -1,6 +1,7 @@
 import json
 import sys
 from pathlib import Path
+from typing import Callable
 
 import pytest
 from pydantic import ValidationError
@@ -16,7 +17,14 @@ from multi_agent.core.evidence import (
 )
 from multi_agent.core.market import MarketValidationResult, build_tool_policy
 from multi_agent.core.model_routing import ModelRouter
-from multi_agent.core.review_contracts import GateDecision, RepairAction, ReviewContract
+from multi_agent.core.review_contracts import (
+    GateDecision,
+    RepairAction,
+    ReviewContract,
+    review_contract_from_text,
+    validate_analysis_review_output,
+    validate_report_review_output,
+)
 from multi_agent.core.state import EvidenceItem, ResearchRunState
 from multi_agent.evaluation import WorkflowEvaluation, activate_evaluation, clear_evaluation
 from multi_agent.flows.market_review_flow import MarketReviewFlow, MarketReviewFlowState
@@ -2142,7 +2150,7 @@ def test_typed_flow_reruns_only_repair_target_with_override_and_budget() -> None
             input_ticker="AAPL",
             evidence_bundle=bundle,
             execution_mode="new",
-            rerun_budget={"quant_valuation_analyst": 1},
+            rerun_budget={"analysis": 1},
         ),
     )
 
@@ -2151,11 +2159,204 @@ def test_typed_flow_reruns_only_repair_target_with_override_and_budget() -> None
     assert result["status"] == "passed"
     assert attempts[1]["rerun_targets"] == ["quant_valuation_analyst"]
     assert attempts[1]["model_tier_overrides"] == {"quant_valuation_analyst": "deep"}
-    assert flow.state.rerun_budget["quant_valuation_analyst"] == 0
+    assert flow.state.rerun_budget["analysis"] == 0
     assert result["repair_actions"][0]["target"] == "quant_valuation_analyst"
 
 
-def test_typed_flow_blocks_after_target_budget_is_exhausted() -> None:
+def test_typed_flow_retries_repairable_block_before_terminal_delivery() -> None:
+    bundle = _typed_bundle()
+    blocked_contract = _typed_contract(
+        outcome="block",
+        actions=[{
+            "target": "fundamental_analyst",
+            "code": "filing_period_conflict",
+            "fields": ["segment_revenue_services"],
+            "instruction": "重新提取同一期间的 SEC 字段。",
+        }],
+    )
+    blocked_contract.blocking_reasons = ["filing_period_conflict"]
+    attempts: list[dict[str, object]] = []
+
+    def executor(inputs: dict[str, object]) -> dict[str, object]:
+        attempts.append(dict(inputs))
+        contract = _typed_contract() if len(attempts) == 2 else blocked_contract
+        return {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": contract.model_dump(mode="json"),
+        }
+
+    result = MarketReviewFlow(
+        analysis_executor=executor,
+        report_writer=lambda _context: _typed_writer_payload(),
+        report_reviewer=lambda _document: _typed_report_contract().model_dump(mode="json"),
+        initial_state=MarketReviewFlowState(
+            request_id="repairable-block",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            execution_mode="new",
+            rerun_budget={"fundamental_analyst": 1},
+        ),
+    ).kickoff()
+
+    assert result["status"] == "passed"
+    assert attempts[1]["rerun_targets"] == ["fundamental_analyst"]
+
+
+def test_typed_flow_runs_three_targeted_repairs_then_continues_limited_delivery() -> None:
+    bundle = _typed_bundle()
+    contract_payload = _typed_contract(
+        outcome="rerun",
+        actions=[{
+            "target": "fundamental_analyst",
+            "code": "filing_gap",
+            "fields": ["segment_revenue_services"],
+            "instruction": "重新调用 SEC 工具补齐 Services 收入。",
+        }],
+    ).model_dump(mode="json")
+    contract_payload["delivery_eligibility"] = {
+        "formal_report_allowed": False,
+        "evidence_limited_report_allowed": True,
+        "blocked_notice_required": False,
+        "recommended_delivery_state": "evidence_limited_report",
+    }
+    contract_payload["failure_taxonomy"] = {
+        "primary_class": "coverage_gap",
+        "secondary_causes": ["filing_gap"],
+    }
+    contract_payload["rerun_reasons"] = ["filing_gap"]
+    contract_payload["allow_limited_delivery"] = True
+    rerun_contract = ReviewContract.model_validate(contract_payload)
+    attempts: list[dict[str, object]] = []
+    writer_contexts: list[dict[str, object]] = []
+
+    def executor(inputs: dict[str, object]) -> dict[str, object]:
+        attempts.append(dict(inputs))
+        return {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": rerun_contract.model_dump(mode="json"),
+        }
+
+    def writer(inputs: dict[str, object]) -> dict[str, object]:
+        writer_contexts.append(json.loads(str(inputs["REPORT_CONTEXT_JSON"])))
+        payload = _typed_writer_payload()
+        payload["stance"] = "watch"
+        payload["executive_summary"] = "证据受限：Services 收入仍未完成同期间验证。"
+        return payload
+
+    flow = MarketReviewFlow(
+        analysis_executor=executor,
+        report_writer=writer,
+        report_reviewer=lambda _document: _typed_report_contract().model_dump(mode="json"),
+        initial_state=MarketReviewFlowState(
+            request_id="three-repair-rounds",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            execution_mode="new",
+            rerun_budget={"analysis": 3},
+        ),
+    )
+
+    result = flow.kickoff()
+
+    assert result["status"] == "evidence_limited"
+    assert len(attempts) == 4
+    assert [attempt["rerun_targets"] for attempt in attempts[1:]] == [
+        ["fundamental_analyst"],
+        ["fundamental_analyst"],
+        ["fundamental_analyst"],
+    ]
+    assert flow.state.rerun_budget["analysis"] == 0
+    assert writer_contexts[0]["report_mode"] == "evidence_limited_report"
+    assert "rerun_budget_exhausted:analysis" in result["blocking_reasons"]
+
+
+def test_analysis_review_guardrail_returns_content_validation_errors() -> None:
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n"
+            "```json\n"
+            '{"stage":"data_quality_review","decision":{"gate_outcome":"conditional_pass"}}\n'
+            "```"
+        )
+
+    accepted, feedback = validate_analysis_review_output(Output())
+
+    assert accepted is False
+    assert "stage" not in str(feedback)
+    assert "decision.gate_outcome" in str(feedback)
+
+
+def test_analysis_review_guardrail_normalizes_known_reviewer_schema_drift() -> None:
+    payload = _typed_contract(
+        outcome="rerun",
+        actions=[{
+            "target": "fundamental_analyst",
+            "code": "filing_gap",
+            "instruction": "重新提取 SEC 字段。",
+        }],
+    ).model_dump(mode="json")
+    payload["tool_health_summary"] = {
+        "evidence_coverage_tool": {"status": "healthy", "notes": "coverage complete"},
+        "cross_source_consistency_tool": {"status": "degraded", "notes": "one conflict"},
+        "market_tool_policy_audit_tool": "healthy",
+        "financial_field_completeness_tool": "failed",
+    }
+    payload["review_summary"] = "存在可定向修复的数据缺口。"
+    payload["repair_actions"][0]["description"] = payload["repair_actions"][0].pop("instruction")
+
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n```json\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n```\n"
+            "PART B: HUMAN_READABLE_MARKDOWN\n需要定向修复。"
+        )
+
+    accepted, normalized_raw = validate_analysis_review_output(Output())
+    contract = review_contract_from_text(str(normalized_raw), expected_stage="analysis_review")
+
+    assert accepted is True
+    assert contract is not None
+    assert contract.tool_health_summary.overall_status == "failed"
+    assert contract.tool_health_summary.failed_tools == ["financial_field_completeness_tool"]
+    assert contract.tool_health_summary.degraded_tools == ["cross_source_consistency_tool"]
+    assert contract.review_summary.one_sentence_summary == "存在可定向修复的数据缺口。"
+    assert contract.repair_actions[0].instruction == "重新提取 SEC 字段。"
+    assert '"description"' not in str(normalized_raw)
+
+
+@pytest.mark.parametrize(
+    ("validator", "model_stage", "expected_stage"),
+    (
+        (validate_analysis_review_output, "report_review", "analysis_review"),
+        (validate_report_review_output, "analysis_review", "report_review"),
+    ),
+)
+def test_review_guardrail_owns_the_task_stage(
+    validator: Callable[[object], tuple[bool, object]],
+    model_stage: str,
+    expected_stage: str,
+) -> None:
+    payload = _typed_contract().model_dump(mode="json")
+    payload["stage"] = model_stage
+
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n```json\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n```\n"
+            "PART B: HUMAN_READABLE_MARKDOWN\n审查完成。"
+        )
+
+    accepted, normalized_raw = validator(Output())
+    contract = review_contract_from_text(str(normalized_raw), expected_stage=expected_stage)
+
+    assert accepted is True
+    assert contract is not None
+    assert contract.stage == expected_stage
+
+
+def test_typed_flow_blocks_after_analysis_repair_budget_is_exhausted() -> None:
     bundle = _typed_bundle()
     contract = _typed_contract(
         outcome="rerun",
@@ -2178,14 +2379,14 @@ def test_typed_flow_blocks_after_target_budget_is_exhausted() -> None:
             input_ticker="AAPL",
             evidence_bundle=bundle,
             execution_mode="new",
-            rerun_budget={"quant_valuation_analyst": 0},
+            rerun_budget={"analysis": 0},
         ),
     )
 
     result = flow.kickoff()
 
     assert result["status"] == "blocked"
-    assert "rerun_budget_exhausted:quant_valuation_analyst" in result["blocking_reasons"]
+    assert "rerun_budget_exhausted:analysis" in result["blocking_reasons"]
 
 
 @pytest.mark.parametrize("payload", [{}, {"title": "bad"}])
@@ -2287,6 +2488,96 @@ def test_typed_report_rework_passes_strict_feedback_to_second_writer() -> None:
     assert len(reviewed_documents) == 2
     assert reviewed_documents[0].executive_summary != reviewed_documents[1].executive_summary
     assert reviewed_documents[1].executive_summary == "已根据逻辑审查反馈重新绑定收入来源。"
+
+
+def test_analysis_review_defers_report_writer_action_to_report_generation() -> None:
+    bundle = _typed_bundle()
+    contract = _typed_contract(
+        actions=[{
+            "target": "report_writing_analyst",
+            "code": "add_evidence_header",
+            "instruction": "在事件章节增加证据等级说明。",
+        }]
+    )
+    writer_contexts: list[dict[str, object]] = []
+    executor_calls = 0
+
+    def executor(_inputs: dict[str, object]) -> dict[str, object]:
+        nonlocal executor_calls
+        executor_calls += 1
+        return {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": contract.model_dump(mode="json"),
+        }
+
+    def writer(inputs: dict[str, object]) -> dict[str, object]:
+        writer_contexts.append(json.loads(str(inputs["REPORT_CONTEXT_JSON"])))
+        return _typed_writer_payload()
+
+    result = MarketReviewFlow(
+        analysis_executor=executor,
+        report_writer=writer,
+        report_reviewer=lambda _document: _typed_report_contract().model_dump(mode="json"),
+        initial_state=MarketReviewFlowState(
+            request_id="defer-writer-repair",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            execution_mode="new",
+        ),
+    ).kickoff()
+
+    assert result["status"] == "passed"
+    assert executor_calls == 1
+    assert writer_contexts[0]["revision_instructions"] == [
+        "在事件章节增加证据等级说明。"
+    ]
+
+
+def test_default_report_crew_receives_identity_template_inputs() -> None:
+    captured_inputs: dict[str, object] = {}
+
+    class FakeReportCrew:
+        def kickoff(self, *, inputs: dict[str, object]) -> object:
+            captured_inputs.update(inputs)
+            return type("Result", (), {
+                "tasks_output": [
+                    _StubTaskOutput(
+                        "investment_report_task",
+                        json.dumps(_typed_writer_payload(), ensure_ascii=False),
+                    )
+                ]
+            })()
+
+    class FakeCrewFactory:
+        def configure_run(self, **_kwargs: object) -> None:
+            pass
+
+        def report_crew(self) -> FakeReportCrew:
+            return FakeReportCrew()
+
+    flow = MarketReviewFlow(
+        crew_factory=FakeCrewFactory(),
+        initial_state=MarketReviewFlowState(
+            request_id="report-inputs",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            execution_mode="new",
+            evidence_bundle=_typed_bundle(),
+            analysis_review_contract=_typed_contract(),
+            analysis_gate_decision=GateDecision(
+                passed=True,
+                final_decision="passed",
+                trust_score=90,
+            ),
+        ),
+    )
+
+    flow._typed_writer_document()
+
+    assert captured_inputs["company_name"] == "Apple Inc."
+    assert captured_inputs["company_ticker"] == "AAPL"
+    assert captured_inputs["run_id"] == "report-inputs"
+    assert "REPORT_CONTEXT_JSON" in captured_inputs
 
 
 @pytest.mark.parametrize(
@@ -2469,14 +2760,43 @@ def test_data_quality_rerun_preserves_evidence_and_rebuilds_only_review_contract
 
     assert result["status"] == "passed"
     assert attempts[1]["rerun_targets"] == ["data_quality_reviewer"]
+    review_context = json.loads(str(attempts[1]["review_evidence_context_json"]))
+    assert review_context["company_name"] == "Apple Inc."
+    assert review_context["ticker"] == "AAPL"
+    assert review_context["financial_facts"]
+    assert all(item["source_url"] for item in review_context["financial_facts"])
     assert flow.state.evidence_bundle == bundle
     assert flow.state.analysis_review_contract == _typed_contract()
+
+
+def test_reviewer_only_context_keeps_materialized_analysis_artifacts(tmp_path: Path) -> None:
+    bundle = _typed_bundle()
+    for filename, content in {
+        "00_market_validation.md": "market validation",
+        "01_market_intelligence.md": "event evidence",
+        "02_filing_review.md": "FY2026 data not extracted",
+        "03_financial_analysis.md": "FY2026 H1 data extracted",
+    }.items():
+        (tmp_path / filename).write_text(content, encoding="utf-8")
+    flow = MarketReviewFlow(
+        initial_state=MarketReviewFlowState(
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            execution_mode="new",
+            artifacts_dir=str(tmp_path),
+            evidence_bundle=bundle,
+        )
+    )
+
+    context = json.loads(flow._review_evidence_context_json())
+
+    assert context["analysis_artifacts"]["02_filing_review.md"] == "FY2026 data not extracted"
+    assert context["analysis_artifacts"]["03_financial_analysis.md"] == "FY2026 H1 data extracted"
 
 
 @pytest.mark.parametrize(
     ("target", "reason"),
     (
-        ("report_writing_analyst", "invalid_repair_phase:report_writing_analyst"),
         ("logic_compliance_reviewer", "invalid_repair_phase:logic_compliance_reviewer"),
     ),
 )

@@ -96,9 +96,19 @@ def diagnose_formal_delivery(
     revenue = canonical_facts.get("revenue")
     diluted_shares = canonical_facts.get("diluted_shares")
     if revenue is not None:
+        mismatched_fields: list[str] = []
         for field_name, fact in canonical_facts.items():
             if field_name != "revenue" and not periods_are_compatible(revenue, fact):
-                blockers.append("valuation_period_mismatch")
+                mismatched_fields.append(field_name)
+        if mismatched_fields:
+            repair_actions.append(
+                RepairAction(
+                    target="fundamental_analyst",
+                    code="valuation_period_mismatch",
+                    fields=sorted(mismatched_fields),
+                    instruction="重新查询并选择与收入事实同一财务期间的 SEC 字段后复核。",
+                )
+            )
 
     if "stock_price" in required_fields:
         if not bundle.market_snapshots:

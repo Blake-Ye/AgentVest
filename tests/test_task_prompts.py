@@ -39,3 +39,10 @@ def test_financial_analysis_prompt_forbids_unsupported_external_benchmarks() -> 
     assert "不得引入未在工具返回中出现的历史年份财务数字" in content
     assert "不得引用“行业典型区间”" in content
     assert "不得把假设性DCF、可比公司倍数、历史均值回归区间写成正式结论" in content
+
+
+def test_data_quality_prompt_receives_canonical_rerun_evidence_context() -> None:
+    content = _tasks_yaml_text()
+
+    assert "{review_evidence_context_json}" in content
+    assert "不得自行构造 claims、evidence_refs、工具名称或财务字段" in content

@@ -9,10 +9,10 @@ AgentVest 是一个基于 CrewAI 1.14.6 的多 Agent 自动化投研系统。输
 ## 核心能力
 
 - **7 Agent / 7 Task**：市场、事件、基本面、估值、数据质量、报告写作和逻辑合规职责分离。
-- **Flow + Gate + Recurrent**：问题可修复时定向重跑，无法修复时阻断正式报告。
+- **Flow + Gate + Recurrent**：问题可修复时按 `RepairAction` 定向重跑，全局最多 3 轮，随后继续受限或阻断交付。
 - **证据优先**：财务事实记录期间、单位、filing、accession、来源 URL 和引用关系。
 - **双格式交付**：同时生成 Markdown 报告和适合程序消费的 JSON 文档。
-- **离线可测**：Apple 端到端夹具不访问真实网络；当前完整测试套件为 322 项。
+- **离线可测**：Apple 端到端夹具不访问真实网络；当前完整测试套件为 337 项。
 - **运行产物隔离**：报告、日志和 watchlist 写入已忽略的 `var/`，不与源码混放。
 
 ## 工作流
@@ -25,13 +25,15 @@ flowchart LR
     C --> E[估值与量化分析]
     D --> E
     E --> F[数据质量审查]
-    F -->|rerun| C
+    F -->|rerun 且未满 3 轮| K[定向修复工具链]
+    K --> F
     F -->|passed| G[报告写作]
-    F -->|blocked| J[阻断说明]
+    F -->|预算耗尽或 blocked| G
     G --> H[逻辑与合规审查]
     H -->|rerun| G
     H -->|passed| I[正式报告交付]
-    H -->|blocked| J
+    H -->|evidence_limited| L[证据受限报告]
+    H -->|blocked| J[阻断说明]
 ```
 
 工作流内部 Gate 使用 `passed / rerun / blocked` 三态控制；最终交付还可能收敛为 `evidence_limited`：
@@ -41,9 +43,13 @@ flowchart LR
 | `passed` | 证据和审查契约均通过 | `formal_report` |
 | `rerun` | 存在可修复缺口且仍有预算 | 定向重跑相关 Agent |
 | `evidence_limited` | 证据不足，但允许受限说明 | `evidence_limited_report` |
-| `blocked` | 存在不可接受风险或预算耗尽 | `blocked_notice` |
+| `blocked` | 存在不可接受风险，审查契约要求阻断 | `blocked_notice` |
 
 只有 `passed / formal_report` 可以作为正式报告。其他状态不能被包装成正式投资结论。
+
+Recurrent 预算按分析修复轮次计算，而不是按 Agent 分别计算。同一轮可以定向调用多个
+证据工具链，但只消耗一次预算；第 3 轮后仍有缺口时不再无限重试，而是继续写作和合规审查，
+按最后一份审查契约生成 `evidence_limited_report` 或 `blocked_notice`。
 
 ## 快速开始
 
@@ -132,7 +138,7 @@ uv run multi_agent --company-name "Apple Inc."
 6. 检查 `10_research_evidence.json` 中关键财务事实期间、单位和来源一致。
 7. 检查 `06_structured_recommendation.json` 的摘要、催化剂和风险非空。
 
-Apple 和 Tesla 的旧运行报告已经被判定为历史回归资料，不能作为规范样例。具体问题见 [历史报告审计](docs/reports/legacy-report-audit-2026-07-30.md)。
+不要把历史失败运行当作规范样例；只有通过上述交付检查的目录才可作为正式报告。
 
 ## 输出文件
 
@@ -207,7 +213,7 @@ AgentVest/
 │   ├── runtime.py              # Crew/Flow 运行时装配
 │   └── settings.py             # 环境变量配置
 ├── tests/                      # 单元、路由、交付和离线 E2E 测试
-├── docs/                       # 架构、审计和路线图文档
+├── docs/                       # 架构与流程图文档
 ├── var/                        # 本地运行产物，Git 忽略
 ├── .env.example
 ├── pyproject.toml
@@ -271,9 +277,6 @@ uv run pytest \
 - [项目架构](docs/project_architecture.md)
 - [流程图](docs/project_flow_diagram.mmd)
 - [ER 图](docs/project_er_diagram.mmd)
-- [性能分析](docs/PERFORMANCE_PROFILING_ZH.md)
-- [项目拆解与路线图](docs/PROJECT_BREAKDOWN_ROADMAP_ZH.md)
-- [CrewAI 中文快速开始](CREWAI_QUICKSTART_ZH.md)
 
 ## 数据与合规边界
 

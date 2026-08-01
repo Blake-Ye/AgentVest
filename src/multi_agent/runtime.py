@@ -53,14 +53,15 @@ def build_flow(inputs: dict[str, str]):
                 continue
     if not rerun_budget:
         rerun_budget = {
-            "market_validation_analyst": 1,
-            "event_guidance_analyst": 1,
-            "fundamental_analyst": 1,
-            "quant_valuation_analyst": 1,
-            "data_quality_reviewer": 1,
-            "report_writing_analyst": 1,
-            "logic_compliance_reviewer": 1,
+            "analysis": MarketReviewFlow.MAX_REPAIR_ROUNDS,
+            "report_writing_analyst": MarketReviewFlow.MAX_REPAIR_ROUNDS,
         }
+    else:
+        for key in ("analysis", "report_writing_analyst"):
+            rerun_budget[key] = min(
+                rerun_budget.get(key, MarketReviewFlow.MAX_REPAIR_ROUNDS),
+                MarketReviewFlow.MAX_REPAIR_ROUNDS,
+            )
 
     return MarketReviewFlow(
         initial_state=MarketReviewFlowState(

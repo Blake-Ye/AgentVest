@@ -6,6 +6,10 @@ from crewai.project import CrewBase, agent, crew, task
 from crewai.agents.agent_builder.base_agent import BaseAgent
 
 from multi_agent.core.model_routing import ModelRouter
+from multi_agent.core.review_contracts import (
+    validate_analysis_review_output,
+    validate_report_review_output,
+)
 from multi_agent.evaluation import record_task_completion_callback
 from multi_agent.settings import InvestmentResearchSettings
 from multi_agent.tools.investment_tools import (
@@ -235,6 +239,8 @@ class MultiAgent:
                 self.financial_analysis_task(),
             ],
             output_file=self._task_output_file(self._artifact_path("08_data_quality_review.md")),
+            guardrail=validate_analysis_review_output,
+            guardrail_max_retries=2,
             callback=record_task_completion_callback,
         )
 
@@ -259,6 +265,8 @@ class MultiAgent:
             config=self.tasks_config["logic_compliance_review_task"],  # type: ignore[index]
             context=[self.investment_report_task(), self.data_quality_review_task()],
             output_file=self._task_output_file(self._artifact_path("09_logic_compliance_review.md")),
+            guardrail=validate_report_review_output,
+            guardrail_max_retries=2,
             callback=record_task_completion_callback,
         )
 
@@ -299,22 +307,15 @@ class MultiAgent:
     def targeted_analysis_crew(self, targets: list[str]) -> Crew:
         """Rerun only the agent tasks named by typed RepairAction targets."""
         expanded_targets = list(dict.fromkeys(targets))
-        if "event_guidance_analyst" in expanded_targets:
-            expanded_targets.append("market_validation_analyst")
+        if "fundamental_analyst" in expanded_targets:
+            expanded_targets.append("quant_valuation_analyst")
         if {
             "market_validation_analyst",
             "event_guidance_analyst",
             "fundamental_analyst",
             "quant_valuation_analyst",
         }.intersection(expanded_targets):
-            # Canonical evidence is renewed only after the filing, FinancialMetricsTool, and
-            # strict-review chain has consumed the current market/event task outputs.
-            expanded_targets = [
-                *expanded_targets,
-                "fundamental_analyst",
-                "quant_valuation_analyst",
-                "data_quality_reviewer",
-            ]
+            expanded_targets.append("data_quality_reviewer")
         target_order = (
             "market_validation_analyst",
             "event_guidance_analyst",
@@ -376,10 +377,17 @@ class MultiAgent:
                 if dependency in tasks_by_target
             ]
             tasks_by_target[target] = Task(
+                name=task_name,
                 config=self.tasks_config[task_name],  # type: ignore[index]
                 agent=agent_factory(),
                 context=context,
                 output_file=self._task_output_file(self._artifact_path(output_name)),
+                guardrail=(
+                    validate_analysis_review_output
+                    if target == "data_quality_reviewer"
+                    else None
+                ),
+                guardrail_max_retries=2,
                 callback=record_task_completion_callback,
             )
         tasks = list(tasks_by_target.values())
@@ -390,16 +398,20 @@ class MultiAgent:
     def report_crew(self) -> Crew:
         """Run writer and logic reviewer only after Flow supplies REPORT_CONTEXT_JSON."""
         writer = Task(
+            name="investment_report_task",
             config=self.tasks_config["investment_report_task"],  # type: ignore[index]
             agent=self.report_writing_analyst(),
             output_file=self._task_output_file(self._artifact_path("04_writer_payload.json")),
             callback=record_task_completion_callback,
         )
         reviewer = Task(
+            name="logic_compliance_review_task",
             config=self.tasks_config["logic_compliance_review_task"],  # type: ignore[index]
             agent=self.logic_compliance_reviewer(),
             context=[writer],
             output_file=self._task_output_file(self._artifact_path("09_logic_compliance_review.md")),
+            guardrail=validate_report_review_output,
+            guardrail_max_retries=2,
             callback=record_task_completion_callback,
         )
         return self._make_crew(tasks=[writer, reviewer])
