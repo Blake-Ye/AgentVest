@@ -314,10 +314,10 @@ class WorkflowEvaluation:
     def _build_task_durations(self, started_at_seconds: float) -> dict[str, float]:
         durations: dict[str, float] = {}
         previous_mark = started_at_seconds
-        for task_name in self._task_order:
-            completed_at = self._task_completion_seconds.get(task_name)
-            if completed_at is None:
-                continue
+        ordered_completions = sorted(
+            self._task_completion_seconds.items(), key=lambda item: item[1]
+        )
+        for task_name, completed_at in ordered_completions:
             durations[task_name] = _round_metric(completed_at - previous_mark)
             previous_mark = completed_at
         return durations

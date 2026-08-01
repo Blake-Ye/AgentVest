@@ -330,6 +330,26 @@ def test_writer_guardrail_accepts_canonical_payload() -> None:
     assert normalized_payload["sources"] == [{"source_id": "sec-10k"}]
 
 
+def test_writer_guardrail_normalizes_described_catalysts_and_risks() -> None:
+    payload = _formal_payload()
+    payload["catalysts"] = [
+        {"claim_id": "apple-revenue", "description": "收入增长催化剂。"}
+    ]
+    payload["risks"] = [
+        {"claim_id": "apple-services", "description": "服务增长放缓风险。"}
+    ]
+
+    class Output:
+        raw = json.dumps(payload, ensure_ascii=False)
+
+    accepted, normalized = report_document_module.validate_report_writer_output(Output())
+
+    assert accepted is True
+    normalized_payload = json.loads(str(normalized))
+    assert normalized_payload["catalysts"] == ["收入增长催化剂。"]
+    assert normalized_payload["risks"] == ["服务增长放缓风险。"]
+
+
 @pytest.mark.parametrize(
     ("mode", "stance", "field", "value"),
     [

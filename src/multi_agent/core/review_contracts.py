@@ -279,12 +279,40 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
             "blocked_notice_required": False,
             "recommended_delivery_state": "formal_report",
         }
+    elif (
+        normalized.get("stage") in {"report", "report_review"}
+        and isinstance(normalized.get("delivery_eligibility"), dict)
+    ):
+        eligibility = dict(normalized["delivery_eligibility"])
+        if eligibility.get("recommended_delivery_state") == "formal_report_with_limitations":
+            eligibility["recommended_delivery_state"] = "formal_report"
+        normalized["delivery_eligibility"] = eligibility
 
     if normalized.get("failure_taxonomy") == []:
         normalized["failure_taxonomy"] = {
             "primary_class": "none",
             "secondary_causes": [],
         }
+    elif (
+        normalized.get("stage") in {"report", "report_review"}
+        and isinstance(normalized.get("failure_taxonomy"), dict)
+    ):
+        taxonomy = dict(normalized["failure_taxonomy"])
+        if taxonomy.get("primary_class") == "minor_unbound_data_points":
+            taxonomy["primary_class"] = "unsupported_claim"
+        normalized["failure_taxonomy"] = taxonomy
+
+    coverage = normalized.get("coverage_summary")
+    if normalized.get("stage") in {"report", "report_review"} and isinstance(coverage, dict):
+        canonical_coverage = dict(coverage)
+        for report_only_key in (
+            "report_sections_present",
+            "missing_required_sections",
+            "claim_unbound",
+            "report_overreach",
+        ):
+            canonical_coverage.pop(report_only_key, None)
+        normalized["coverage_summary"] = canonical_coverage
 
     summary = normalized.get("review_summary")
     if isinstance(summary, str):
@@ -307,6 +335,16 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
                 normalized_actions.append(action)
                 continue
             item = dict(action)
+            if normalized.get("stage") in {"report", "report_review"} and item.get("target") in {
+                "executive_summary",
+                "business_overview",
+                "recent_events",
+                "financial_analysis",
+                "key_risks",
+                "investment_conclusion",
+                "source_index",
+            }:
+                item["target"] = "report_writing_analyst"
             description = item.pop("description", None)
             if not item.get("instruction") and description is not None:
                 item["instruction"] = str(description)
@@ -329,13 +367,16 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
 
     health = normalized.get("tool_health_summary")
     if isinstance(health, dict):
+        canonical_health = dict(health)
+        if isinstance(canonical_health.get("notes"), str):
+            note = str(canonical_health["notes"]).strip()
+            canonical_health["notes"] = [note] if note else []
         named_tools = {
             str(name): value
             for name, value in health.items()
             if name not in _TOOL_HEALTH_KEYS and str(name).endswith("_tool")
         }
         if named_tools:
-            canonical_health = dict(health)
             tool_status = (
                 list(health.get("tool_status", []))
                 if isinstance(health.get("tool_status"), list)
@@ -352,8 +393,8 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
                 else []
             )
             notes = (
-                list(health.get("notes", []))
-                if isinstance(health.get("notes"), list)
+                list(canonical_health.get("notes", []))
+                if isinstance(canonical_health.get("notes"), list)
                 else []
             )
             for name, value in named_tools.items():
@@ -384,7 +425,7 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
                     "tool_status": tool_status,
                 }
             )
-            normalized["tool_health_summary"] = canonical_health
+        normalized["tool_health_summary"] = canonical_health
     return normalized
 
 

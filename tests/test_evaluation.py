@@ -113,6 +113,29 @@ def test_workflow_evaluation_writes_latest_metrics_and_summary(tmp_path: Path) -
     assert written_summary["api_calls"]["failure_rate"] == 0.5
 
 
+def test_repeated_task_completion_never_produces_negative_duration(tmp_path: Path) -> None:
+    evaluator = WorkflowEvaluation(
+        artifacts_dir=tmp_path,
+        final_report_path=tmp_path / "report.md",
+        expected_task_outputs={},
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        time_source=StepClock([0.0]),
+    )
+    evaluator.start()
+    evaluator.record_task_completion("investment_report_task", completed_at=10.0)
+    evaluator.record_task_completion("logic_compliance_review_task", completed_at=20.0)
+    evaluator.record_task_completion("investment_report_task", completed_at=30.0)
+
+    durations = evaluator._build_task_durations(0.0)
+
+    assert durations == {
+        "logic_compliance_review_task": 20.0,
+        "investment_report_task": 10.0,
+    }
+    assert all(duration >= 0 for duration in durations.values())
+
+
 def test_workflow_evaluation_accumulates_summary_across_success_and_failure_runs(tmp_path: Path) -> None:
     artifacts_dir = tmp_path / "artifacts"
     artifacts_dir.mkdir()

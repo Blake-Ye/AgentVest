@@ -10,7 +10,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from multi_agent.core.confidence_gate import ConfidenceGatePolicy
 from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
-from multi_agent.core.review_contracts import RepairAction, ReviewContract, ToolHealthSummary
+from multi_agent.core.review_contracts import (
+    RepairAction,
+    ReviewContract,
+    ToolHealthSummary,
+    review_contract_from_text,
+    validate_report_review_output,
+)
 from multi_agent.evaluation import WorkflowEvaluation
 from multi_agent.tools.investment_tools import build_research_evidence_bundle
 
@@ -183,6 +189,64 @@ def test_new_contract_rejects_legacy_or_unknown_fields() -> None:
 
     with pytest.raises(ValidationError, match="legacy_rating"):
         ReviewContract.model_validate(payload)
+
+
+def test_report_review_guardrail_normalizes_known_report_specific_aliases() -> None:
+    payload = {
+        "stage": "report_review",
+        "decision": {"gate_outcome": "rerun", "decision_confidence": "medium"},
+        "delivery_eligibility": {
+            "formal_report_allowed": True,
+            "evidence_limited_report_allowed": True,
+            "blocked_notice_required": False,
+            "recommended_delivery_state": "formal_report_with_limitations",
+        },
+        "failure_taxonomy": {
+            "primary_class": "minor_unbound_data_points",
+            "secondary_causes": ["cash figure is unbound"],
+        },
+        "coverage_summary": {
+            "claim_binding_ratio": 0.8,
+            "report_sections_present": ["executive_summary"],
+            "missing_required_sections": [],
+            "claim_unbound": ["cash"],
+            "report_overreach": [],
+        },
+        "tool_health_summary": {
+            "overall_status": "healthy",
+            "failed_tools": [],
+            "degraded_tools": [],
+            "notes": "Writer completed.",
+            "tool_status": [{"tool_name": "writer", "status": "ok"}],
+        },
+        "review_summary": {
+            "one_sentence_summary": "少量绑定待修复。",
+            "operator_notes": "补充绑定。",
+        },
+        "repair_actions": [{
+            "target": "financial_analysis",
+            "code": "add_claim_bindings",
+            "fields": ["claim_ids"],
+            "sources": ["claim:cash_and_equivalents"],
+            "instruction": "补充现金来源绑定。",
+        }],
+    }
+
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n```json\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n```"
+        )
+
+    accepted, normalized = validate_report_review_output(Output())
+    contract = review_contract_from_text(str(normalized), expected_stage="report_review")
+
+    assert accepted is True
+    assert contract is not None
+    assert contract.delivery_eligibility.recommended_delivery_state == "formal_report"
+    assert contract.failure_taxonomy.primary_class == "unsupported_claim"
+    assert contract.tool_health_summary.notes == ["Writer completed."]
+    assert contract.repair_actions[0].target == "report_writing_analyst"
 
 
 @pytest.mark.parametrize(

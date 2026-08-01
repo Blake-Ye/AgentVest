@@ -869,6 +869,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             {
                 *(f"claim:{fact.field_name}" for fact in bundle.formal_facts()),
                 *(f"event:{event.event_id}" for event in report_events),
+                *(f"market:{index}" for index, _item in enumerate(bundle.market_snapshots)),
             }
         )
         sources = [
@@ -917,6 +918,15 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
 
     def _writer_context_json(self, context: ReportGenerationContext) -> str:
         bundle = context.evidence_bundle
+        unique_gaps: list[dict[str, object]] = []
+        seen_gaps: set[str] = set()
+        for gap in bundle.gaps:
+            item = gap.model_dump(mode="json")
+            fingerprint = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            if fingerprint in seen_gaps:
+                continue
+            seen_gaps.add(fingerprint)
+            unique_gaps.append(item)
         payload = {
             "company_name": context.company_name,
             "ticker": context.ticker,
@@ -935,7 +945,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                     event.model_dump(mode="json", exclude={"corroborating_source_urls"})
                     for event in self._report_events(bundle)
                 ],
-                "gaps": [gap.model_dump(mode="json") for gap in bundle.gaps],
+                "gaps": unique_gaps,
             },
             "analysis_review_contract": self._compact_analysis_contract(context),
             "allowed_claim_ids": list(context.allowed_claim_ids),
@@ -1022,12 +1032,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 detail = str(report.get("typed_error", "")).strip()
                 if detail and detail != "writer_payload_invalid":
                     details.append(detail)
-            return GateDecision(
-                passed=False,
-                final_decision="blocked",
-                trust_score=0,
-                blocking_reasons=["writer_payload_invalid", *details],
-            )
+            return self._writer_failure_gate("; ".join(details))
         try:
             raw_contract = (
                 self._report_reviewer(report)
@@ -1117,8 +1122,12 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             blocking_reasons=list(analysis_gate.blocking_reasons),
         )
 
-    def _report_review_failure_gate(self, report: ReportDocument) -> GateDecision:
-        reason = "report_review_guardrail_exhausted"
+    def _evidence_limited_failure_gate(
+        self,
+        *,
+        reason: str,
+        report: ReportDocument | None,
+    ) -> GateDecision:
         contract = self.state.analysis_review_contract
         if contract is None or not contract.delivery_eligibility.evidence_limited_report_allowed:
             self.state.report_document = None
@@ -1129,25 +1138,43 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 blocking_reasons=[reason],
             )
 
-        trust_score = min(report.trust_score, 60)
+        analysis_gate = self.state.analysis_gate_decision or self.state.gate_decision
+        trust_score = min(
+            (
+                report.trust_score
+                if report is not None
+                else getattr(analysis_gate, "trust_score", 60)
+            ),
+            60,
+        )
         section_messages = {
-            "executive_summary": "证据受限：逻辑与合规审查未形成有效结构化契约，正式结论暂不放行。",
-            "business_overview": "业务资料已收集，待逻辑与合规审查恢复后复核。",
+            "executive_summary": "证据受限：报告生成或逻辑审查未完成，正式结论暂不放行。",
+            "business_overview": "业务资料已收集，待报告链路恢复后复核。",
             "recent_events": "近期事件线索已收集，当前仅供观察，不作确定性判断。",
-            "financial_analysis": "财务事实已完成结构化校验，估值结论仍待逻辑与合规复核。",
-            "key_risks": "逻辑与合规审查不可用构成交付限制，其他风险待复核。",
-            "investment_conclusion": "当前仅供观察，待逻辑与合规审查恢复后再形成正式结论。",
+            "financial_analysis": "财务事实已完成结构化校验，估值结论仍待报告链路复核。",
+            "key_risks": "报告链路未完成构成交付限制，其他风险待复核。",
+            "investment_conclusion": "当前仅供观察，待报告链路恢复后再形成正式结论。",
             "source_index": "已验证来源保留在本报告来源索引中。",
         }
-        payload = report.model_dump(mode="json")
+        payload = report.model_dump(mode="json") if report is not None else {
+            "company_name": self.state.company_name,
+            "ticker": self.state.input_ticker,
+            "title": f"{self.state.company_name} 投资备忘录",
+            "sources": [],
+            "allowed_claim_ids": [],
+            "sections": {
+                key: {"key": key, "heading": SECTION_HEADINGS[key]}
+                for key in REQUIRED_SECTION_KEYS
+            },
+        }
         payload.update(
             {
                 "report_mode": "evidence_limited_report",
-                "title": f"{report.title}（证据受限）",
+                "title": f"{payload['title']}（证据受限）",
                 "stance": "watch",
                 "executive_summary": section_messages["executive_summary"],
                 "catalysts": ["现有研究线索仅供后续复核。"],
-                "risks": ["逻辑与合规审查未形成有效结构化契约，正式结论暂不放行。"],
+                "risks": ["报告生成或逻辑审查未完成，正式结论暂不放行。"],
                 "claims": [],
                 "trust_score": trust_score,
             }
@@ -1164,6 +1191,30 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             final_decision="evidence_limited",
             trust_score=trust_score,
             blocking_reasons=[reason],
+        )
+
+    def _report_review_failure_gate(self, report: ReportDocument) -> GateDecision:
+        return self._evidence_limited_failure_gate(
+            reason="report_review_guardrail_exhausted",
+            report=report,
+        )
+
+    def _writer_failure_gate(self, detail: str = "") -> GateDecision:
+        contract = self.state.analysis_review_contract
+        if contract is not None and contract.delivery_eligibility.evidence_limited_report_allowed:
+            return self._evidence_limited_failure_gate(
+                reason="writer_repair_exhausted",
+                report=self.state.report_document,
+            )
+        reasons = ["writer_payload_invalid"]
+        if detail:
+            reasons.append(detail)
+        self.state.report_document = None
+        return GateDecision(
+            passed=False,
+            final_decision="blocked",
+            trust_score=0,
+            blocking_reasons=reasons,
         )
 
     def _market_validation(self) -> MarketValidationResult | None:
@@ -1765,12 +1816,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                     report = self._typed_writer_document_with_repair(feedback)
                     self.state.report_document = report
                 except ValueError as error:
-                    report_gate = GateDecision(
-                        passed=False,
-                        final_decision="blocked",
-                        trust_score=0,
-                        blocking_reasons=["writer_payload_invalid", str(error)],
-                    )
+                    report_gate = self._writer_failure_gate(str(error))
                     break
                 self.state.report_result = report
                 report_gate = self._typed_report_gate(report)

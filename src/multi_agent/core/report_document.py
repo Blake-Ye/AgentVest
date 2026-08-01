@@ -4,7 +4,14 @@ import json
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from multi_agent.core.evidence import ResearchEvidenceBundle
 from multi_agent.core.review_contracts import ReviewContract
@@ -153,6 +160,27 @@ class ReportWriterPayload(BaseModel):
     claims: list[ReportClaim] = Field(default_factory=list)
     sources: list[ReportWriterSource] = Field(default_factory=list)
     sections: dict[str, ReportWriterSection]
+
+    @field_validator("catalysts", "risks", mode="before")
+    @classmethod
+    def normalize_described_items(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        normalized: list[object] = []
+        for item in value:
+            if not isinstance(item, dict):
+                normalized.append(item)
+                continue
+            text = next(
+                (
+                    item.get(key)
+                    for key in ("description", "text", "content", "summary", "title")
+                    if isinstance(item.get(key), str) and str(item[key]).strip()
+                ),
+                None,
+            )
+            normalized.append(text if text is not None else item)
+        return normalized
 
     @model_validator(mode="after")
     def validate_section_keys(self) -> "ReportWriterPayload":

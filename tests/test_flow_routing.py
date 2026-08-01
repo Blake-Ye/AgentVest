@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from multi_agent.core.confidence_gate import ConfidenceGatePolicy
 from multi_agent.core.evidence import (
+    EvidenceGap,
     EventEvidence,
     FinancialFact,
     MarketSnapshotEvidence,
@@ -2644,6 +2645,50 @@ def test_writer_guardrail_exhaustion_becomes_controlled_block() -> None:
     assert "rerun_budget_exhausted:report_writing_analyst" in result["blocking_reasons"][1]
 
 
+def test_writer_repair_exhaustion_falls_back_to_evidence_limited_delivery() -> None:
+    bundle = _typed_bundle()
+    analysis_contract = _typed_contract().model_dump(mode="json")
+    analysis_contract["delivery_eligibility"]["evidence_limited_report_allowed"] = True
+    writer_calls = 0
+
+    def writer(_inputs: dict[str, object]) -> dict[str, object]:
+        nonlocal writer_calls
+        writer_calls += 1
+        if writer_calls == 1:
+            return _typed_writer_payload()
+        raise RuntimeError("Task failed guardrail validation after 1 retries")
+
+    rerun_contract = _typed_report_contract(outcome="rerun").model_dump(mode="json")
+    rerun_contract["repair_actions"] = [{
+        "target": "report_writing_analyst",
+        "code": "repair_binding",
+        "instruction": "修复来源绑定。",
+    }]
+
+    result = MarketReviewFlow(
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": analysis_contract,
+        },
+        report_writer=writer,
+        report_reviewer=lambda _document: rerun_contract,
+        initial_state=MarketReviewFlowState(
+            request_id="writer-repair-exhausted-limited",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            execution_mode="new",
+            rerun_budget={"report_writing_analyst": 1},
+        ),
+    ).kickoff()
+
+    assert writer_calls == 2
+    assert result["status"] == "evidence_limited"
+    assert result["blocking_reasons"][0] == "writer_repair_exhausted"
+    assert result["report_document"]["report_mode"] == "evidence_limited_report"
+    assert result["report_document"]["stance"] == "watch"
+
+
 def test_real_report_reviewer_receives_validated_report_document() -> None:
     bundle = _typed_bundle()
     reviewer_inputs: list[dict[str, object]] = []
@@ -3003,6 +3048,22 @@ def test_report_llm_contexts_are_stage_specific_and_compact() -> None:
     ]
     bundle = _typed_bundle().model_copy(update={
         "events": events,
+        "gaps": [
+            EvidenceGap(
+                code="duplicate_gap",
+                target="fundamental_analyst",
+                fields=["eps"],
+                sources=["https://example.com/filing"],
+                message="相同缺口。",
+            ),
+            EvidenceGap(
+                code="duplicate_gap",
+                target="fundamental_analyst",
+                fields=["eps"],
+                sources=["https://example.com/filing"],
+                message="相同缺口。",
+            ),
+        ],
         "raw_artifact_refs": ["https://example.com/" + ("noise" * 2_000)],
     })
     flow = MarketReviewFlow(
@@ -3029,6 +3090,7 @@ def test_report_llm_contexts_are_stage_specific_and_compact() -> None:
 
     assert len(writer_json.encode()) < full_size * 0.8
     assert writer["evidence_bundle"]["financial_facts"]
+    assert len(writer["evidence_bundle"]["gaps"]) == 1
     assert "raw_artifact_refs" not in writer["evidence_bundle"]
     assert "tool_health" not in writer["evidence_bundle"]
     assert all(
@@ -3041,6 +3103,7 @@ def test_report_llm_contexts_are_stage_specific_and_compact() -> None:
         claim_id for claim_id in writer["allowed_claim_ids"]
         if claim_id.startswith("event:")
     ]) == 5
+    assert "market:0" in writer["allowed_claim_ids"]
     assert set(writer["analysis_review_contract"]) == {
         "delivery_eligibility",
         "blocking_reasons",
