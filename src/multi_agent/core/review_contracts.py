@@ -289,6 +289,20 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
             normalized_actions.append(item)
         normalized["repair_actions"] = normalized_actions
 
+    artifact_refs = normalized.get("artifact_refs")
+    if isinstance(artifact_refs, list):
+        normalized["artifact_refs"] = [
+            {
+                str(key): value
+                if isinstance(value, str)
+                else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+                for key, value in artifact.items()
+            }
+            if isinstance(artifact, dict)
+            else artifact
+            for artifact in artifact_refs
+        ]
+
     health = normalized.get("tool_health_summary")
     if isinstance(health, dict):
         named_tools = {

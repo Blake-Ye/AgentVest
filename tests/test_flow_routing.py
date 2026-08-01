@@ -22,6 +22,7 @@ from multi_agent.core.review_contracts import (
     GateDecision,
     RepairAction,
     ReviewContract,
+    review_contract_from_payload,
     review_contract_from_text,
     validate_analysis_review_output,
     validate_report_review_output,
@@ -222,6 +223,29 @@ def test_review_contract_accepts_analysis_and_report_stage_payloads() -> None:
 
     assert report_contract.stage == "report"
     assert report_contract.failure_taxonomy.primary_code == "report_inconsistency"
+
+
+def test_review_contract_stringifies_artifact_ref_metadata() -> None:
+    payload = _typed_contract().model_dump(mode="json")
+    payload["artifact_refs"] = [
+        {
+            "artifact_id": "10_research_evidence.json",
+            "confidence": 0.98,
+            "event_count": 30,
+            "annualized": False,
+        }
+    ]
+
+    contract = review_contract_from_payload(payload)
+
+    assert contract.artifact_refs == [
+        {
+            "artifact_id": "10_research_evidence.json",
+            "confidence": "0.98",
+            "event_count": "30",
+            "annualized": "false",
+        }
+    ]
 
 
 def test_review_contract_rejects_unknown_failure_taxonomy() -> None:
