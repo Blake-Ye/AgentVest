@@ -232,6 +232,7 @@ def test_writer_prompt_requires_revision_instructions_to_be_applied() -> None:
     tasks_yaml = Path("src/multi_agent/config/tasks.yaml").read_text(encoding="utf-8")
 
     writer_prompt = yaml.safe_load(tasks_yaml)["investment_report_task"]["description"]
+    assert "{REPORT_CONTEXT_JSON}" in writer_prompt
     assert "REPORT_CONTEXT_JSON.revision_instructions" in writer_prompt
     assert "每一条 repair action" in writer_prompt
     assert "每一条 rerun reason" in writer_prompt

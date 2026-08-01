@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from multi_agent.core.evidence import ResearchEvidenceBundle
 from multi_agent.core.review_contracts import ReviewContract
@@ -123,6 +124,70 @@ class SourceReference(BaseModel):
     url: str = Field(min_length=1)
     source_tag: str = Field(min_length=1)
     field_name: str | None = None
+
+
+class ReportWriterSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    heading: str = Field(min_length=1)
+    content: str = ""
+    claim_ids: list[str] = Field(default_factory=list)
+
+
+class ReportWriterSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str = Field(min_length=1)
+    title: str | None = None
+    url: str | None = None
+    source_tag: str | None = None
+    field_name: str | None = None
+
+
+class ReportWriterPayload(BaseModel):
+    """LLM-owned fields validated before Flow binds trusted control-plane data."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1)
+    stance: ReportStance
+    executive_summary: str = ""
+    catalysts: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    claims: list[ReportClaim] = Field(default_factory=list)
+    sources: list[ReportWriterSource] = Field(default_factory=list)
+    sections: dict[str, ReportWriterSection]
+
+    @model_validator(mode="after")
+    def validate_section_keys(self) -> "ReportWriterPayload":
+        actual_keys = tuple(self.sections)
+        if set(actual_keys) != set(REQUIRED_SECTION_KEYS) or len(actual_keys) != len(
+            REQUIRED_SECTION_KEYS
+        ):
+            raise ValueError("sections must contain exactly the required seven section keys")
+        self.sections = {key: self.sections[key] for key in REQUIRED_SECTION_KEYS}
+        return self
+
+
+def validate_report_writer_output(task_output: Any):
+    """Return actionable CrewAI retry feedback for malformed writer JSON."""
+    raw = str(getattr(task_output, "raw", "")).strip()
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError("writer JSON must be an object")
+        validated = ReportWriterPayload.model_validate(payload)
+    except json.JSONDecodeError as error:
+        return False, f"ReportWriterPayload validation failed: invalid JSON: {error.msg}"
+    except ValidationError as error:
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+            for item in error.errors()
+        )
+        return False, f"ReportWriterPayload validation failed: {details}"
+    except ValueError as error:
+        return False, f"ReportWriterPayload validation failed: {error}"
+    return True, validated.model_dump_json(indent=2, exclude_none=True)
 
 
 class ReportDocument(BaseModel):

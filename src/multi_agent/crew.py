@@ -6,6 +6,7 @@ from crewai.project import CrewBase, agent, crew, task
 from crewai.agents.agent_builder.base_agent import BaseAgent
 
 from multi_agent.core.model_routing import ModelRouter
+from multi_agent.core.report_document import validate_report_writer_output
 from multi_agent.core.review_contracts import (
     validate_analysis_review_output,
     validate_report_review_output,
@@ -259,6 +260,8 @@ class MultiAgent:
                 self.data_quality_review_task(),
             ],
             output_file=self._task_output_file(self._settings().final_report_path),
+            guardrail=validate_report_writer_output,
+            guardrail_max_retries=2,
             callback=record_task_completion_callback,
         )
 
@@ -397,6 +400,8 @@ class MultiAgent:
             config=self.tasks_config["investment_report_task"],  # type: ignore[index]
             agent=self.report_writing_analyst(),
             output_file=self._task_output_file(self._artifact_path("04_writer_payload.json")),
+            guardrail=validate_report_writer_output,
+            guardrail_max_retries=2,
             callback=record_task_completion_callback,
         )
         reviewer = Task(
@@ -418,6 +423,8 @@ class MultiAgent:
             config=self.tasks_config["investment_report_task"],  # type: ignore[index]
             agent=self.report_writing_analyst(),
             output_file=self._task_output_file(self._artifact_path("04_writer_payload.json")),
+            guardrail=validate_report_writer_output,
+            guardrail_max_retries=2,
             callback=record_task_completion_callback,
         )
         return self._make_crew(tasks=[writer])

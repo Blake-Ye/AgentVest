@@ -132,6 +132,8 @@ investment_report_task:
     03_financial_analysis.md、10_research_evidence.json、08_data_quality_review.json，
     以及显式传入的 REPORT_CONTEXT_JSON、company_name、company_ticker、run_id。
     不得读取未明确提供的外部网页、HTML、PDF、本地缓存或其他文件。
+    当前运行的完整控制面输入如下，必须读取并以它为准：
+    {REPORT_CONTEXT_JSON}
     REPORT_CONTEXT_JSON 是唯一控制面输入；其中 report_mode 只可能是 formal_report、
     evidence_limited_report、blocked_notice，你必须服从它，不得自行升级或降级状态。
     仅当 analysis gate 已通过时，才允许生成正式投资建议；若 gate 未通过，不得生成正式投资建议。
@@ -166,9 +168,12 @@ investment_report_task:
     只输出一个严格 JSON 对象，供 Python 通过 ReportDocument.from_writer_payload 校验和渲染。
     JSON 必须包含 title、stance、executive_summary、catalysts、risks、claims、sources 与
     sections；sections 必须且只能包含 executive_summary、business_overview、recent_events、
-    financial_analysis、key_risks、investment_conclusion、source_index 七个 key。每个核心
-    claim 必须绑定 source_ids。不得输出 markdown，不得输出 final_decision、report_mode、
-    company_name、ticker 或 trust_score，也不得自行选择终态。
+    financial_analysis、key_risks、investment_conclusion、source_index 七个 key，且每个值
+    必须是包含 heading、content、claim_ids 的对象。stance 只能是 buy、hold、sell、watch、
+    blocked 之一。每个 claim 必须包含 claim_id、text、critical、source_ids；每个 source
+    至少包含 source_id。claim_id 和 source_id 必须来自 REPORT_CONTEXT_JSON 中的
+    allowed_claim_ids 与 canonical_sources_json。不得输出 markdown，不得输出 final_decision、
+    report_mode、company_name、ticker 或 trust_score，也不得自行选择终态。
   agent: report_writing_analyst
 
 logic_compliance_review_task:

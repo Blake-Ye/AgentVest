@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 
 import pytest
 from pydantic import ValidationError
 
+import multi_agent.core.report_document as report_document_module
 from multi_agent.core.evidence import FinancialFact, ResearchEvidenceBundle
 from multi_agent.core.report_document import (
     REQUIRED_SECTION_KEYS,
@@ -281,6 +283,42 @@ def test_formal_document_rejects_unbound_noncritical_claim(
 
     with pytest.raises(ValidationError, match="must bind at least one source"):
         ReportDocument.model_validate(payload)
+
+
+def test_writer_guardrail_rejects_the_failed_run_payload_with_schema_feedback() -> None:
+    validator = getattr(report_document_module, "validate_report_writer_output", None)
+    assert validator is not None
+
+    class Output:
+        raw = json.dumps({
+            "title": "投资备忘录生成受阻",
+            "stance": "N/A",
+            "executive_summary": "未提供 REPORT_CONTEXT_JSON。",
+            "catalysts": [],
+            "risks": [],
+            "claims": [],
+            "sources": [],
+            "sections": {
+                key: "不可用"
+                for key in REQUIRED_SECTION_KEYS
+            },
+        }, ensure_ascii=False)
+
+    accepted, feedback = validator(Output())
+
+    assert accepted is False
+    assert "stance" in str(feedback)
+    assert "sections.executive_summary" in str(feedback)
+
+
+def test_writer_guardrail_accepts_canonical_payload() -> None:
+    class Output:
+        raw = json.dumps(_formal_payload(), ensure_ascii=False)
+
+    accepted, normalized = report_document_module.validate_report_writer_output(Output())
+
+    assert accepted is True
+    assert json.loads(str(normalized))["stance"] == "buy"
 
 
 @pytest.mark.parametrize(

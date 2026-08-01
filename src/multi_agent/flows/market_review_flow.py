@@ -323,7 +323,10 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             report_crew = getattr(crew_factory, "report_crew", None)
         if not callable(report_crew):
             raise ValueError("writer_payload_invalid")
-        result = report_crew().kickoff(inputs=writer_input)
+        try:
+            result = report_crew().kickoff(inputs=writer_input)
+        except Exception as error:
+            raise ValueError("writer_payload_invalid") from error
         self._typed_report_execution = result
         raw = self._task_output_raw(result, "investment_report_task", fallback_index=0)
         return raw

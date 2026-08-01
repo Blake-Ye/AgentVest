@@ -2504,6 +2504,39 @@ def test_real_report_crews_validate_writer_before_starting_reviewer() -> None:
     assert calls == {"writer": 1, "reviewer": 0}
 
 
+def test_writer_guardrail_exhaustion_becomes_controlled_block() -> None:
+    bundle = _typed_bundle()
+
+    class FakeWriterCrew:
+        def kickoff(self, *, inputs: dict[str, object]) -> object:
+            raise RuntimeError("Task failed guardrail validation after 2 retries")
+
+    class FakeCrewFactory:
+        def configure_run(self, **_kwargs: object) -> None:
+            pass
+
+        def report_writer_crew(self) -> FakeWriterCrew:
+            return FakeWriterCrew()
+
+    result = MarketReviewFlow(
+        crew_factory=FakeCrewFactory(),
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": _typed_contract().model_dump(mode="json"),
+        },
+        initial_state=MarketReviewFlowState(
+            request_id="writer-guardrail-exhausted",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            execution_mode="new",
+        ),
+    ).kickoff()
+
+    assert result["status"] == "blocked"
+    assert result["blocking_reasons"] == ["writer_payload_invalid"]
+
+
 def test_real_report_reviewer_receives_validated_report_document() -> None:
     bundle = _typed_bundle()
     reviewer_inputs: list[dict[str, object]] = []
