@@ -2376,6 +2376,41 @@ def test_report_review_guardrail_lifts_unambiguous_fields_nested_in_decision() -
     assert "stage_decision" not in str(normalized_raw)
 
 
+def test_report_review_guardrail_normalizes_legacy_scalar_contract_shape() -> None:
+    payload = {
+        "stage": "report_review",
+        "decision": {"outcome": "pass", "reason": "全部关键声明均可追溯。"},
+        "delivery_eligibility": True,
+        "failure_taxonomy": [],
+        "coverage_summary": {"claim_binding_ratio": 1.0},
+        "tool_health_summary": {"overall_status": "healthy"},
+        "review_summary": {
+            "one_sentence_summary": "报告通过逻辑审查。",
+            "operator_notes": "无越权表达。",
+        },
+        "artifact_refs": [{"artifact_name": "REPORT_DOCUMENT_JSON"}],
+        "repair_actions": [],
+    }
+
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n```json\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n```\n"
+            "PART B: HUMAN_READABLE_MARKDOWN\n审查完成。"
+        )
+
+    accepted, normalized_raw = validate_report_review_output(Output())
+    contract = review_contract_from_text(str(normalized_raw), expected_stage="report_review")
+
+    assert accepted is True
+    assert contract is not None
+    assert contract.decision.gate_outcome == "pass"
+    assert contract.delivery_eligibility.formal_report_allowed is True
+    assert contract.delivery_eligibility.recommended_delivery_state == "formal_report"
+    assert contract.failure_taxonomy.primary_class == "none"
+    assert contract.failure_taxonomy.secondary_causes == []
+
+
 def test_review_guardrail_rejects_conflicting_nested_delivery_eligibility() -> None:
     payload = _typed_report_contract().model_dump(mode="json")
     payload["decision"]["delivery_eligibility"] = {
@@ -2663,6 +2698,55 @@ def test_real_report_reviewer_receives_validated_report_document() -> None:
     assert result["status"] == "passed"
     assert report_document["company_name"] == "Apple Inc."
     assert report_document["report_mode"] == "formal_report"
+
+
+def test_report_reviewer_failure_falls_back_to_evidence_limited_delivery() -> None:
+    bundle = _typed_bundle()
+    analysis_contract = _typed_contract().model_dump(mode="json")
+    analysis_contract["delivery_eligibility"]["evidence_limited_report_allowed"] = True
+
+    class FakeWriterCrew:
+        def kickoff(self, *, inputs: dict[str, object]) -> object:
+            return type("Output", (), {
+                "tasks_output": [_StubTaskOutput(
+                    "investment_report_task",
+                    json.dumps(_typed_writer_payload(), ensure_ascii=False),
+                )]
+            })()
+
+    class FakeReviewCrew:
+        def kickoff(self, *, inputs: dict[str, object]) -> object:
+            raise RuntimeError("Task failed guardrail validation after 2 retries")
+
+    class FakeCrewFactory:
+        def configure_run(self, **_kwargs: object) -> None:
+            pass
+
+        def report_writer_crew(self) -> FakeWriterCrew:
+            return FakeWriterCrew()
+
+        def report_review_crew(self) -> FakeReviewCrew:
+            return FakeReviewCrew()
+
+    result = MarketReviewFlow(
+        crew_factory=FakeCrewFactory(),
+        analysis_executor=lambda _inputs: {
+            "evidence_bundle": bundle.model_dump(mode="json"),
+            "analysis_review_contract": analysis_contract,
+        },
+        initial_state=MarketReviewFlowState(
+            request_id="reviewer-guardrail-exhausted",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            evidence_bundle=bundle,
+            execution_mode="new",
+        ),
+    ).kickoff()
+
+    assert result["status"] == "evidence_limited"
+    assert result["blocking_reasons"] == ["report_review_guardrail_exhausted"]
+    assert result["report_document"]["report_mode"] == "evidence_limited_report"
+    assert result["report_document"]["stance"] == "watch"
 
 
 def test_typed_flow_blocks_malformed_or_rejecting_logic_review() -> None:

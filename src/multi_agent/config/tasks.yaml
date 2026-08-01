@@ -204,6 +204,11 @@ logic_compliance_review_task:
     Step 4. 先输出 JSON code block，JSON 必须严格符合 AgentVest ReviewContract，
     stage 必须为 report_review，且使用 coverage_summary、tool_health_summary 和
     repair_actions；decision 仅表示审查建议，不是最终真值。
+    固定类型：decision 必须为对象且仅含 gate_outcome（pass/rerun/block）和
+    decision_confidence（high/medium/low）；delivery_eligibility 必须为对象且仅含
+    formal_report_allowed、evidence_limited_report_allowed、blocked_notice_required、
+    recommended_delivery_state；failure_taxonomy 必须为对象且仅含 primary_class、
+    secondary_causes，禁止把这两个字段简写为布尔值或数组。
     嵌套结构固定：tool_health_summary 仅含 overall_status、failed_tools、degraded_tools、
     notes、tool_status，tool_status 每项仅含 tool_name、status；review_summary 仅含
     one_sentence_summary、operator_notes；repair_actions 每项仅含 target、code、fields、

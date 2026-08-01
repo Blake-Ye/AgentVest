@@ -954,7 +954,7 @@ class SecFilingContentInput(BaseModel):
     max_chars: int = Field(
         default=12_000,
         ge=100,
-        le=50_000,
+        le=20_000,
         description="Maximum number of cleaned filing-text characters to return.",
     )
 
@@ -975,6 +975,7 @@ class SecFilingContentTool(BaseTool):
         self._service = service or OfficialSecService(self._settings)
 
     def _run(self, filing_url: str, max_chars: int = 12_000) -> str:
+        max_chars = min(max_chars, 20_000)
         if self._settings.company_market_label and self._settings.company_market_label != "US":
             return json.dumps(
                 {"status": "unavailable", "reason": "SEC filings are US-market only."}
@@ -989,7 +990,7 @@ class SecFilingContentTool(BaseTool):
                 ensure_ascii=False,
             )
         clean_html = re.sub(
-            r"<(?:script|style)\b[^>]*>[\s\S]*?</(?:script|style)>",
+            r"<(?:script|style|ix:header)\b[^>]*>[\s\S]*?</(?:script|style|ix:header)>",
             " ",
             raw_html,
             flags=re.IGNORECASE,

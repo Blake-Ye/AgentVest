@@ -244,6 +244,7 @@ def _tool_status(value: object) -> tuple[str, str]:
 def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, object]:
     """Canonicalize known reviewer aliases without weakening strict validation."""
     normalized = dict(payload)
+    decision_reason: object | None = None
     raw_decision = normalized.get("decision")
     if isinstance(raw_decision, dict):
         decision = dict(raw_decision)
@@ -253,20 +254,37 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
                 normalized[key] = decision.pop(key)
             elif key in normalized and normalized[key] == nested_value:
                 decision.pop(key)
-        stage_decision = decision.get("stage_decision")
-        canonical_stage_decision = {
-            "pass": "pass",
-            "passed": "pass",
-            "rerun": "rerun",
-            "block": "block",
-            "blocked": "block",
-        }.get(str(stage_decision).strip().lower())
-        if "gate_outcome" not in decision and canonical_stage_decision is not None:
-            decision["gate_outcome"] = canonical_stage_decision
-            decision.pop("stage_decision")
-        elif decision.get("gate_outcome") == canonical_stage_decision:
-            decision.pop("stage_decision", None)
+        for alias in ("stage_decision", "outcome"):
+            alias_value = decision.get(alias)
+            canonical_outcome = {
+                "pass": "pass",
+                "passed": "pass",
+                "formal_report_allowed": "pass",
+                "rerun": "rerun",
+                "block": "block",
+                "blocked": "block",
+            }.get(str(alias_value).strip().lower())
+            if "gate_outcome" not in decision and canonical_outcome is not None:
+                decision["gate_outcome"] = canonical_outcome
+                decision.pop(alias)
+            elif decision.get("gate_outcome") == canonical_outcome:
+                decision.pop(alias, None)
+        decision_reason = decision.pop("reason", None)
         normalized["decision"] = decision
+
+    if normalized.get("delivery_eligibility") is True:
+        normalized["delivery_eligibility"] = {
+            "formal_report_allowed": True,
+            "evidence_limited_report_allowed": True,
+            "blocked_notice_required": False,
+            "recommended_delivery_state": "formal_report",
+        }
+
+    if normalized.get("failure_taxonomy") == []:
+        normalized["failure_taxonomy"] = {
+            "primary_class": "none",
+            "secondary_causes": [],
+        }
 
     summary = normalized.get("review_summary")
     if isinstance(summary, str):
@@ -274,6 +292,12 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
             "one_sentence_summary": summary,
             "operator_notes": "",
         }
+    if decision_reason is not None and isinstance(normalized.get("review_summary"), dict):
+        summary = dict(normalized["review_summary"])
+        note = str(summary.get("operator_notes", "")).strip()
+        reason = str(decision_reason).strip()
+        summary["operator_notes"] = "; ".join(part for part in (note, reason) if part)
+        normalized["review_summary"] = summary
 
     actions = normalized.get("repair_actions")
     if isinstance(actions, list):

@@ -394,6 +394,29 @@ def test_sec_filing_content_tool_returns_compact_source_bound_text() -> None:
     assert "ignore" not in result["text"]
 
 
+def test_sec_filing_content_tool_removes_xbrl_header_and_caps_output() -> None:
+    class StubFilingContentService:
+        def fetch_filing_html(self, _url: str) -> str:
+            return (
+                "<html><ix:header><ix:hidden>" + ("xbrl-noise " * 2_000)
+                + "</ix:hidden></ix:header><body>" + ("filing fact " * 3_000)
+                + "</body></html>"
+            )
+
+    tool = SecFilingContentTool(
+        settings=build_settings(), service=StubFilingContentService()
+    )
+    result = json.loads(tool._run(
+        "https://www.sec.gov/Archives/edgar/data/320193/example.htm",
+        max_chars=50_000,
+    ))
+
+    assert "xbrl-noise" not in result["text"]
+    assert result["text"].startswith("filing fact")
+    assert len(result["text"]) == 20_000
+    assert result["truncated"] is True
+
+
 def test_file_write_tool_persists_artifact(tmp_path: Path) -> None:
     artifact_path = tmp_path / "artifacts" / "note.md"
     tool = FileWriteTool()

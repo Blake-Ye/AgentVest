@@ -1028,11 +1028,14 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
                 trust_score=0,
                 blocking_reasons=["writer_payload_invalid", *details],
             )
-        raw_contract = (
-            self._report_reviewer(report)
-            if self._report_reviewer_injected
-            else self._execute_existing_report_review(report)
-        )
+        try:
+            raw_contract = (
+                self._report_reviewer(report)
+                if self._report_reviewer_injected
+                else self._execute_existing_report_review(report)
+            )
+        except Exception:
+            return self._report_review_failure_gate(report)
         if isinstance(raw_contract, str):
             contract_from_text, text_error = self._machine_readable_review_contract_from_text(
                 raw_contract
@@ -1112,6 +1115,55 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             final_decision=analysis_gate.final_decision,
             trust_score=analysis_gate.trust_score,
             blocking_reasons=list(analysis_gate.blocking_reasons),
+        )
+
+    def _report_review_failure_gate(self, report: ReportDocument) -> GateDecision:
+        reason = "report_review_guardrail_exhausted"
+        contract = self.state.analysis_review_contract
+        if contract is None or not contract.delivery_eligibility.evidence_limited_report_allowed:
+            self.state.report_document = None
+            return GateDecision(
+                passed=False,
+                final_decision="blocked",
+                trust_score=0,
+                blocking_reasons=[reason],
+            )
+
+        trust_score = min(report.trust_score, 60)
+        section_messages = {
+            "executive_summary": "证据受限：逻辑与合规审查未形成有效结构化契约，正式结论暂不放行。",
+            "business_overview": "业务资料已收集，待逻辑与合规审查恢复后复核。",
+            "recent_events": "近期事件线索已收集，当前仅供观察，不作确定性判断。",
+            "financial_analysis": "财务事实已完成结构化校验，估值结论仍待逻辑与合规复核。",
+            "key_risks": "逻辑与合规审查不可用构成交付限制，其他风险待复核。",
+            "investment_conclusion": "当前仅供观察，待逻辑与合规审查恢复后再形成正式结论。",
+            "source_index": "已验证来源保留在本报告来源索引中。",
+        }
+        payload = report.model_dump(mode="json")
+        payload.update(
+            {
+                "report_mode": "evidence_limited_report",
+                "title": f"{report.title}（证据受限）",
+                "stance": "watch",
+                "executive_summary": section_messages["executive_summary"],
+                "catalysts": ["现有研究线索仅供后续复核。"],
+                "risks": ["逻辑与合规审查未形成有效结构化契约，正式结论暂不放行。"],
+                "claims": [],
+                "trust_score": trust_score,
+            }
+        )
+        payload["sections"] = {
+            key: {**section, "content": section_messages[key], "claim_ids": []}
+            for key, section in payload["sections"].items()
+        }
+        limited_report = ReportDocument.model_validate(payload)
+        self.state.report_document = limited_report
+        self.state.report_result = limited_report
+        return GateDecision(
+            passed=False,
+            final_decision="evidence_limited",
+            trust_score=trust_score,
+            blocking_reasons=[reason],
         )
 
     def _market_validation(self) -> MarketValidationResult | None:
