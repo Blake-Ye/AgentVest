@@ -11,7 +11,7 @@ from crewai.flow.flow import Flow, listen, router, start
 
 from multi_agent.core.confidence_gate import ConfidenceGatePolicy
 from multi_agent.core.formal_gate import FORMAL_GATE_REQUIRED_FIELDS
-from multi_agent.core.evidence import ResearchEvidenceBundle
+from multi_agent.core.evidence import EventEvidence, ResearchEvidenceBundle
 from multi_agent.core.market import MarketValidationResult
 from multi_agent.core.delivery import DeliveryValidator
 from multi_agent.core.report_document import (
@@ -349,7 +349,9 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             "company_name": self.state.company_name,
             "company_ticker": self.state.input_ticker,
             "run_id": self.state.request_id,
-            "REPORT_CONTEXT_JSON": context.model_dump_json() if context is not None else "{}",
+            "REPORT_CONTEXT_JSON": (
+                self._report_review_context_json(context) if context is not None else "{}"
+            ),
             "REPORT_DOCUMENT_JSON": report.model_dump_json(),
         })
         self._typed_report_execution = result
@@ -840,16 +842,33 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             "blocked": "blocked_notice",
         }.get(gate.final_decision, "blocked_notice")
 
+    @staticmethod
+    def _report_events(bundle: ResearchEvidenceBundle) -> list[EventEvidence]:
+        selected: list[EventEvidence] = []
+        seen: set[str] = set()
+        for event in bundle.events:
+            if not event.independently_confirmed:
+                continue
+            key = event.corroboration_key or event.event_id
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(event)
+            if len(selected) == 5:
+                break
+        return selected
+
     def _build_report_context(self, revision_instructions: tuple[str, ...] = ()) -> ReportGenerationContext:
         gate = self.state.analysis_gate_decision or self.state.gate_decision
         bundle = self._evidence_bundle_for_gate()
         contract = self.state.analysis_review_contract
         if gate is None or bundle is None or contract is None:
             raise ValueError("typed report context requires analysis gate, bundle, and contract")
+        report_events = self._report_events(bundle)
         allowed_claim_ids = sorted(
             {
                 *(f"claim:{fact.field_name}" for fact in bundle.formal_facts()),
-                *(f"event:{event.event_id}" for event in bundle.events),
+                *(f"event:{event.event_id}" for event in report_events),
             }
         )
         sources = [
@@ -871,7 +890,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         sources.extend(
             SourceReference(source_id=f"event:{item.event_id}", title=item.title, url=item.source_url,
                             source_tag=item.source_type, field_name=None)
-            for item in bundle.events if item.independently_confirmed
+            for item in report_events
         )
         return ReportGenerationContext(
             company_name=self.state.company_name,
@@ -886,6 +905,57 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             revision_instructions=revision_instructions,
         )
 
+    @staticmethod
+    def _compact_analysis_contract(context: ReportGenerationContext) -> dict[str, object]:
+        contract = context.analysis_review_contract
+        return {
+            "delivery_eligibility": contract.delivery_eligibility.model_dump(mode="json"),
+            "blocking_reasons": list(contract.blocking_reasons),
+            "rerun_reasons": list(contract.rerun_reasons),
+            "allow_limited_delivery": contract.allow_limited_delivery,
+        }
+
+    def _writer_context_json(self, context: ReportGenerationContext) -> str:
+        bundle = context.evidence_bundle
+        payload = {
+            "company_name": context.company_name,
+            "ticker": context.ticker,
+            "report_mode": context.report_mode,
+            "evidence_bundle": {
+                "company_name": bundle.company_name,
+                "ticker": bundle.ticker,
+                "market_label": bundle.market_label,
+                "financial_facts": [
+                    fact.model_dump(mode="json") for fact in bundle.formal_facts()
+                ],
+                "market_snapshots": [
+                    snapshot.model_dump(mode="json") for snapshot in bundle.market_snapshots
+                ],
+                "events": [
+                    event.model_dump(mode="json", exclude={"corroborating_source_urls"})
+                    for event in self._report_events(bundle)
+                ],
+                "gaps": [gap.model_dump(mode="json") for gap in bundle.gaps],
+            },
+            "analysis_review_contract": self._compact_analysis_contract(context),
+            "allowed_claim_ids": list(context.allowed_claim_ids),
+            "canonical_sources_json": list(context.canonical_sources_json),
+            "revision_instructions": list(context.revision_instructions),
+        }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def _report_review_context_json(self, context: ReportGenerationContext) -> str:
+        payload = {
+            "company_name": context.company_name,
+            "ticker": context.ticker,
+            "report_mode": context.report_mode,
+            "analysis_review_contract": self._compact_analysis_contract(context),
+            "allowed_claim_ids": list(context.allowed_claim_ids),
+            "allowed_source_ids": [source.source_id for source in context.canonical_sources()],
+            "revision_instructions": list(context.revision_instructions),
+        }
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
     def _typed_writer_document(self, revision_instructions: tuple[str, ...] = ()) -> ReportDocument:
         context = self._build_report_context(revision_instructions)
         self.state.report_context = context
@@ -893,7 +963,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             "company_name": self.state.company_name,
             "company_ticker": self.state.input_ticker,
             "run_id": self.state.request_id,
-            "REPORT_CONTEXT_JSON": context.model_dump_json(),
+            "REPORT_CONTEXT_JSON": self._writer_context_json(context),
         }
         raw_payload = (
             self._report_writer(writer_input)
@@ -1183,10 +1253,13 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             "market_snapshots": [
                 snapshot.model_dump(mode="json") for snapshot in bundle.market_snapshots
             ],
-            "events": [event.model_dump(mode="json") for event in bundle.events],
+            "events": [
+                event.model_dump(mode="json", exclude={"corroborating_source_urls"})
+                for event in bundle.events
+            ],
             "tool_health": [item.model_dump(mode="json") for item in bundle.tool_health],
             "actionable_gaps": actionable_gaps,
-            "artifact_refs": list(bundle.raw_artifact_refs),
+            "artifact_refs": sorted([*analysis_artifacts, "10_research_evidence.json"]),
             "analysis_artifacts": analysis_artifacts,
             "valid_evidence_refs": valid_evidence_refs,
         }

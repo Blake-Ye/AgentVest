@@ -16,9 +16,10 @@ delivery gates, or the existing three-round targeted repair policy.
   registry alongside `REPORT_DOCUMENT_JSON`; do not resend raw research data.
 - Keep analysis-review prose available, but remove repeated event corroboration
   URL lists and duplicate raw source references from its canonical JSON input.
-- Limit intermediate markdown length and use one provider retry. Structured
-  guardrails perform no hidden retries because Flow owns up to three targeted
-  repair rounds.
+- Limit intermediate markdown length and use one provider retry. Writer
+  guardrails perform no hidden retries because Flow owns its targeted repair;
+  reviewers retain one guardrail retry because their Crew errors cannot yet be
+  recovered by Flow.
 
 ## Safety
 

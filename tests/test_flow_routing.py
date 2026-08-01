@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from multi_agent.core.confidence_gate import ConfidenceGatePolicy
 from multi_agent.core.evidence import (
+    EventEvidence,
     FinancialFact,
     MarketSnapshotEvidence,
     ResearchEvidenceBundle,
@@ -2872,6 +2873,76 @@ def test_default_report_crew_receives_identity_template_inputs() -> None:
     assert captured_inputs["company_ticker"] == "AAPL"
     assert captured_inputs["run_id"] == "report-inputs"
     assert "REPORT_CONTEXT_JSON" in captured_inputs
+
+
+def test_report_llm_contexts_are_stage_specific_and_compact() -> None:
+    events = [
+        EventEvidence(
+            event_id=f"event-{group}-{source}",
+            title=f"Confirmed event theme {group} source {source}",
+            source_url=f"https://source{source}.example.com/theme-{group}",
+            source_type="news",
+            confidence=0.8,
+            independently_confirmed=True,
+            corroboration_key=f"theme-{group}",
+            corroborating_source_urls=[
+                f"https://source0.example.com/theme-{group}",
+                f"https://source1.example.com/theme-{group}",
+            ],
+        )
+        for group in range(6)
+        for source in range(2)
+    ]
+    bundle = _typed_bundle().model_copy(update={
+        "events": events,
+        "raw_artifact_refs": ["https://example.com/" + ("noise" * 2_000)],
+    })
+    flow = MarketReviewFlow(
+        initial_state=MarketReviewFlowState(
+            request_id="compact-report-context",
+            company_name="Apple Inc.",
+            input_ticker="AAPL",
+            execution_mode="new",
+            evidence_bundle=bundle,
+            analysis_review_contract=_typed_contract(),
+            analysis_gate_decision=GateDecision(
+                passed=True,
+                final_decision="passed",
+                trust_score=90,
+            ),
+        )
+    )
+    context = flow._build_report_context()
+    full_size = len(context.model_dump_json().encode())
+
+    writer_json = flow._writer_context_json(context)
+    writer = json.loads(writer_json)
+    reviewer = json.loads(flow._report_review_context_json(context))
+
+    assert len(writer_json.encode()) < full_size * 0.8
+    assert writer["evidence_bundle"]["financial_facts"]
+    assert "raw_artifact_refs" not in writer["evidence_bundle"]
+    assert "tool_health" not in writer["evidence_bundle"]
+    assert all(
+        "corroborating_source_urls" not in event
+        for event in writer["evidence_bundle"]["events"]
+    )
+    assert len(writer["evidence_bundle"]["events"]) == 5
+    assert len({event["corroboration_key"] for event in writer["evidence_bundle"]["events"]}) == 5
+    assert len([
+        claim_id for claim_id in writer["allowed_claim_ids"]
+        if claim_id.startswith("event:")
+    ]) == 5
+    assert set(writer["analysis_review_contract"]) == {
+        "delivery_eligibility",
+        "blocking_reasons",
+        "rerun_reasons",
+        "allow_limited_delivery",
+    }
+    assert "evidence_bundle" not in reviewer
+    assert reviewer["report_mode"] == "formal_report"
+    assert reviewer["allowed_claim_ids"] == writer["allowed_claim_ids"]
+    assert reviewer["allowed_source_ids"]
 
 
 @pytest.mark.parametrize(

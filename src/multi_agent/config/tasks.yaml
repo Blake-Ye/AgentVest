@@ -4,7 +4,8 @@ market_validation_task:
     官方注册表和可验证线索输出 US、EU、HK 或 UNRESOLVED，并明确说明允许使用哪些工具，
     哪些结论必须阻断。结果必须使用中文，不能猜测。
   expected_output: >
-    一份中文 markdown 市场验证结果，包含市场标签、证据、置信度、工具白名单和人工确认需求。
+    一份不超过 500 个中文字符的 markdown 市场验证结果，包含市场标签、证据、
+    置信度、工具白名单和人工确认需求。
   agent: market_validation_analyst
 
 market_intelligence_task:
@@ -23,8 +24,8 @@ market_intelligence_task:
     4. 一旦已形成 5 个有来源支撑的核心事件账本，就停止搜索并开始写作。
     5. 若部分主题证据不足，直接写“证据不足/待验证”，不要为了补齐版面继续搜索。
   expected_output: >
-    一份中文 markdown 事件与指引分析，至少包含事件、时间、来源、影响路径、
-    置信度和待验证项，并附上至少 5 条来源引用。
+    一份中文 markdown 事件与指引分析，最多 5 个核心事件，正文不超过 2000 个中文字符；
+    包含事件、时间、来源、影响路径、置信度和待验证项，并附上至少 5 条来源引用。
   agent: event_guidance_analyst
 
 filing_review_task:
@@ -36,8 +37,8 @@ filing_review_task:
     若现金、债务、分部收入、services 占比等关键字段未验证，必须降级为待验证项，
     不得输出“结构性改善”“净现金状态可确认”等强结论。
   expected_output: >
-    一份中文 markdown 基本面分析，包含关键 filing、财务事实摘要、利多利空、
-    以及待补充证据。
+    一份中文 markdown 基本面分析，基本面正文不超过 2000 个中文字符；包含关键 filing、
+    财务事实摘要、利多利空以及待补充证据。
   agent: fundamental_analyst
 
 financial_analysis_task:
@@ -56,8 +57,8 @@ financial_analysis_task:
     历史均值回归区间写成正式结论。若为了说明敏感性必须展示情景分析，必须逐项标注“示例情景/
     待验证”，且不得据此给出目标价、买卖评级或“明显高估/低估”的确定性结论。
   expected_output: >
-    一份中文 markdown 估值与量化分析，包含关键指标表、估值判断、风险收益权衡
-    和数据缺口说明。
+    一份中文 markdown 估值与量化分析，量化正文不超过 1800 个中文字符；包含关键指标表、
+    估值判断、风险收益权衡和数据缺口说明。
   agent: quant_valuation_analyst
 
 data_quality_review_task:
@@ -118,7 +119,7 @@ data_quality_review_task:
   expected_output: >
     先输出一份符合 AgentVest Review Contract 的 machine-readable JSON，再输出一份
     中文 markdown 数据质量审查报告，用于解释 formal_report、evidence_limited_report、
-    blocked_notice 三种交付状态的资格判断与修复方向。
+    blocked_notice 三种交付状态的资格判断与修复方向；PART B 不超过 600 个中文字符。
   agent: data_quality_reviewer
 
 investment_report_task:
@@ -176,7 +177,8 @@ investment_report_task:
     allowed_claim_ids 与 canonical_sources_json。不得输出 markdown，不得输出 final_decision、
     report_mode、company_name、ticker 或 trust_score，也不得自行选择终态。formal_report
     下 executive_summary、financial_analysis、investment_conclusion 三个核心章节的
-    claim_ids 都必须至少包含一个 critical=true 的 claim_id。
+    claim_ids 都必须至少包含一个 critical=true 的 claim_id；每个 section 的 content
+    不超过 600 个中文字符。
   agent: report_writing_analyst
 
 logic_compliance_review_task:
@@ -216,5 +218,5 @@ logic_compliance_review_task:
   expected_output: >
     先输出一份符合 AgentVest Review Contract 的 machine-readable JSON，再输出一份
     中文 markdown 逻辑与合规审查报告，用于解释文本是否越权、claim-to-source binding
-    是否达标，以及当前报告与 REPORT_MODE 是否一致。
+    是否达标，以及当前报告与 REPORT_MODE 是否一致；PART B 不超过 600 个中文字符。
   agent: logic_compliance_reviewer

@@ -48,3 +48,17 @@ def test_data_quality_prompt_receives_canonical_rerun_evidence_context() -> None
 
     assert "{review_evidence_context_json}" in content
     assert "不得自行构造 claims、evidence_refs、工具名称或财务字段" in content
+
+
+def test_task_prompts_bound_intermediate_output_size() -> None:
+    compact = re.sub(r"\s+", "", _tasks_yaml_text())
+
+    for required_limit in (
+        "不超过500个中文字符",
+        "最多5个核心事件，正文不超过2000个中文字符",
+        "基本面正文不超过2000个中文字符",
+        "量化正文不超过1800个中文字符",
+        "PARTB不超过600个中文字符",
+        "每个section的content不超过600个中文字符",
+    ):
+        assert required_limit in compact

@@ -268,6 +268,32 @@ def test_flow_crews_preserve_seven_agent_topology_and_allow_targeted_override(
     assert workflow.quant_valuation_analyst().llm.model == "deep-model"
 
 
+def test_crewai_retries_do_not_stack_on_flow_repair_budget(
+    monkeypatch: pytest.MonkeyPatch, writable_crewai_storage: Path
+) -> None:
+    monkeypatch.setenv("FAST_MODEL", "fast-model")
+    monkeypatch.setenv("DEEP_MODEL", "deep-model")
+    monkeypatch.setenv("REVIEW_MODEL", "review-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "llm-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-key")
+    monkeypatch.setenv("SEC_API_EMAIL", "analyst@example.com")
+
+    workflow = MultiAgent()
+    crew = workflow.crew()
+
+    assert all(agent.max_retry_limit == 1 for agent in crew.agents)
+    structured_tasks = {
+        task.name: task for task in crew.tasks if task.guardrail is not None
+    }
+    assert structured_tasks["investment_report_task"].guardrail_max_retries == 0
+    assert structured_tasks["data_quality_review_task"].guardrail_max_retries == 1
+    assert structured_tasks["logic_compliance_review_task"].guardrail_max_retries == 1
+    assert workflow.report_writer_crew().tasks[0].guardrail_max_retries == 0
+    assert workflow.analysis_review_crew().tasks[0].guardrail_max_retries == 1
+    assert workflow.report_review_crew().tasks[0].guardrail_max_retries == 1
+
+
 def test_targeted_financial_repair_preserves_current_task_context_chain(
     monkeypatch: pytest.MonkeyPatch, writable_crewai_storage: Path
 ) -> None:

@@ -117,7 +117,7 @@ class MultiAgent:
             config=self.agents_config["market_validation_analyst"],  # type: ignore[index]
             llm=self._llm_for_tier(self._tier_for_agent("market_validation_analyst", "fast")),
             tools=[MarketValidationTool(settings=self._settings())],
-            max_retry_limit=3,
+            max_retry_limit=1,
             verbose=True,
         )
 
@@ -130,7 +130,7 @@ class MultiAgent:
                 TavilySearchTool(settings=self._settings()),
                 SecFilingContentTool(settings=self._settings()),
             ],
-            max_retry_limit=3,
+            max_retry_limit=1,
             verbose=True,
         )
 
@@ -148,7 +148,7 @@ class MultiAgent:
             config=self.agents_config["fundamental_analyst"],  # type: ignore[index]
             llm=self._llm_for_tier(self._tier_for_agent("fundamental_analyst", "deep")),
             tools=tools,
-            max_retry_limit=3,
+            max_retry_limit=1,
             verbose=True,
         )
 
@@ -158,7 +158,7 @@ class MultiAgent:
             config=self.agents_config["quant_valuation_analyst"],  # type: ignore[index]
             llm=self._llm_for_tier(self._tier_for_agent("quant_valuation_analyst", "deep")),
             tools=[FinancialMetricsTool(settings=self._settings())],
-            max_retry_limit=3,
+            max_retry_limit=1,
             verbose=True,
         )
 
@@ -173,7 +173,7 @@ class MultiAgent:
                 MarketToolPolicyAuditTool(),
                 FinancialFieldCompletenessTool(),
             ],
-            max_retry_limit=3,
+            max_retry_limit=1,
             verbose=True,
         )
 
@@ -183,7 +183,7 @@ class MultiAgent:
             config=self.agents_config["report_writing_analyst"],  # type: ignore[index]
             llm=self._llm_for_tier(self._tier_for_agent("report_writing_analyst", "deep")),
             tools=[],
-            max_retry_limit=3,
+            max_retry_limit=1,
             verbose=True,
         )
 
@@ -193,7 +193,7 @@ class MultiAgent:
             config=self.agents_config["logic_compliance_reviewer"],  # type: ignore[index]
             llm=self._llm_for_tier(self._tier_for_agent("logic_compliance_reviewer", "review")),
             tools=[],
-            max_retry_limit=3,
+            max_retry_limit=1,
             verbose=True,
         )
 
@@ -244,7 +244,7 @@ class MultiAgent:
             ],
             output_file=self._task_output_file(self._artifact_path("08_data_quality_review.md")),
             guardrail=validate_analysis_review_output,
-            guardrail_max_retries=2,
+            guardrail_max_retries=1,
             callback=record_task_completion_callback,
         )
 
@@ -261,7 +261,7 @@ class MultiAgent:
             ],
             output_file=self._task_output_file(self._settings().final_report_path),
             guardrail=validate_report_writer_output,
-            guardrail_max_retries=2,
+            guardrail_max_retries=0,
             callback=record_task_completion_callback,
         )
 
@@ -272,7 +272,7 @@ class MultiAgent:
             context=[self.investment_report_task(), self.data_quality_review_task()],
             output_file=self._task_output_file(self._artifact_path("09_logic_compliance_review.md")),
             guardrail=validate_report_review_output,
-            guardrail_max_retries=2,
+            guardrail_max_retries=1,
             callback=record_task_completion_callback,
         )
 
@@ -318,7 +318,7 @@ class MultiAgent:
             context=[],
             output_file=self._task_output_file(self._artifact_path("08_data_quality_review.md")),
             guardrail=validate_analysis_review_output,
-            guardrail_max_retries=2,
+            guardrail_max_retries=1,
             callback=record_task_completion_callback,
         )
         return self._make_crew(tasks=[reviewer])
@@ -385,7 +385,7 @@ class MultiAgent:
                 agent=agent_factory(),
                 context=context,
                 output_file=self._task_output_file(self._artifact_path(output_name)),
-                guardrail_max_retries=2,
+                guardrail_max_retries=0,
                 callback=record_task_completion_callback,
             )
         tasks = list(tasks_by_target.values())
@@ -401,7 +401,7 @@ class MultiAgent:
             agent=self.report_writing_analyst(),
             output_file=self._task_output_file(self._artifact_path("04_writer_payload.json")),
             guardrail=validate_report_writer_output,
-            guardrail_max_retries=2,
+            guardrail_max_retries=0,
             callback=record_task_completion_callback,
         )
         reviewer = Task(
@@ -411,7 +411,7 @@ class MultiAgent:
             context=[writer],
             output_file=self._task_output_file(self._artifact_path("09_logic_compliance_review.md")),
             guardrail=validate_report_review_output,
-            guardrail_max_retries=2,
+            guardrail_max_retries=1,
             callback=record_task_completion_callback,
         )
         return self._make_crew(tasks=[writer, reviewer])
@@ -424,7 +424,7 @@ class MultiAgent:
             agent=self.report_writing_analyst(),
             output_file=self._task_output_file(self._artifact_path("04_writer_payload.json")),
             guardrail=validate_report_writer_output,
-            guardrail_max_retries=2,
+            guardrail_max_retries=0,
             callback=record_task_completion_callback,
         )
         return self._make_crew(tasks=[writer])
@@ -445,7 +445,7 @@ class MultiAgent:
             context=[],
             output_file=self._task_output_file(self._artifact_path("09_logic_compliance_review.md")),
             guardrail=validate_report_review_output,
-            guardrail_max_retries=2,
+            guardrail_max_retries=1,
             callback=record_task_completion_callback,
         )
         return self._make_crew(tasks=[reviewer])
