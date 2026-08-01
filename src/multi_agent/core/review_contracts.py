@@ -283,6 +283,7 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
             canonical_outcome = {
                 "pass": "pass",
                 "passed": "pass",
+                "formal_report": "pass",
                 "formal_report_allowed": "pass",
                 "rerun": "rerun",
                 "block": "block",

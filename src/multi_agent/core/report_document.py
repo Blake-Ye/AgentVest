@@ -182,6 +182,16 @@ class ReportWriterPayload(BaseModel):
             normalized.append(text if text is not None else item)
         return normalized
 
+    @field_validator("sources", mode="before")
+    @classmethod
+    def normalize_source_ids(cls, value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        return [
+            {"source_id": item} if isinstance(item, str) and item.strip() else item
+            for item in value
+        ]
+
     @model_validator(mode="after")
     def validate_section_keys(self) -> "ReportWriterPayload":
         actual_keys = tuple(self.sections)

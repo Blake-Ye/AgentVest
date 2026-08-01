@@ -846,8 +846,18 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
     def _report_events(bundle: ResearchEvidenceBundle) -> list[EventEvidence]:
         selected: list[EventEvidence] = []
         seen: set[str] = set()
+        entity_terms = {
+            term
+            for term in re.findall(r"\w+", bundle.company_name.casefold())
+            if len(term) >= 3 and term not in {"company", "corp", "corporation", "inc", "limited", "ltd", "plc"}
+        }
+        if bundle.ticker.strip():
+            entity_terms.add(bundle.ticker.casefold())
         for event in bundle.events:
             if not event.independently_confirmed:
+                continue
+            event_identity = f"{event.title} {event.source_url}".casefold()
+            if entity_terms and not any(term in event_identity for term in entity_terms):
                 continue
             key = event.corroboration_key or event.event_id
             if key in seen:
@@ -955,6 +965,7 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     def _report_review_context_json(self, context: ReportGenerationContext) -> str:
+        bundle = context.evidence_bundle
         payload = {
             "company_name": context.company_name,
             "ticker": context.ticker,
@@ -962,6 +973,40 @@ class MarketReviewFlow(Flow[MarketReviewFlowState]):
             "analysis_review_contract": self._compact_analysis_contract(context),
             "allowed_claim_ids": list(context.allowed_claim_ids),
             "allowed_source_ids": [source.source_id for source in context.canonical_sources()],
+            "evidence_snapshot": {
+                "financial_facts": [
+                    {
+                        "source_id": f"claim:{fact.field_name}",
+                        "value": fact.value,
+                        "unit": fact.unit,
+                        "period_end": str(fact.period_end) if fact.period_end else None,
+                        "form": fact.form,
+                    }
+                    for fact in bundle.formal_facts()
+                ],
+                "market_snapshots": [
+                    {
+                        "source_id": f"market:{index}",
+                        "price": snapshot.price,
+                        "currency": snapshot.currency,
+                        "observed_at": (
+                            snapshot.observed_at.isoformat()
+                            if snapshot.observed_at is not None
+                            else None
+                        ),
+                    }
+                    for index, snapshot in enumerate(bundle.market_snapshots)
+                ],
+                "events": [
+                    {
+                        "source_id": f"event:{event.event_id}",
+                        "title": event.title,
+                        "confidence": event.confidence,
+                        "independently_confirmed": event.independently_confirmed,
+                    }
+                    for event in self._report_events(bundle)
+                ],
+            },
             "revision_instructions": list(context.revision_instructions),
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

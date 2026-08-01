@@ -363,6 +363,20 @@ def test_writer_guardrail_normalizes_described_catalysts_and_risks() -> None:
     assert normalized_payload["risks"] == ["服务增长放缓风险。"]
 
 
+def test_writer_guardrail_normalizes_source_id_strings() -> None:
+    payload = _formal_payload()
+    payload["sources"] = ["sec-10k"]
+
+    class Output:
+        raw = json.dumps(payload, ensure_ascii=False)
+
+    accepted, normalized = report_document_module.validate_report_writer_output(Output())
+
+    assert accepted is True
+    normalized_payload = json.loads(str(normalized))
+    assert normalized_payload["sources"] == [{"source_id": "sec-10k"}]
+
+
 @pytest.mark.parametrize(
     ("mode", "stance", "field", "value"),
     [

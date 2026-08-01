@@ -210,6 +210,9 @@ logic_compliance_review_task:
     把待验证事项写成已确认事实、或遗漏必要受限说明/阻断说明。
     Step 3. 审查 claim-to-source binding，统计 claim_binding_ratio，并把无法回指的关键 claim
     记为 claim_unbound，把受限模式下仍使用 formal 口吻的句子记为 report_overreach。
+    source_id 存在不等于语义已获支持；必须逐项对照 REPORT_CONTEXT_JSON.evidence_snapshot。
+    任何未由快照直接支持的数字、同比/占比方向、因果推断或事件主体错配都必须判为 rerun，
+    低置信度事件不得升级为确定事实或正式投资结论。
     Step 4. 先输出 JSON code block，JSON 必须严格符合 AgentVest ReviewContract，
     stage 必须为 report_review，且使用 coverage_summary、tool_health_summary 和
     repair_actions；decision 仅表示审查建议，不是最终真值。

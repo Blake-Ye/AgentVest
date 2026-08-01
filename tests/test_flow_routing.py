@@ -2410,6 +2410,24 @@ def test_analysis_review_guardrail_normalizes_numeric_decision_and_tool_details(
     assert contract.coverage_summary.claim_binding_ratio == 1.0
 
 
+def test_analysis_review_guardrail_normalizes_formal_report_outcome_alias() -> None:
+    payload = _typed_contract().model_dump(mode="json")
+    payload["decision"]["gate_outcome"] = "formal_report"
+
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n```json\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n```"
+        )
+
+    accepted, normalized_raw = validate_analysis_review_output(Output())
+    contract = review_contract_from_text(str(normalized_raw), expected_stage="analysis_review")
+
+    assert accepted is True
+    assert contract is not None
+    assert contract.decision.gate_outcome == "pass"
+
+
 def test_report_review_guardrail_lifts_unambiguous_fields_nested_in_decision() -> None:
     payload = _typed_report_contract().model_dump(mode="json")
     decision = payload["decision"]
@@ -3115,7 +3133,7 @@ def test_report_llm_contexts_are_stage_specific_and_compact() -> None:
     events = [
         EventEvidence(
             event_id=f"event-{group}-{source}",
-            title=f"Confirmed event theme {group} source {source}",
+            title=f"Apple confirmed event theme {group} source {source}",
             source_url=f"https://source{source}.example.com/theme-{group}",
             source_type="news",
             confidence=0.8,
@@ -3194,9 +3212,53 @@ def test_report_llm_contexts_are_stage_specific_and_compact() -> None:
         "allow_limited_delivery",
     }
     assert "evidence_bundle" not in reviewer
+    assert reviewer["evidence_snapshot"]["financial_facts"]
+    assert reviewer["evidence_snapshot"]["market_snapshots"]
+    assert len(reviewer["evidence_snapshot"]["events"]) == 5
+    assert set(reviewer["evidence_snapshot"]["financial_facts"][0]) == {
+        "source_id",
+        "value",
+        "unit",
+        "period_end",
+        "form",
+    }
+    assert set(reviewer["evidence_snapshot"]["events"][0]) == {
+        "source_id",
+        "title",
+        "confidence",
+        "independently_confirmed",
+    }
     assert reviewer["report_mode"] == "formal_report"
     assert reviewer["allowed_claim_ids"] == writer["allowed_claim_ids"]
     assert reviewer["allowed_source_ids"]
+
+
+def test_report_events_skip_irrelevant_first_result_within_topic() -> None:
+    events = [
+        EventEvidence(
+            event_id="irrelevant",
+            title="Musk and Altman lawsuit timeline",
+            source_url="https://example.com/irrelevant",
+            source_type="news",
+            confidence=0.6,
+            independently_confirmed=True,
+            corroboration_key="openai-governance",
+        ),
+        EventEvidence(
+            event_id="apple-lawsuit",
+            title="Apple sues OpenAI over trade secrets",
+            source_url="https://example.com/apple-lawsuit",
+            source_type="news",
+            confidence=0.6,
+            independently_confirmed=True,
+            corroboration_key="openai-governance",
+        ),
+    ]
+    bundle = _typed_bundle().model_copy(update={"events": events})
+
+    selected = MarketReviewFlow._report_events(bundle)
+
+    assert [event.event_id for event in selected] == ["apple-lawsuit"]
 
 
 @pytest.mark.parametrize(
