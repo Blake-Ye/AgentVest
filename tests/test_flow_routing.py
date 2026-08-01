@@ -2379,6 +2379,37 @@ def test_analysis_review_guardrail_drops_redundant_failure_flags() -> None:
     assert "research_blocked" not in str(normalized_raw)
 
 
+def test_analysis_review_guardrail_normalizes_numeric_decision_and_tool_details() -> None:
+    payload = _typed_contract().model_dump(mode="json")
+    payload["decision"] = {
+        "gate_outcome": "formal_report_allowed",
+        "decision_confidence": 0.88,
+    }
+    payload["coverage_summary"].update({
+        "total_claims_reviewed": 16,
+        "covered_claims": 16,
+        "unsupported_critical_claim_count": 0,
+        "market_policy_violation_count": 0,
+        "missing_gate_fields": [],
+        "missing_required_fields": ["free_cash_flow"],
+    })
+
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n```json\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n```"
+        )
+
+    accepted, normalized_raw = validate_analysis_review_output(Output())
+    contract = review_contract_from_text(str(normalized_raw), expected_stage="analysis_review")
+
+    assert accepted is True
+    assert contract is not None
+    assert contract.decision.gate_outcome == "pass"
+    assert contract.decision.decision_confidence == "high"
+    assert contract.coverage_summary.claim_binding_ratio == 1.0
+
+
 def test_report_review_guardrail_lifts_unambiguous_fields_nested_in_decision() -> None:
     payload = _typed_report_contract().model_dump(mode="json")
     decision = payload["decision"]
@@ -2402,6 +2433,31 @@ def test_report_review_guardrail_lifts_unambiguous_fields_nested_in_decision() -
     assert contract.delivery_eligibility.formal_report_allowed is True
     assert contract.failure_taxonomy.primary_class == "none"
     assert "stage_decision" not in str(normalized_raw)
+
+
+def test_report_review_guardrail_normalizes_aggregate_coverage_and_empty_causes() -> None:
+    payload = _typed_report_contract().model_dump(mode="json")
+    payload["failure_taxonomy"]["secondary_causes"] = ""
+    payload["coverage_summary"].update({
+        "total_claims_in_report": 25,
+        "bound_claims": 25,
+        "unbound_claims": [],
+        "report_overreach_instances": [],
+    })
+
+    class Output:
+        raw = (
+            "PART A: MACHINE_READABLE_JSON\n```json\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n```"
+        )
+
+    accepted, normalized_raw = validate_report_review_output(Output())
+    contract = review_contract_from_text(str(normalized_raw), expected_stage="report_review")
+
+    assert accepted is True
+    assert contract is not None
+    assert contract.failure_taxonomy.secondary_causes == []
+    assert contract.coverage_summary.claim_binding_ratio == 1.0
 
 
 def test_report_review_guardrail_normalizes_legacy_scalar_contract_shape() -> None:

@@ -217,6 +217,23 @@ _REDUNDANT_FAILURE_FLAGS = {
     "market_mismatch",
     "tool_failure",
 }
+_COVERAGE_DETAIL_KEYS = {
+    "bound_claims",
+    "claim_unbound",
+    "covered_claims",
+    "market_policy_violation_count",
+    "missing_gate_fields",
+    "missing_required_fields",
+    "missing_required_sections",
+    "report_overreach",
+    "report_overreach_instances",
+    "report_sections_present",
+    "total_claims_in_report",
+    "total_claims_reviewed",
+    "unbound_claims",
+    "unsupported_claims",
+    "unsupported_critical_claim_count",
+}
 
 
 def _tool_status(value: object) -> tuple[str, str]:
@@ -261,7 +278,7 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
                 normalized[key] = decision.pop(key)
             elif key in normalized and normalized[key] == nested_value:
                 decision.pop(key)
-        for alias in ("stage_decision", "outcome"):
+        for alias in ("gate_outcome", "stage_decision", "outcome"):
             alias_value = decision.get(alias)
             canonical_outcome = {
                 "pass": "pass",
@@ -271,11 +288,19 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
                 "block": "block",
                 "blocked": "block",
             }.get(str(alias_value).strip().lower())
-            if "gate_outcome" not in decision and canonical_outcome is not None:
+            if canonical_outcome is not None and alias == "gate_outcome":
+                decision["gate_outcome"] = canonical_outcome
+            elif "gate_outcome" not in decision and canonical_outcome is not None:
                 decision["gate_outcome"] = canonical_outcome
                 decision.pop(alias)
             elif decision.get("gate_outcome") == canonical_outcome:
                 decision.pop(alias, None)
+        confidence = decision.get("decision_confidence")
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+            if 0.0 <= float(confidence) <= 1.0:
+                decision["decision_confidence"] = (
+                    "high" if confidence >= 0.8 else "medium" if confidence >= 0.5 else "low"
+                )
         decision_reason = decision.pop("reason", None)
         normalized["decision"] = decision
 
@@ -310,18 +335,16 @@ def normalize_review_contract_payload(payload: dict[str, object]) -> dict[str, o
             and taxonomy.get("primary_class") == "minor_unbound_data_points"
         ):
             taxonomy["primary_class"] = "unsupported_claim"
+        if isinstance(taxonomy.get("secondary_causes"), str):
+            cause = str(taxonomy["secondary_causes"]).strip()
+            taxonomy["secondary_causes"] = [cause] if cause else []
         normalized["failure_taxonomy"] = taxonomy
 
     coverage = normalized.get("coverage_summary")
-    if normalized.get("stage") in {"report", "report_review"} and isinstance(coverage, dict):
+    if isinstance(coverage, dict):
         canonical_coverage = dict(coverage)
-        for report_only_key in (
-            "report_sections_present",
-            "missing_required_sections",
-            "claim_unbound",
-            "report_overreach",
-        ):
-            canonical_coverage.pop(report_only_key, None)
+        for detail_key in _COVERAGE_DETAIL_KEYS:
+            canonical_coverage.pop(detail_key, None)
         normalized["coverage_summary"] = canonical_coverage
 
     summary = normalized.get("review_summary")

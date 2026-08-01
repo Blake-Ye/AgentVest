@@ -169,17 +169,30 @@ def test_all_outputs_share_the_same_canonical_document(
     assert "## 财务分析与估值" in markdown
 
 
-def test_formal_document_rejects_unbound_or_unknown_critical_claim(
+def test_formal_document_rejects_unbound_critical_claim(
     formal_apple_document: ReportDocument,
 ) -> None:
     payload = formal_apple_document.model_dump()
     payload["claims"][0]["source_ids"] = []
     with pytest.raises(ValidationError, match="critical claim"):
         ReportDocument.model_validate(payload)
+
+
+def test_formal_document_allows_local_claim_ids_bound_to_canonical_sources(
+    formal_apple_document: ReportDocument,
+) -> None:
     payload = formal_apple_document.model_dump()
-    payload["claims"][0]["claim_id"] = "unknown-claim"
-    with pytest.raises(ValidationError, match="allowed_claim_ids"):
-        ReportDocument.model_validate(payload)
+    payload["claims"][0]["claim_id"] = "claim_revenue"
+    for section in payload["sections"].values():
+        section["claim_ids"] = [
+            "claim_revenue" if claim_id == "apple-revenue" else claim_id
+            for claim_id in section["claim_ids"]
+        ]
+
+    document = ReportDocument.model_validate(payload)
+
+    assert document.claims[0].claim_id == "claim_revenue"
+    assert document.claims[0].source_ids == ["sec-10k"]
 
 
 @pytest.mark.parametrize("field", ["url", "title"])

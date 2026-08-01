@@ -1566,6 +1566,36 @@ def test_materialize_outputs_explains_skipped_logic_review_for_analysis_block(tm
     assert "PLACEHOLDER" not in content
 
 
+def test_materialize_outputs_explains_limited_delivery_after_report_review_failure(
+    tmp_path: Path,
+) -> None:
+    from multi_agent import main
+
+    output_paths = _build_run_output_paths(
+        base_artifacts_dir=tmp_path / "artifacts",
+        company_name="Apple Inc.",
+        company_ticker="AAPL",
+        run_time=datetime(2026, 6, 15, 10, 30, 45),
+    )
+    output_paths.run_dir.mkdir(parents=True)
+    main._initialize_standard_output_files(
+        output_paths, company_name="Apple Inc.", company_ticker="AAPL"
+    )
+
+    main._materialize_standard_outputs(
+        output_paths,
+        {
+            "status": "evidence_limited",
+            "blocking_reasons": ["report_review_guardrail_exhausted"],
+        },
+    )
+
+    content = output_paths.logic_compliance_review_path.read_text(encoding="utf-8")
+    assert "证据受限" in content
+    assert "report_review_guardrail_exhausted" in content
+    assert "PLACEHOLDER" not in content
+
+
 def test_post_delivery_failure_preserves_committed_terminal_package(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

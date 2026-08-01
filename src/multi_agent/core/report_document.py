@@ -322,10 +322,6 @@ class ReportDocument(BaseModel):
                     raise ValueError(
                         f"{claim_label} {claim.claim_id} must bind at least one source"
                     )
-                if claim.claim_id not in self.allowed_claim_ids:
-                    raise ValueError(
-                        f"{claim_label} {claim.claim_id} is not in allowed_claim_ids"
-                    )
 
         for section in self.sections.values():
             unknown_claim_ids = set(section.claim_ids) - known_claim_ids

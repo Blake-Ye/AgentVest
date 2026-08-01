@@ -108,6 +108,10 @@ data_quality_review_task:
     所有 value 必须是字符串，数值、布尔值或嵌套对象必须先转为字符串。
     failure_taxonomy 仅含 primary_class、secondary_causes，禁止添加 research_blocked、
     pipeline_degraded、evidence_insufficient、market_mismatch、tool_failure 等布尔解释字段。
+    coverage_summary 仅含 evidence_coverage_ratio、financial_coverage_score、
+    gate_financial_coverage_score、claim_binding_ratio、critical_conflict_count、
+    unresolved_critical_claim_count、market_policy_violations、unsupported_critical_claims、
+    blocking_reasons，不得复制 reviewer tool 的计数或 missing_fields 明细。
     critical_conflict_count 表示检测到的冲突，只有尚未解决的关键冲突才能计入
     unresolved_critical_claim_count。针对 report_writing_analyst 的 repair action 只作为
     下游写作指令，不得要求分析阶段重跑。
@@ -176,10 +180,12 @@ investment_report_task:
     必须是包含 heading、content、claim_ids 的对象。stance 只能是 buy、hold、sell、watch、
     blocked 之一。每个 claim 必须包含 claim_id、text、critical、source_ids；每个 source
     只能包含 source_id，不得复制或改写 title、url、source_tag、field_name；这些字段由 Flow
-    从 canonical registry 注入。claim_id 和 source_id 必须来自 REPORT_CONTEXT_JSON 中的
-    allowed_claim_ids 与 canonical_sources_json。不得输出 markdown，不得输出 final_decision、
+    从 canonical registry 注入。claim_id 是当前 payload 内唯一的本地标识；source_id 必须来自
+    REPORT_CONTEXT_JSON 中的 canonical_sources_json。不得输出 markdown，不得输出 final_decision、
     report_mode、company_name、ticker 或 trust_score，也不得自行选择终态。formal_report
-    下 catalysts 与 risks 必须分别是非空字符串数组，数组元素不得使用对象；
+    下 stance 必须是 buy、hold 或 sell，catalysts 与 risks 必须分别是非空字符串数组，
+    数组元素不得使用对象；evidence_limited_report 的 stance 必须是 watch，blocked_notice
+    的 stance 必须是 blocked；
     且 executive_summary、financial_analysis、investment_conclusion 三个核心章节的
     claim_ids 都必须至少包含一个 critical=true 的 claim_id；每个 section 的 content
     不超过 600 个中文字符。
@@ -217,6 +223,10 @@ logic_compliance_review_task:
     one_sentence_summary、operator_notes；repair_actions 每项仅含 target、code、fields、
     sources、instruction，禁止使用 description；artifact_refs 每项必须是对象，且对象内
     所有 value 必须是字符串，数值、布尔值或嵌套对象必须先转为字符串。
+    coverage_summary 仅含 evidence_coverage_ratio、financial_coverage_score、
+    gate_financial_coverage_score、claim_binding_ratio、critical_conflict_count、
+    unresolved_critical_claim_count、market_policy_violations、unsupported_critical_claims、
+    blocking_reasons，不得添加 claim 计数、unbound_claims 或 report_overreach 明细字段。
     Step 5. 再输出 markdown 审查说明，只解释 JSON，不得新增机器判定。
     Flow 会将 PART A 严格校验后持久化为 09_logic_compliance_review.json；输出格式必须严格按顺序输出：
     PART A: MACHINE_READABLE_JSON

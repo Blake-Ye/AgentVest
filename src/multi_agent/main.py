@@ -306,6 +306,24 @@ def _materialize_standard_outputs(output_paths: RunOutputPaths, result: object) 
             "\n".join(body),
             placeholder=False,
         )
+    elif final_status == "evidence_limited" and _is_placeholder_file(
+        output_paths.logic_compliance_review_path
+    ):
+        reasons = _blocking_reasons_from_result(result)
+        body = [
+            "状态：报告复核未完整结束，已降级为证据受限交付。",
+            "",
+            "降级原因：",
+            *(f"- {reason}" for reason in reasons),
+        ]
+        if not reasons:
+            body.append("- 最终逻辑审查未形成有效合同。")
+        _write_markdown_file(
+            output_paths.logic_compliance_review_path,
+            "逻辑与合规审查结果",
+            "\n".join(body),
+            placeholder=False,
+        )
 
 
 def _workflow_result_value(result: object, key: str, default: object = "") -> object:
